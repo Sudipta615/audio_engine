@@ -319,23 +319,32 @@ fn reported_latency_matches_ir_group_delay() {
     assert!(graph.correction().is_active());
 
     let min_ms = graph.correction().latency_ms(FS as f32);
+    // The node's declared latency is the IR group delay PLUS the partitioned
+    // convolution engine's FFT block. Under `PhaseMode::Minimum` the IR group
+    // delay is 0, but the convolution still delays by its 512-sample block —
+    // the assertion below used to require exactly 0 ms, which claimed a stage
+    // delayed by a full partition added no latency at all. That under-report
+    // fed the engine's playhead compensation.
+    let block_ms = 512.0 / FS as f32 * 1000.0;
+    let min_expected = (min.delay_samples as f32 / FS as f32) * 1000.0 + block_ms;
     assert!(
-        (min_ms - (min.delay_samples as f32 / FS as f32) * 1000.0).abs() < 1e-3,
-        "min-phase latency {min_ms} ms != declared delay {} ms",
+        (min_ms - min_expected).abs() < 1e-3,
+        "min-phase latency {min_ms} ms != expected (IR delay {} ms + block {block_ms} ms)",
         (min.delay_samples as f32 / FS as f32) * 1000.0
     );
-    assert!(min_ms == 0.0, "min-phase correction must add no latency");
-    // The partition block is the engine's own convolution artifact (one
-    // 512-sample block), so the reported total sits in [delay, delay + block].
-    let block_ms = 512.0 / FS as f32 * 1000.0;
+    assert!(
+        min_ms >= block_ms,
+        "min-phase correction must still declare the convolution block delay"
+    );
 
     graph.load_correction_ir(Arc::new(lin.clone()));
     graph.drain_queued_control();
     let lin_ms = graph.correction().latency_ms(FS as f32);
     let lin_delay_ms = (lin.delay_samples / FS) * 1000.0;
+    let lin_expected = lin_delay_ms + block_ms as f64;
     assert!(
-        (lin_ms as f64 - lin_delay_ms).abs() < 1e-3,
-        "linear-phase latency {lin_ms} ms != declared delay {lin_delay_ms} ms"
+        (lin_ms as f64 - lin_expected).abs() < 1e-3,
+        "linear-phase latency {lin_ms} ms != expected (IR delay {lin_delay_ms} ms + block {block_ms} ms)"
     );
     assert!(lin_delay_ms > 0.0, "linear phase must declare a real delay");
 

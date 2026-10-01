@@ -9,6 +9,30 @@ use crate::dsp::resampler::GenericResampler;
 
 use super::{MAX_PENDING_OUTPUT_FRAMES, MIX_BLOCK_FRAMES};
 
+/// Frames refused by the pending-output FIFO because it was at its bound.
+///
+/// This is a plain atomic bump, deliberately NOT a `log::warn!`. Both push
+/// sites are on the decode loop and are called per audio frame, so once the
+/// FIFO reaches 16384 frames (341 ms at 48 kHz — a normal condition whenever
+/// the DAC falls behind) every subsequent frame of every tick would have hit
+/// the log branch. That is up to ~11,000 `log` invocations per second, each
+/// taking the logger's global mutex and doing a blocking write on a path the
+/// realtime contract forbids. Counting is allocation-free and lock-free; the
+/// control thread reads and reports it.
+static PENDING_FIFO_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record a refused frame and return whether this call was the first, so a
+/// caller that *is* off the audio path can log the event exactly once.
+#[inline]
+fn note_pending_fifo_refused() -> bool {
+    PENDING_FIFO_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0
+}
+
+/// Take and reset the refused-frame count. Control side / diagnostics.
+pub(crate) fn take_pending_fifo_refused() -> u64 {
+    PENDING_FIFO_REFUSED.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Block size for the post-mix chain during crossfade transitions.
 /// The mixer stays per-frame (stateful), but mixed frames are collected
 /// into blocks of this size before the post-mix chain runs over them.
@@ -156,7 +180,7 @@ pub(crate) fn push_pending_back_bounded(
     if fifo.len() < MAX_PENDING_OUTPUT_FRAMES && fifo.len() < fifo.capacity() {
         fifo.push_back(frame);
     } else {
-        log::warn!("pending output buffer is full; preserving the bound");
+        let _ = note_pending_fifo_refused();
     }
 }
 
@@ -207,7 +231,7 @@ impl AudioEngine {
         {
             self.scratch.pending_output_frames.push_front(frame);
         } else {
-            log::warn!("pending output buffer is full; preserving the bound");
+            let _ = note_pending_fifo_refused();
         }
     }
 

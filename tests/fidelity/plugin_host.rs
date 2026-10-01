@@ -298,7 +298,7 @@ fn worst_case_plugin_is_caught_by_the_counter() {
 /// Build the worst-case vtable: the echo vtable with the `process` entry
 /// replaced by an allocating stub.
 fn worst_case_vtable() -> plugin_abi::PluginVTable {
-    unsafe extern "C" fn allocating_process(
+    unsafe extern "C-unwind" fn allocating_process(
         _instance: *mut std::ffi::c_void,
         block: *const plugin_abi::AudioBlockMut,
     ) -> i32 {

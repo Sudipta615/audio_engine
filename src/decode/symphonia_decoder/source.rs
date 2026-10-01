@@ -110,6 +110,32 @@ impl SymphoniaDecoder {
             .as_ref()
             .map(|c| c.count())
             .unwrap_or(2);
+        // Reject a zero channel count HERE, at the single point every consumer
+        // derives its width from.
+        //
+        // `Channels::count()` can legitimately return 0 for a container whose
+        // declared count survived demux validation but did not survive the
+        // container's own cast — symphonia-format-mkv builds
+        // `Channels::Discrete(u16)` from a `NonZeroU64` with a truncating
+        // `as u16`, so `Audio.channels = 65536` becomes 0. Every downstream
+        // frame path then computes `len / channels`, which is a divide by zero
+        // panic on the first `decode_next`. WAV rejects 0 upstream, so this was
+        // reachable only via the containers that truncate.
+        //
+        // The upper bound is the same reason: the engine's downstream buffers
+        // are MAX_CHANNELS wide, so a larger count would be truncated later
+        // anyway — better to say so than to decode a truncated stream.
+        if src_channels == 0 {
+            return Err(DecodeError::UnsupportedFormat(
+                "container declares zero audio channels".to_string(),
+            ));
+        }
+        if src_channels > crate::buffer::MAX_CHANNELS {
+            return Err(DecodeError::UnsupportedFormat(format!(
+                "container declares {src_channels} audio channels, over the {} the engine supports",
+                crate::buffer::MAX_CHANNELS
+            )));
+        }
         let channel_layout = ChannelLayout::from_count(src_channels);
         let channels = src_channels;
 

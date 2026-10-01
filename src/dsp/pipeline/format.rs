@@ -350,6 +350,16 @@ pub struct EngineStats {
     pub clip_count: u32,
     /// Device underruns observed in the current reporting window (≈2 s).
     pub underruns: u32,
+    /// Audio frames refused by the decode loop's pending-output FIFO because
+    /// it was at its preallocated bound.
+    ///
+    /// This is a decode-loop backpressure indicator: a non-zero value means the
+    /// output could not consume samples as fast as they were decoded, which
+    /// precedes an underrun. It was previously a `log::warn!` per refused
+    /// frame on the decode loop — up to ~11,000 logging calls per second, each
+    /// taking the logger's global mutex and doing a blocking write on the audio
+    /// path — so it is counted here instead.
+    pub pending_fifo_refused_frames: u64,
     pub output_latency_ms: f32,
     pub latency_report: LatencyReport,
 

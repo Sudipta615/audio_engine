@@ -69,6 +69,25 @@ impl BallisticEnvelope {
     #[inline]
     pub fn process_sample(&mut self, input_level: f32) -> f32 {
         let x = input_level.abs();
+
+        // Non-finite recovery. NaN latches here permanently: `x >= envelope`
+        // and `hold_counter > 0` are both false for NaN, so control reaches the
+        // release branch and `envelope = NaN + coeff * (NaN - NaN)` = NaN.
+        // Once latched, `envelope < 1e-15` is false for NaN so the flush below
+        // does not clear it either — and every downstream gain computation
+        // then silently produces no compression for the rest of the track.
+        // Substituting zero and returning the last good envelope is a
+        // one-sample event instead of a permanent one.
+        if !x.is_finite() {
+            return self.envelope.max(0.0);
+        }
+        // An envelope that has already gone bad must be recovered too, or the
+        // bad value keeps being returned forever.
+        if !self.envelope.is_finite() {
+            self.envelope = 0.0;
+            self.hold_counter = 0;
+        }
+
         if x >= self.envelope {
             // Attack phase
             self.envelope = x + self.attack_coeff * (self.envelope - x);

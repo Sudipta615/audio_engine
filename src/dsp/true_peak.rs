@@ -162,6 +162,8 @@ pub struct TruePeakMeter {
     pos: usize,
     max_true_peak_linear: f64,
     max_sample_peak_linear: f64,
+    /// Count of non-finite samples substituted by [`Self::process_sample`].
+    non_finite_substitutions: u64,
 }
 
 impl Default for TruePeakMeter {
@@ -177,13 +179,28 @@ impl TruePeakMeter {
             pos: 0,
             max_true_peak_linear: 0.0,
             max_sample_peak_linear: 0.0,
+            non_finite_substitutions: 0,
         }
     }
 
     /// Feed one sample (f64) and return the 4×-oversampled true-peak
     /// magnitude for this sample: `max(|sample|, |4 polyphase points|)`.
     #[inline]
+    /// Process one sample and return the 4× interpolated true peak for it.
+    ///
+    /// A non-finite input is substituted with zero and the running maxima are
+    /// left untouched. Without this, one `Inf` sample would stick in the FIR
+    /// history, make every subsequent `max_true_peak_linear` infinite (nothing
+    /// ever flushes those), and pin the limiter's gain to zero for the rest of
+    /// the stream. The substitution is counted so the control thread can
+    /// report it.
     pub fn process_sample(&mut self, sample: f64) -> f64 {
+        let sample = if sample.is_finite() {
+            sample
+        } else {
+            self.non_finite_substitutions = self.non_finite_substitutions.saturating_add(1);
+            0.0
+        };
         self.buf[self.pos] = sample;
         self.buf[self.pos + BRANCH_TAPS] = sample;
         let start = self.pos + 1;
@@ -201,10 +218,21 @@ impl TruePeakMeter {
             max_abs = max_abs.max(acc.abs());
         }
         max_abs = flush_denormal_f64(max_abs);
+        // An overflow inside the polyphase dot product is the same failure
+        // arriving from arithmetic rather than from the input.
+        if !max_abs.is_finite() {
+            self.non_finite_substitutions = self.non_finite_substitutions.saturating_add(1);
+            return 0.0;
+        }
 
         self.max_sample_peak_linear = self.max_sample_peak_linear.max(sample.abs());
         self.max_true_peak_linear = self.max_true_peak_linear.max(max_abs);
         max_abs
+    }
+
+    /// How many non-finite samples this meter has had to substitute.
+    pub fn non_finite_substitutions(&self) -> u64 {
+        self.non_finite_substitutions
     }
 
     /// Reset the filter history and running maxima.

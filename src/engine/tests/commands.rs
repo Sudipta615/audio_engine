@@ -94,12 +94,22 @@ fn test_graph_latency_is_authoritative_sum() {
 
     assert!(report.limiter_detector_delay_ms <= report.limiter_lookahead_ms + 1e-6);
 
+    // The limiter's full audio delay line is `lookahead + detector`; the total
+    // must include BOTH. This previously omitted the detector term, which
+    // under-counted the total by 50 samples (~1.04 ms at 48 kHz) and was fed
+    // straight into playhead compensation.
     let expected_total = report.limiter_lookahead_ms
+        + report.limiter_detector_delay_ms
         + report.convolution_latency_ms
         + report.resampler_latency_ms
         + report.ring_buffer_latency_ms
         + report.output_device_latency_ms;
     assert!((report.total_latency_ms - expected_total).abs() < 1e-4);
+    // Guard against the specific regression: the total must be strictly
+    // greater than the window alone whenever a detector delay exists.
+    if report.limiter_detector_delay_ms > 0.0 {
+        assert!(report.total_latency_ms > report.limiter_lookahead_ms);
+    }
 }
 
 #[test]

@@ -208,7 +208,16 @@ impl DspGraph {
         };
         let crossfeed_delay_ms = self.crossfeed().crossfeed.latency_ms();
         let timestretch_latency_ms = self.timestretch().stretcher.latency_ms();
+        // The limiter's audio delay line is `lookahead + detector` — see
+        // `LookaheadLimiter::audio_delay_samples`. `lookahead_ms()` reports only
+        // the WINDOW, so omitting the detector term under-counts the total by
+        // 50 samples (the default Fir4x detector's group delay, ~1.04 ms at
+        // 48 kHz). The engine subtracts this total from every playhead update
+        // (`engine::tick::latency_compensation`), so the omission was a constant
+        // ~1 ms A/V offset. `DspGraph::total_latency_ms` below already used the
+        // full `latency_ms()`; these two functions disagreed.
         let total_latency_ms = limiter_lookahead_ms
+            + limiter_detector_delay_ms
             + convolution_latency_ms
             + correction_latency_ms
             + crossfeed_delay_ms

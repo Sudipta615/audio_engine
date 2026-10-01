@@ -386,6 +386,11 @@ impl AudioEngine {
             // ── Metering (per-window clips + device underruns) ──────────
             stats.clip_count = new_clips;
             stats.underruns = self.telemetry.underruns_window;
+            // Take (drain) the decode loop's pending-FIFO refusal count. It is
+            // a cumulative counter incremented on the decode loop, so this is
+            // how much accumulated in the last window.
+            stats.pending_fifo_refused_frames =
+                crate::engine::decode_loop::common::take_pending_fifo_refused();
             self.telemetry.underruns_total = self
                 .telemetry
                 .underruns_total

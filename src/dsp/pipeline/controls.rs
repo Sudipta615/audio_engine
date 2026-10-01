@@ -675,7 +675,11 @@ impl DspPipeline {
         let correction_latency_ms = 0.0;
         let crossfeed_delay_ms = self.crossfeed.latency_ms();
         let timestretch_latency_ms = self.timestretcher.latency_ms();
+        // The limiter's audio delay line is `lookahead + detector`; `lookahead_ms()`
+        // reports only the window. Same omission as the graph-side builder in
+        // `prod/arena/report.rs`, fixed here for the same reason.
         let total_latency_ms = limiter_lookahead_ms
+            + limiter_detector_delay_ms
             + convolution_latency_ms
             + correction_latency_ms
             + crossfeed_delay_ms

@@ -588,10 +588,16 @@ impl LookaheadLimiter {
         let mut clean_in = [0.0f64; crate::buffer::MAX_CHANNELS];
 
         for i in 0..ch {
-            let s = if in_samples[i].is_nan() {
+            // `is_finite`, not `is_nan`. An infinite sample latches
+            // `TruePeakMeter::max_abs = Inf` permanently (nothing ever flushes
+            // it), which drives `desired_gain = ceiling / Inf = 0` forever —
+            // and then `delayed * 0.0` yields `Inf * 0 = NaN`, which survives
+            // `clamp` because Rust's `clamp` returns NaN for NaN input. So the
+            // substitution has to catch infinities too, not just NaN.
+            let s = if !in_samples[i].is_finite() {
                 // Latch, do not log. This runs once per sample per channel
                 // on the audio path: a `log::error!` here is a format, an
-                // allocation and a logger lock for every NaN sample of every
+                // allocation and a logger lock for every bad sample of every
                 // block, and a malformed source would emit them by the
                 // million. `NaNSubstitutions` is read back by the control
                 // thread, which owns the log line.

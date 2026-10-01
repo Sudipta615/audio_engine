@@ -162,13 +162,16 @@ fn backend_from_id(id: u32) -> Option<config::AudioBackend> {
 /// caller must call `engine_destroy` to release resources.
 #[no_mangle]
 pub extern "C" fn engine_create(backend: u32) -> *mut EngineHandleFFI {
-    let mut config = EngineConfig::default();
-    config.output_backend = match backend_from_id(backend) {
+    let output_backend = match backend_from_id(backend) {
         Some(b) => b,
         None => {
             log::error!("engine_create: unknown backend id {backend}");
             return std::ptr::null_mut();
         }
+    };
+    let config = EngineConfig {
+        output_backend,
+        ..EngineConfig::default()
     };
 
     let engine = match AudioEngine::new(config) {
@@ -220,10 +223,7 @@ pub extern "C" fn engine_destroy(engine: *mut EngineHandleFFI) {
     match live_handles().lock() {
         Ok(mut live) => {
             if !live.remove(&(engine as usize)) {
-                log::warn!(
-                    "engine_destroy: handle {:p} is not live; ignoring",
-                    engine
-                );
+                log::warn!("engine_destroy: handle {:p} is not live; ignoring", engine);
                 return;
             }
         }

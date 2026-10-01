@@ -83,7 +83,12 @@ impl<T: AudioFloat> BiquadCoeffs<T> {
             log::warn!("Biquad: invalid frequency {}, clamping to 20", freq);
             20.0_f64
         } else {
-            (freq as f64).clamp(1.0, sr * 0.499)
+            // `f64::clamp` PANICS when min > max, which happens for any
+            // sample rate below ~2.004 Hz (the `sr * 0.499` bound drops under
+            // 1.0). Clamp the bound itself so a nonsensical rate degrades to a
+            // low-pass edge rather than an abort on the audio thread.
+            let hi = (sr * 0.499).max(1.0);
+            (freq as f64).clamp(1.0, hi)
         };
         let qv = if q <= 0.0 || !q.is_finite() {
             log::warn!("Biquad: invalid Q {}, clamping to 0.01", q);
@@ -92,6 +97,23 @@ impl<T: AudioFloat> BiquadCoeffs<T> {
             (q as f64).clamp(0.01, 100.0)
         };
         (sr, f, qv)
+    }
+
+    /// Clamp a gain in dB into a range that cannot produce non-finite
+    /// coefficients.
+    ///
+    /// `a = 10^(gain/40)`. An infinite or NaN gain makes `a` infinite or NaN,
+    /// and every numerator/denominator below then carries that through, so the
+    /// resulting coefficients latch in `BiquadState` (see its `process`).
+    /// |gain| above ~1400 dB overflows `a` to infinity outright. This bound is
+    /// far beyond any usable EQ setting while keeping `a` comfortably finite.
+    fn validate_gain_db(gain_db: f32) -> f64 {
+        const MAX_GAIN_DB: f32 = 48.0;
+        if !gain_db.is_finite() {
+            log::warn!("Biquad: non-finite gain_db, clamping to 0");
+            return 0.0;
+        }
+        gain_db.clamp(-MAX_GAIN_DB, MAX_GAIN_DB) as f64
     }
 
     /// Second-order (biquad) low-pass filter
@@ -137,7 +159,7 @@ impl<T: AudioFloat> BiquadCoeffs<T> {
     /// Peaking EQ filter
     pub fn peaking(sample_rate: f32, freq: f32, gain_db: f32, q: f32) -> Self {
         let (sr, f, qv) = Self::validate_params(sample_rate, freq, q);
-        let gain = gain_db as f64;
+        let gain = Self::validate_gain_db(gain_db);
         let a = 10.0_f64.powf(gain / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * f / sr;
         let cos_w0 = w0.cos();
@@ -159,7 +181,7 @@ impl<T: AudioFloat> BiquadCoeffs<T> {
     /// Low-shelf filter
     pub fn lowshelf(sample_rate: f32, freq: f32, gain_db: f32, q: f32) -> Self {
         let (sr, f, qv) = Self::validate_params(sample_rate, freq, q);
-        let gain = gain_db as f64;
+        let gain = Self::validate_gain_db(gain_db);
         let a = 10.0_f64.powf(gain / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * f / sr;
         let cos_w0 = w0.cos();
@@ -178,7 +200,7 @@ impl<T: AudioFloat> BiquadCoeffs<T> {
     /// High-shelf filter
     pub fn highshelf(sample_rate: f32, freq: f32, gain_db: f32, q: f32) -> Self {
         let (sr, f, qv) = Self::validate_params(sample_rate, freq, q);
-        let gain = gain_db as f64;
+        let gain = Self::validate_gain_db(gain_db);
         let a = 10.0_f64.powf(gain / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * f / sr;
         let cos_w0 = w0.cos();
@@ -412,9 +434,37 @@ impl<T: AudioFloat> BiquadState<T> {
     /// For `f32` precision: input is widened to `f64` for the recursion,
     /// output is narrowed back to `f32`.
     /// For `f64` precision: everything stays in `f64`.
+    ///
+    /// # Non-finite recovery
+    ///
+    /// A single `NaN` or `Inf` sample would otherwise latch in `z1`/`z2`
+    /// forever: the recursion is a feedback path, `NaN` propagates through
+    /// arithmetic, and `flush_denormal_f64` only zeroes values whose exponent
+    /// bits are all zero — `NaN`'s are all ones, so it passes through
+    /// untouched. Once latched, the filter can never recover and every
+    /// downstream stage of the chain is poisoned for the rest of the track.
+    ///
+    /// So a non-finite input resets the state and emits silence for that
+    /// sample, and a non-finite OUTPUT (an overflow, or NaN arriving from
+    /// upstream arithmetic) does the same. Two checks rather than one per
+    /// value: this is the hottest function in the engine, and the input check
+    /// is what stops the latch, while the output check catches an overflow
+    /// produced by the recursion itself.
+    ///
+    /// Coefficients are deliberately NOT checked here. They are validated
+    /// where they are produced — `validate_params` for frequency and Q,
+    /// `validate_gain_db` for gain — so a non-finite coefficient set is not
+    /// reachable, and re-testing five more values on every sample is not free.
     #[inline]
     pub fn process(&mut self, sample: T, coeffs: &BiquadCoeffs<T>) -> T {
         let s = sample.to_f64();
+
+        if !s.is_finite() {
+            self.z1 = 0.0;
+            self.z2 = 0.0;
+            return T::zero();
+        }
+
         let b0 = coeffs.b0.to_f64();
         let b1 = coeffs.b1.to_f64();
         let b2 = coeffs.b2.to_f64();
@@ -424,6 +474,14 @@ impl<T: AudioFloat> BiquadState<T> {
         let output = b0 * s + self.z1;
         self.z1 = crate::buffer::flush_denormal_f64(b1 * s - a1 * output + self.z2);
         self.z2 = crate::buffer::flush_denormal_f64(b2 * s - a2 * output);
+
+        // A non-finite output would latch into `z1`/`z2` on the NEXT sample, so
+        // this is where the latch is broken.
+        if !output.is_finite() {
+            self.z1 = 0.0;
+            self.z2 = 0.0;
+            return T::zero();
+        }
         T::from_f64(output)
     }
 
@@ -712,6 +770,66 @@ pub type BiquadCoeffs32 = BiquadCoeffs<f32>;
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    /// Regression: a single non-finite sample used to latch in `z1`/`z2`
+    /// permanently, poisoning every downstream stage for the rest of the
+    /// track. `flush_denormal_f64` does not help — it only zeroes values whose
+    /// exponent bits are all zero, and NaN's are all ones.
+    #[test]
+    fn non_finite_input_does_not_latch_the_filter_state() {
+        let coeffs = BiquadCoeffs::<f32>::identity();
+        let mut state = BiquadState::<f32>::default();
+
+        // Establish that the filter is passing signal.
+        assert_relative_eq!(state.process(0.5_f32, &coeffs), 0.5_f32, epsilon = 1e-6);
+
+        // Inject each non-finite value in turn.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let out = state.process(bad, &coeffs);
+            assert!(
+                out.is_finite(),
+                "a non-finite input must produce a finite sample, got {out}"
+            );
+            // The state must have been cleared, not merely the output masked.
+            assert_eq!(state.z1, 0.0, "z1 must be reset after {bad}");
+            assert_eq!(state.z2, 0.0, "z2 must be reset after {bad}");
+
+            // And the filter must still work afterwards.
+            let recovered = state.process(0.5_f32, &coeffs);
+            assert_relative_eq!(recovered, 0.5_f32, epsilon = 1e-6);
+        }
+    }
+
+    /// A non-finite *gain* must not produce non-finite coefficients, which
+    /// would latch through the same path. `gain_db` comes straight from
+    /// deserialized config and was previously unvalidated.
+    #[test]
+    fn non_finite_gain_does_not_produce_non_finite_coefficients() {
+        for gain in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0e30] {
+            let c = BiquadCoeffs::<f32>::peaking(48_000.0, 1_000.0, gain, 1.0);
+            for (name, v) in [
+                ("b0", c.b0),
+                ("b1", c.b1),
+                ("b2", c.b2),
+                ("a1", c.a1),
+                ("a2", c.a2),
+            ] {
+                assert!(
+                    v.is_finite(),
+                    "gain {gain} produced non-finite {name} = {v}"
+                );
+            }
+        }
+    }
+
+    /// Extreme but finite gain must still be clamped into the usable range.
+    #[test]
+    fn extreme_finite_gain_is_clamped_not_wrapped() {
+        let c = BiquadCoeffs::<f32>::peaking(48_000.0, 1_000.0, 1.0e9, 1.0);
+        for v in [c.b0, c.b1, c.b2, c.a1, c.a2] {
+            assert!(v.is_finite() && v.abs() < 1.0e6, "coefficient {v} escaped");
+        }
+    }
 
     #[test]
     fn test_identity_passes_signal() {

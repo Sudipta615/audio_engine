@@ -5,6 +5,110 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-10-01
+
+Phase 2 of the audit: the high-severity findings. Primarily correctness and
+lifetime fixes on the audio path, in the FFI surface, and in the DSP graph's
+latency accounting.
+
+### Fixed
+
+- **WASAPI loopback no longer reads integer mix packets as `f32`.** The
+  negotiated `MixSampleFormat` was computed at open, logged, and then never
+  used by the capture loop, which reinterpreted every packet as float32. On a
+  16-bit integer mix — the default shared-mode format on many endpoints — that
+  read twice the packet's length (heap over-read past the COM buffer) with
+  misaligned `f32` loads. The format is now threaded into the capture thread
+  and integer mixes are converted properly (16/24/32-bit, including sign
+  extension for 24-bit).
+- **No NaN/Inf latch in the DSP feedback state.** A single non-finite sample
+  latched permanently in `BiquadState`'s `z1`/`z2` (`flush_denormal_f64` only
+  zeroes values whose exponent bits are all zero, and NaN's are all ones),
+  in `BallisticEnvelope` (where `NaN` makes every comparison false, so
+  compression silently dies), and in the limiter's true-peak meter (an `Inf`
+  pinned `max_abs` to infinity, driving gain to 0 and then `Inf * 0 = NaN`).
+  All three now reset on non-finite input or output and emit one silent sample.
+  The f64 (Quality-mode) plan executor also had no non-finite containment at
+  all, unlike the f32 path.
+- **EQ `gain_db` is validated.** It flowed unvalidated from deserialized JSON
+  into `10^(gain/40)`, so NaN or a large magnitude produced non-finite
+  coefficients that then latched through the path above. `EngineConfig::validate`
+  never inspected EQ bands at all. Gain is now clamped to ±48 dB and non-finite
+  values are rejected at coefficient construction.
+- **The wavefolder is bounded.** Its fold cost `|driven| / 2` iterations per
+  sample and `drive` is a public field with no upper bound, so a large value
+  hung the audio thread. `drive` and `bias` are now clamped on the audio path.
+- **`Saturator` no longer panics on a negative or NaN `ceiling`.**
+  `f32::clamp` panics when `min > max`, and `ceiling` is a public field, so
+  `clamp(-ceiling, ceiling)` was an abort on the audio thread.
+- **Reported latency no longer under-counts.** The limiter's audio delay line
+  is `lookahead + detector`, but both latency builders summed only the
+  lookahead window — omitting the 50-sample Fir4x detector delay (~1.04 ms at
+  48 kHz) from a number the engine subtracts from every playhead update. Four
+  tests asserted the under-counted value; they now assert the corrected
+  arithmetic.
+- **`CorrectionNode` reports its convolution latency.** It declared only the IR
+  group delay (0 under the default `PhaseMode::Minimum`) while actually
+  delaying by a full 512-sample FFT block, claiming zero latency for a stage
+  that delayed by ~10.7 ms.
+- **Retire hand-back no longer leaks a generation.** `retired` was written with
+  `store` and reclaimed only on `publish_generation`, so two reconfigurations
+  inside one crossfade window silently overwrote and leaked an entire
+  `GraphGeneration`. It now uses `swap` with a bounded overflow stack the
+  control thread drains.
+- **The decode loop no longer logs per frame.** The pending-output FIFO's
+  overflow branch called `log::warn!` once per audio frame — up to ~11,000
+  logger-mutex-and-write calls per second once the FIFO was full, on a path the
+  realtime contract forbids. It now bumps an atomic counter surfaced as the new
+  `EngineStats::pending_fifo_refused_frames`.
+- **`PcmRingBuffer::reset` no longer writes the consumer index from the
+  caller's thread.** It CAS'd `tail`, which a concurrent `pop_block` also
+  writes; whichever landed last won, so a reset during a pop could move `tail`
+  backwards and replay stale pre-seek audio. Only cpal and WASAPI avoided this
+  (by pausing and waiting, with a 50 ms best-effort timeout); ALSA, CoreAudio,
+  ASIO, PipeWire and JACK called it bare. `reset()` is now a request carrying a
+  watermark that the consumer applies at its own block boundary, so it is
+  correct on every backend.
+- **Symphonia rejects a zero channel count.** A container declaring 0 channels
+  (reachable via Matroska, where a `NonZeroU64` is truncated through `u16`:
+  `65536 → 0`) caused a divide-by-zero panic on the first `decode_next`.
+  Counts above the engine's `MAX_CHANNELS` are also rejected rather than
+  silently truncated downstream.
+- **The reference plugin's `write_pos` is bounded.** It was restored from the
+  state blob and used to index the delay ring before the wrap, so any persisted
+  value ≥ `MAX_DELAY_SAMPLES` overflowed the buffer. The blob is reachable from
+  the engine config, so it is clamped on load. `delay_samples` is likewise
+  capped inside the ring, since it is otherwise unbounded at high sample rates.
+- **Plugin fault isolation now works.** The vtable entries were `extern "C"`,
+  where an unwind crossing the frame aborts — so the host's `catch_unwind`
+  never fired and `PluginFaultKind::Panic` was unreachable. They are now
+  `extern "C-unwind"`, which has an identical calling convention but lets the
+  panic reach the handler. C hosts remain ABI-compatible.
+- **The plugin sandbox no longer advertises isolation it does not provide.**
+  `PluginSandboxMode::IsolatedWorker` and `SandboxedIpc` were declared but had
+  no implementation, no worker thread and no watchdog, and were silently
+  ignored. They are now documented as unimplemented and
+  `PluginSandboxConfig::validate()` rejects them.
+- **The sandbox's block length is the shortest plane, not `planes[0]`.**
+  Applying the first plane's length to every other plane indexed past the end
+  of any shorter one — a panic on the audio thread.
+- **`PcmRingBuffer`'s SPSC contract is documented.** The blanket
+  `unsafe impl Sync` with `&self` mutators had no safety comment, while the
+  crate's own rule requires the contract next to the impl. The contract is now
+  stated at the impl and at each method.
+
+### Added
+
+- `EngineStats::pending_fifo_refused_frames` — decode-loop backpressure counter.
+- `PluginSandboxConfig::validate()` and `mode_is_implemented()`.
+- `PcmRingBuffer::reset_pending()`, and `available()`/`free_slots()` now
+  project a pending reset so callers are not told to wait for audio that will
+  be discarded.
+- `TruePeakMeter::non_finite_substitutions()`.
+- Regression tests for: plugin bypass, non-finite biquad input and gain, the
+  ring reset watermark and non-rewind property, and the corrected latency
+  arithmetic.
+
 ## [0.3.0] — 2026-10-01
 
 Phase 1 of a security and correctness audit: the critical findings. Every

@@ -1,7 +1,7 @@
 //! The producer's per-tick allocation count, measured rather than assumed.
 //!
 //! `PlaybackInfo` is published through an `ArcSwap`, so every write clones the
-//! struct — 1 616 bytes, plus whatever its heap fields currently hold — and
+//! struct — 1 624 bytes, plus whatever its heap fields currently hold — and
 //! allocates one `Arc`. On a 5 ms tick that is 200 publishes a second, and it
 //! was long assumed to be the reason the producer thread churns the heap: a
 //! structure carrying six `Vec`s and five `String`/`Option<String>` fields,
@@ -201,7 +201,7 @@ fn a_playing_tick_stays_far_below_the_ungated_cost() {
 fn playback_info_size_is_known() {
     assert_eq!(
         std::mem::size_of::<PlaybackInfo>(),
-        1616,
+        1624,
         "PlaybackInfo changed size; the per-tick memcpy above is proportional to it, \
          so re-measure and update the figures in this file's module docs."
     );

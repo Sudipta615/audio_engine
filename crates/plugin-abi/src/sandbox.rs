@@ -7,19 +7,36 @@
 use serde::{Deserialize, Serialize};
 
 /// Operational isolation mode for hosting DSP plugins.
+/// How a plugin is executed relative to the host.
+///
+/// # Implementation status
+///
+/// Only [`PluginSandboxMode::InProcessTrusted`] is implemented.
+/// `IsolatedWorker` and `SandboxedIpc` are declared but NOT implemented: no
+/// worker thread, no watchdog thread, no seccomp/landlock, and no out-of-process
+/// transport exists anywhere in the tree. Selecting one of them does not change
+/// behaviour — the plugin still runs in-process on the audio thread.
+///
+/// `mode` is therefore not read by any execution path. It is validated on
+/// construction by [`PluginSandboxConfig::validate`], which rejects the
+/// unimplemented modes so a configuration cannot advertise isolation the
+/// engine does not provide. Implementing them is future work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde-types", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde-types", serde(rename_all = "snake_case"))]
 pub enum PluginSandboxMode {
     /// Plugin executes directly on the audio thread inside the host plan step.
-    /// Lowest possible latency; fault isolation relies on panic catching and watchdog guards.
+    /// Lowest possible latency; fault isolation relies on panic catching and
+    /// watchdog guards.
     #[default]
     InProcessTrusted,
-    /// Plugin executes on a dedicated isolated realtime worker thread connected
-    /// via lock-free SPSC channels. Prevents plugin thread hangs from blocking the host audio thread.
+    /// **Not implemented.** Would execute the plugin on a dedicated isolated
+    /// realtime worker thread connected via lock-free SPSC channels. Rejected
+    /// by [`PluginSandboxConfig::validate`] for now.
     IsolatedWorker,
-    /// Plugin executes in a separate sandboxed process communicating via shared memory / IPC.
-    /// Full memory protection and crash immunity.
+    /// **Not implemented.** Would execute the plugin in a separate sandboxed
+    /// process communicating via shared memory / IPC. Rejected by
+    /// [`PluginSandboxConfig::validate`] for now.
     SandboxedIpc,
 }
 
@@ -56,6 +73,33 @@ pub struct PluginSandboxConfig {
     pub backoff_ms: u64,
     /// If true, automatically switches to dry-passthrough bypass immediately upon fault.
     pub dry_passthrough_on_fault: bool,
+}
+
+impl PluginSandboxConfig {
+    /// Whether the requested mode is actually implemented.
+    pub fn mode_is_implemented(&self) -> bool {
+        matches!(self.mode, PluginSandboxMode::InProcessTrusted)
+    }
+
+    /// Reject a configuration that requests an unimplemented isolation mode.
+    ///
+    /// Without this, selecting `IsolatedWorker` or `SandboxedIpc` silently
+    /// behaves identically to `InProcessTrusted`, so an operator reading their
+    /// config would believe a plugin was crash-isolated when it is running
+    /// unguarded on the audio thread. Failing loudly is the honest outcome
+    /// until those modes exist.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.mode_is_implemented() {
+            return Err(format!(
+                "sandbox mode {:?} is not implemented; only InProcessTrusted is \
+                 supported. The plugin would run in-process on the audio thread \
+                 with no isolation, so this configuration is rejected rather \
+                 than silently ignored",
+                self.mode
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PluginSandboxConfig {

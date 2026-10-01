@@ -194,38 +194,56 @@ impl PluginDescriptor {
 ///   and is never concurrently invoked from two threads.
 /// - `process` is called only between `prepare` and `drop_instance`,
 ///   never concurrently with any other vtable call on the same instance.
+///
+/// # Why `C-unwind` and not `C`
+///
+/// The host wraps every vtable call in `catch_unwind` so a misbehaving plugin
+/// cannot take down the audio process. That only works if a panic is allowed
+/// to unwind out of the plugin's frame. Under the plain `extern "C"` ABI an
+/// unwind crossing that frame is undefined behaviour and the process ABORTS —
+/// so the host's `catch_unwind` never fires and the `Panic` fault kind is
+/// unreachable.
+///
+/// `extern "C-unwind"` has an identical calling convention to `extern "C"` on
+/// every Rust-supported platform, so this is a purely semantic change: a C
+/// host's `extern "C"` implementations remain ABI-compatible, and a C host
+/// that does not throw behaves exactly as before. Plugins written in Rust
+/// must annotate their implementations `extern "C-unwind"` to match.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PluginVTable {
     /// `fn(descriptor: *mut PluginDescriptor, abi_version: u32) -> i32`
     ///
     /// Ask the plugin to fill the descriptor and check the version.
-    pub descriptor: Option<unsafe extern "C" fn(*mut PluginDescriptor, u32) -> i32>,
+    pub descriptor: Option<unsafe extern "C-unwind" fn(*mut PluginDescriptor, u32) -> i32>,
     /// `fn(abi_version: u32, sample_rate: f32) -> *mut c_void`
     ///
     /// Create one instance. Returns null on failure.
-    pub instantiate: Option<unsafe extern "C" fn(u32, f32) -> *mut std::ffi::c_void>,
+    pub instantiate: Option<unsafe extern "C-unwind" fn(u32, f32) -> *mut std::ffi::c_void>,
     /// `fn(instance: *mut c_void, channels: u32, frames_capacity: u32) -> i32`
     ///
     /// Prepare for a channel count + max block size (control path).
-    pub prepare: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u32, u32) -> i32>,
+    pub prepare: Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void, u32, u32) -> i32>,
     /// `fn(instance: *mut c_void, index: u32, value: f32) -> i32`
-    pub set_param: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u32, f32) -> i32>,
+    pub set_param: Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void, u32, f32) -> i32>,
     /// `fn(instance: *mut c_void, block: *const AudioBlockMut) -> i32`
     ///
     /// **Audio thread.** Must not allocate / lock / block.
-    pub process: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const AudioBlockMut) -> i32>,
+    pub process:
+        Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void, *const AudioBlockMut) -> i32>,
     /// `fn(instance: *mut c_void, buffer: *mut u8, capacity: usize) -> i32`
     ///
     /// Serialize state into `buffer`; `-1`-style refusal is
     /// `BadState`. Returns required size if capacity is 0.
-    pub save_state: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, usize) -> isize>,
+    pub save_state:
+        Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void, *mut u8, usize) -> isize>,
     /// `fn(instance: *mut c_void, bytes: *const u8, len: usize) -> i32`
-    pub load_state: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize) -> i32>,
+    pub load_state:
+        Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void, *const u8, usize) -> i32>,
     /// `fn(instance: *mut c_void)` — clear filter/tail state (seek).
-    pub reset: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub reset: Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void)>,
     /// `fn(instance: *mut c_void)` — destroy the instance.
-    pub drop_instance: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub drop_instance: Option<unsafe extern "C-unwind" fn(*mut std::ffi::c_void)>,
 }
 
 impl fmt::Debug for PluginVTable {

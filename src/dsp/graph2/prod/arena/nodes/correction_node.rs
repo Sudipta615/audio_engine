@@ -324,11 +324,27 @@ impl DspNode for CorrectionNode {
     }
 
     fn latency_samples(&self) -> usize {
-        if self.processing() {
-            self.delay_samples
-        } else {
-            0
+        if !self.processing() {
+            return 0;
         }
+        // TWO contributions, not one. `delay_samples` is only the loaded IR's
+        // own group delay (zero under the default `PhaseMode::Minimum`). The
+        // stage also runs a partitioned `ConvolutionEngine`, whose algorithmic
+        // latency is its FFT block size (512 samples ≈ 10.7 ms at 48 kHz).
+        // Reporting only the former claimed zero latency for a stage that
+        // delays by a full partition, which fed straight into the engine's
+        // playhead compensation.
+        //
+        // `processing()` already guarantees every engine has its IR loaded, so
+        // `latency_samples()` (the engine's `block_size`, matching its own
+        // `latency_ms`) is valid for all of them.
+        let engine_latency: usize = self
+            .engines
+            .iter()
+            .map(|e| e.latency_samples())
+            .max()
+            .unwrap_or(0);
+        self.delay_samples + engine_latency
     }
 
     fn tail_samples(&self) -> usize {

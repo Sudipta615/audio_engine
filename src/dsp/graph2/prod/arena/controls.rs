@@ -25,12 +25,19 @@ use crate::dsp::{
     limiter::LimiterMode,
     loudness::{LoudnessMetadata, LoudnessMode},
 };
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+};
 use std::sync::{Arc, Mutex};
 
 /// Depth of each per-node control queue. Bounded, so the block-boundary
 /// drain is O(QUEUE_CAPACITY) per queue — deterministic and budgetable.
 const CONTROL_QUEUE_CAPACITY: usize = 64;
+
+/// Depth of the retire-hand-back overflow stack. Four reconfigurations inside
+/// one crossfade window is already pathological; eight slots is ample headroom
+/// before anything is dropped.
+const RETIRE_OVERFLOW_SLOTS: usize = 8;
 
 /// One parameter / transport command carried by the control queues.
 ///
@@ -234,6 +241,20 @@ pub(crate) struct ControlBus {
     pending: AtomicPtr<GraphGeneration>,
     /// Audio → control: the generation swapped out, awaiting reclamation.
     retired: AtomicPtr<GraphGeneration>,
+    /// Overflow slots for retire hand-backs that arrive before the control
+    /// thread has drained [`Self::retired`].
+    ///
+    /// The audio thread must never free a generation, so a collision on
+    /// `retired` cannot be resolved in place. These slots give it somewhere to
+    /// put the displaced pointer until `reclaim_retired` (control side) drains
+    /// them. Bounded: a fixed array, indexed by an atomic cursor. Overflow past
+    /// the bound is counted and leaked deliberately rather than freed from the
+    /// audio thread — that is the one outcome this contract forbids.
+    retired_overflow: [AtomicPtr<GraphGeneration>; RETIRE_OVERFLOW_SLOTS],
+    /// Cursor into `retired_overflow`.
+    retired_overflow_len: AtomicUsize,
+    /// How many retire hand-backs could not be parked (i.e. were leaked).
+    retired_overflow_dropped: AtomicU64,
     /// Monotonic generation counter (audio-incremented on swap).
     swap_seq: AtomicU64,
     /// Generations reclaimed by the control side.
@@ -357,14 +378,12 @@ impl PluginParamsSlot {
     fn store(&self, batch: plugin_abi::PluginParams) {
         // AcqRel: the odd store must be visible before the payload write, and
         // the even store must not be reordered before it.
-        self.seq
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.seq.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         // SAFETY: single writer, and it is the only thread that ever takes
         // this path. No reader can be copying at the same time because they
         // only copy while `seq` reads even, and it is odd here.
         unsafe { *self.value.get() = batch };
-        self.seq
-            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.seq.fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Read the last published batch. Control side.
@@ -402,6 +421,9 @@ impl ControlBus {
             has_pending: AtomicBool::new(false),
             pending: AtomicPtr::new(std::ptr::null_mut()),
             retired: AtomicPtr::new(std::ptr::null_mut()),
+            retired_overflow: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
+            retired_overflow_len: AtomicUsize::new(0),
+            retired_overflow_dropped: AtomicU64::new(0),
             swap_seq: AtomicU64::new(0),
             reclaimed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -860,6 +882,35 @@ impl GraphControlHandle {
             }
             self.bus.reclaimed.fetch_add(1, Ordering::Relaxed);
         }
+        // Drain the overflow stack the audio thread parked displaced
+        // generations in (see `hand_back_retired`). Reset the cursor only after
+        // the slots have been taken, so a concurrent producer either sees a
+        // free slot or lands on an index we are about to reuse only after its
+        // own `fetch_add` returned — the AcqRel pair orders the store against
+        // this load.
+        let n = self
+            .bus
+            .retired_overflow_len
+            .load(Ordering::Acquire)
+            .min(RETIRE_OVERFLOW_SLOTS);
+        for i in 0..n {
+            let p = self.bus.retired_overflow[i].swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !p.is_null() {
+                unsafe {
+                    drop(Box::from_raw(p));
+                }
+                self.bus.reclaimed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if n > 0 {
+            self.bus.retired_overflow_len.store(0, Ordering::Release);
+        }
+    }
+
+    /// Retire hand-backs that exceeded the overflow stack and were leaked.
+    /// Non-zero means generations are being dropped rather than reclaimed.
+    pub fn retired_overflow_dropped(&self) -> u64 {
+        self.bus.retired_overflow_dropped.load(Ordering::Relaxed)
     }
 
     /// Number of swaps the audio thread has performed (monotonic).
@@ -1568,9 +1619,7 @@ impl DspGraph {
             let new_gen = unsafe { Box::from_raw(pending) };
             let prev = std::mem::replace(&mut self.active, new_gen);
             if let Some(old_retiring) = self.retiring.take() {
-                self.bus
-                    .retired
-                    .store(Box::into_raw(old_retiring), Ordering::Release);
+                self.hand_back_retired(old_retiring);
             }
             self.retiring = Some(prev);
             self.transition_fader.trigger(self.sample_rate);
@@ -1586,10 +1635,41 @@ impl DspGraph {
     /// when a transition crossfade completes and the old generation is no
     /// longer needed. Allocation-free; uses a single atomic `Release` store.
     #[inline]
+    /// Audio-thread hand-back of a finished [`GraphGeneration`] to the control
+    /// thread's reclamation slot.
+    ///
+    /// Uses `swap`, NOT `store`. `reclaim_retired` is only called from
+    /// `publish_generation`, so two hand-backs with no intervening publish means
+    /// a `store` would silently overwrite the first raw pointer and leak an
+    /// entire generation — each one an 18-node arena holding convolution IRs,
+    /// spatial scenes and plugin instances. Two reconfigurations inside a single
+    /// crossfade window reach that state.
+    ///
+    /// `swap` makes the collision visible instead. A non-null return means the
+    /// control thread has not reclaimed the previous occupant yet. The audio
+    /// thread must NOT free it (that would violate "the audio thread never
+    /// frees"), so it is counted and left to the control thread, which drains
+    /// any overflow on its next reclaim.
+    fn hand_back_retired(&self, gen: Box<GraphGeneration>) {
+        let displaced = self.bus.retired.swap(Box::into_raw(gen), Ordering::AcqRel);
+        if displaced.is_null() {
+            return;
+        }
+        let idx = self.bus.retired_overflow_len.fetch_add(1, Ordering::AcqRel);
+        if idx < RETIRE_OVERFLOW_SLOTS {
+            self.bus.retired_overflow[idx].store(displaced, Ordering::Release);
+        } else {
+            // Out of overflow slots. The audio thread must not free, so this
+            // is counted and leaked deliberately — the one outcome strictly
+            // preferable to freeing on the audio thread.
+            self.bus
+                .retired_overflow_dropped
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn retire_generation_to_bus(&mut self, gen: Box<GraphGeneration>) {
-        self.bus
-            .retired
-            .store(Box::into_raw(gen), Ordering::Release);
+        self.hand_back_retired(gen);
     }
 
     /// FIFO-per-node drain. Shell commands first, then per-node commands in

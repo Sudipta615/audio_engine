@@ -73,6 +73,9 @@ pub struct WasapiLoopbackCapture {
     device_name: String,
     sample_rate: u32,
     channels: u16,
+    /// The negotiated mix format. WASAPI delivers packets in this layout;
+    /// the capture thread needs it to decode each packet correctly.
+    sample_format: MixSampleFormat,
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     event: Option<SendHandle>,
@@ -87,6 +90,66 @@ pub struct WasapiLoopbackCapture {
 enum MixSampleFormat {
     Float32,
     Int(u16), // bits per sample: 16, 24, or 32
+}
+
+impl MixSampleFormat {
+    /// Bytes one sample of this format occupies on the wire.
+    fn bytes_per_sample(self) -> usize {
+        match self {
+            MixSampleFormat::Float32 => 4,
+            MixSampleFormat::Int(bits) => (bits as usize).div_ceil(8).max(1),
+        }
+    }
+
+    /// Decode one packet's worth of samples into `scratch` (interleaved f32).
+    ///
+    /// `data`/`frames` come from `IAudioCaptureClient::GetBuffer`, so the
+    /// packet holds `frames * channels * bytes_per_sample()` bytes and nothing
+    /// more. Reading it as anything wider over-reads the COM packet; reading
+    /// a narrower width misaligns. The declared width is therefore what
+    /// drives the conversion, never an assumption.
+    ///
+    /// # Safety
+    /// `data` must point to at least `frames * channels * bytes_per_sample()`
+    /// readable bytes — i.e. it must be the pointer WASAPI just handed us.
+    unsafe fn decode_into(
+        self,
+        data: *const u8,
+        scratch: &mut [f32],
+        frames: usize,
+        channels: usize,
+    ) {
+        match self {
+            MixSampleFormat::Float32 => {
+                let src = std::slice::from_raw_parts(data as *const f32, frames * channels);
+                scratch.copy_from_slice(src);
+            }
+            MixSampleFormat::Int(16) => {
+                let src = std::slice::from_raw_parts(data as *const i16, frames * channels);
+                for (dst, &s) in scratch.iter_mut().zip(src) {
+                    *dst = s as f32 / 32768.0;
+                }
+            }
+            MixSampleFormat::Int(24) => {
+                // 24-bit is sign-extended from 3 packed little-endian bytes.
+                for i in 0..frames * channels {
+                    let b = data.add(i * 3);
+                    let raw = (*b as i32) | ((*b.add(1) as i32) << 8) | ((*b.add(2) as i32) << 16);
+                    // Sign-extend from 24 bits.
+                    let signed = (raw << 8) >> 8;
+                    scratch[i] = signed as f32 / 8_388_608.0;
+                }
+            }
+            MixSampleFormat::Int(32) => {
+                let src = std::slice::from_raw_parts(data as *const i32, frames * channels);
+                for (dst, &s) in scratch.iter_mut().zip(src) {
+                    *dst = s as f32 / 2_147_483_648.0;
+                }
+            }
+            // `classify_mix_format` admits no other width.
+            MixSampleFormat::Int(_) => scratch.fill(0.0),
+        }
+    }
 }
 
 impl WasapiLoopbackCapture {
@@ -177,6 +240,7 @@ impl WasapiLoopbackCapture {
             device_name,
             sample_rate,
             channels,
+            sample_format,
             running: Arc::new(AtomicBool::new(false)),
             thread: None,
             event: Some(SendHandle(event)),
@@ -235,11 +299,21 @@ impl WasapiLoopbackCapture {
         // the thread has been joined.
         let event = SendHandle(self.event.as_ref().unwrap().0);
         let channels = self.channels as usize;
+        let sample_format = self.sample_format;
 
         let handle = thread::Builder::new()
             .name("wasapi-loopback".to_string())
             .spawn(move || {
-                capture_loop(capture, event, buffer, channels, running, overflow, packets)
+                capture_loop(
+                    capture,
+                    event,
+                    buffer,
+                    channels,
+                    sample_format,
+                    running,
+                    overflow,
+                    packets,
+                )
             })
             .map_err(|e| OutputError::StreamError(format!("capture thread spawn: {e}")))?;
         self.thread = Some(handle);
@@ -314,6 +388,11 @@ fn capture_loop(
     event: SendHandle,
     buffer: Arc<FixedFrameBuffer>,
     channels: usize,
+    // The negotiated mix format. WASAPI hands packets in THIS layout, not
+    // necessarily f32 — a 16-bit integer mix is the default shared-mode
+    // format on many endpoints — so the capture path must convert rather
+    // than reinterpret the bytes.
+    sample_format: MixSampleFormat,
     running: Arc<AtomicBool>,
     overflow: Arc<AtomicU32>,
     packets: Arc<AtomicU32>,
@@ -356,12 +435,19 @@ fn capture_loop(
                 if silent || data.is_null() {
                     scratch.fill(0.0);
                 } else {
-                    // The mix format is float32 (checked at open), so a raw
-                    // copy suffices. If the mix format were integer, we would
-                    // need conversion here; classify_mix_format currently only
-                    // admits float32 mixes.
-                    let src = unsafe { std::slice::from_raw_parts(data as *const f32, total) };
-                    scratch.copy_from_slice(src);
+                    // SAFETY: `data`/`frames` are exactly what `GetBuffer` just
+                    // returned, so the packet holds `frames * channels *
+                    // bytes_per_sample()` bytes. `sample_format` is the
+                    // negotiated mix format, so the decode matches the packet
+                    // width instead of assuming f32.
+                    unsafe {
+                        sample_format.decode_into(
+                            data as *const u8,
+                            &mut scratch,
+                            frames as usize,
+                            channels,
+                        )
+                    };
                 }
                 let written = buffer.push_frames_interleaved(&scratch, channels);
                 if written < frames as usize {

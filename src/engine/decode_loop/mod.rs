@@ -1,6 +1,6 @@
 //! Core decode-and-process loop for single and crossfade playback modes.
 
-mod common;
+pub(crate) mod common;
 mod crossfade;
 mod single;
 

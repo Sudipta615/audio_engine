@@ -739,11 +739,14 @@ fn latency_report_includes_crossfeed_and_timestretch_terms() {
     let sr = 48_000.0f32;
     let mut pipeline = DspPipeline::from_config(&cfg, sr);
 
-    // Idle: all new terms zero.
+    // Idle: all new terms zero, and the total is the limiter's full audio
+    // delay line — lookahead window PLUS the true-peak detector's group delay.
+    // This previously equalled `lookahead` alone, omitting the detector term.
     let idle = pipeline.latency_report(0.0, 0.0, 0.0);
     assert_eq!(idle.crossfeed_delay_ms, 0.0);
     assert_eq!(idle.timestretch_latency_ms, 0.0);
-    assert!((idle.total_latency_ms - idle.limiter_lookahead_ms).abs() < 1e-6);
+    let idle_expected = idle.limiter_lookahead_ms + idle.limiter_detector_delay_ms;
+    assert!((idle.total_latency_ms - idle_expected).abs() < 1e-6);
 
     // Crossfeed active: delay-line term appears and is included in the total.
     cfg.crossfeed.enabled = true;
@@ -760,7 +763,12 @@ fn latency_report_includes_crossfeed_and_timestretch_terms() {
         cf.crossfeed_delay_ms
     );
     assert!(
-        (cf.total_latency_ms - cf.limiter_lookahead_ms - cf.crossfeed_delay_ms).abs() < 1e-6,
+        (cf.total_latency_ms
+            - cf.limiter_lookahead_ms
+            - cf.limiter_detector_delay_ms
+            - cf.crossfeed_delay_ms)
+            .abs()
+            < 1e-6,
         "crossfeed delay must be summed into the total"
     );
 
@@ -776,6 +784,7 @@ fn latency_report_includes_crossfeed_and_timestretch_terms() {
     assert!(
         (ts.total_latency_ms
             - ts.limiter_lookahead_ms
+            - ts.limiter_detector_delay_ms
             - ts.crossfeed_delay_ms
             - ts.timestretch_latency_ms)
             .abs()

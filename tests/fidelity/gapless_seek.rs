@@ -165,7 +165,13 @@ fn test_end_to_end_latency_reporting() {
         pipeline.limiter.detector_delay_ms()
     );
     assert!(stats.latency_report.limiter_detector_delay_ms <= lookahead + 1e-6);
-    assert!((stats.latency_report.total_latency_ms - (lookahead + 20.0)).abs() < 1e-4);
+    // The total is the limiter's FULL audio delay line (lookahead window PLUS
+    // the true-peak detector's group delay) plus the other stages. This test
+    // previously asserted `lookahead + 20.0`, which enshrined the missing
+    // detector term and so locked in a constant ~1 ms A/V offset at the default
+    // Fir4x setting.
+    let expected_total = (pipeline.limiter.latency_ms()) + 20.0;
+    assert!((stats.latency_report.total_latency_ms - expected_total).abs() < 1e-4);
     assert_eq!(
         stats.output_latency_ms,
         stats.latency_report.total_latency_ms

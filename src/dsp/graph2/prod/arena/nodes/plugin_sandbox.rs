@@ -149,7 +149,17 @@ impl SandboxedPluginInstance {
         }
 
         let num_channels = planes.len().min(MAX_SANDBOX_CHANNELS);
-        let num_frames = planes[0].len().min(MAX_AUDIO_BLOCK_FRAMES);
+        // The block length is the SHORTEST plane, not `planes[0]`. Taking it
+        // from the first plane and applying it to every other one indexes past
+        // the end of any shorter plane — a panic on the audio thread. Nothing
+        // guarantees the caller hands us equal-length planes.
+        let num_frames = planes
+            .iter()
+            .take(num_channels)
+            .map(|p| p.len())
+            .min()
+            .unwrap_or(0)
+            .min(MAX_AUDIO_BLOCK_FRAMES);
 
         // Check if plugin is in backoff cooldown with exponential backoff scaling:
         // backoff = base_backoff * 2^(consecutive_faults - 1)
@@ -587,7 +597,17 @@ impl PluginProcessSandbox {
         }
 
         let num_channels = planes.len().min(MAX_SANDBOX_CHANNELS);
-        let num_frames = planes[0].len().min(MAX_AUDIO_BLOCK_FRAMES);
+        // The block length is the SHORTEST plane, not `planes[0]`. Taking it
+        // from the first plane and applying it to every other one indexes past
+        // the end of any shorter plane — a panic on the audio thread. Nothing
+        // guarantees the caller hands us equal-length planes.
+        let num_frames = planes
+            .iter()
+            .take(num_channels)
+            .map(|p| p.len())
+            .min()
+            .unwrap_or(0)
+            .min(MAX_AUDIO_BLOCK_FRAMES);
 
         // Copy input to dry scratch buffer
         for (ch, plane) in planes[..num_channels].iter().enumerate() {

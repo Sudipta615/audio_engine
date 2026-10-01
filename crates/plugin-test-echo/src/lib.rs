@@ -70,11 +70,17 @@ impl EchoState {
 
     fn delay_samples(&self) -> usize {
         let ms = self.delay_ms.clamp(0.0, 2000.0);
-        ((ms / 1000.0) * self.sample_rate).round() as usize
+        // The rings are `MAX_DELAY_SAMPLES` long, and `process` computes
+        // `write_pos + ring_len - delay` before the `% ring_len` wrap. An
+        // unbounded delay underflows that expression (panic in debug, silent
+        // wraparound in release), so the delay must stay strictly inside the
+        // ring. 2000 ms at 384 kHz is 768,000 samples — well over the ring.
+        let raw = ((ms / 1000.0) * self.sample_rate).round() as usize;
+        raw.min(MAX_DELAY_SAMPLES.saturating_sub(1))
     }
 }
 
-unsafe extern "C" fn descriptor(d: *mut PluginDescriptor, abi: u32) -> i32 {
+unsafe extern "C-unwind" fn descriptor(d: *mut PluginDescriptor, abi: u32) -> i32 {
     if abi != PLUGIN_ABI_VERSION {
         return AbiStatus::VersionMismatch as i32;
     }
@@ -108,7 +114,7 @@ fn str_to_fixed(s: &[u8]) -> [u8; 32] {
     out
 }
 
-unsafe extern "C" fn instantiate(abi: u32, sample_rate: f32) -> *mut std::ffi::c_void {
+unsafe extern "C-unwind" fn instantiate(abi: u32, sample_rate: f32) -> *mut std::ffi::c_void {
     if abi != PLUGIN_ABI_VERSION || !sample_rate.is_finite() || sample_rate <= 0.0 {
         return std::ptr::null_mut();
     }
@@ -117,7 +123,7 @@ unsafe extern "C" fn instantiate(abi: u32, sample_rate: f32) -> *mut std::ffi::c
     Box::into_raw(state) as *mut std::ffi::c_void
 }
 
-unsafe extern "C" fn prepare(
+unsafe extern "C-unwind" fn prepare(
     instance: *mut std::ffi::c_void,
     channels: u32,
     max_frames: u32,
@@ -145,7 +151,11 @@ unsafe extern "C" fn prepare(
     AbiStatus::Ok as i32
 }
 
-unsafe extern "C" fn set_param(instance: *mut std::ffi::c_void, index: u32, value: f32) -> i32 {
+unsafe extern "C-unwind" fn set_param(
+    instance: *mut std::ffi::c_void,
+    index: u32,
+    value: f32,
+) -> i32 {
     if instance.is_null() || !value.is_finite() {
         return AbiStatus::InvalidArgument as i32;
     }
@@ -161,7 +171,10 @@ unsafe extern "C" fn set_param(instance: *mut std::ffi::c_void, index: u32, valu
     AbiStatus::Ok as i32
 }
 
-unsafe extern "C" fn process(instance: *mut std::ffi::c_void, block: *const AudioBlockMut) -> i32 {
+unsafe extern "C-unwind" fn process(
+    instance: *mut std::ffi::c_void,
+    block: *const AudioBlockMut,
+) -> i32 {
     if instance.is_null() || block.is_null() {
         return AbiStatus::InvalidArgument as i32;
     }
@@ -225,7 +238,7 @@ unsafe extern "C" fn process(instance: *mut std::ffi::c_void, block: *const Audi
     AbiStatus::Ok as i32
 }
 
-unsafe extern "C" fn save_state(
+unsafe extern "C-unwind" fn save_state(
     instance: *mut std::ffi::c_void,
     buffer: *mut u8,
     capacity: usize,
@@ -259,7 +272,7 @@ unsafe extern "C" fn save_state(
     need as isize
 }
 
-unsafe extern "C" fn load_state(
+unsafe extern "C-unwind" fn load_state(
     instance: *mut std::ffi::c_void,
     bytes: *const u8,
     len: usize,
@@ -282,11 +295,19 @@ unsafe extern "C" fn load_state(
     state.delay_ms = rd(4).clamp(0.0, 2000.0);
     state.feedback = rd(8).clamp(0.0, 0.95);
     state.wet_mix = rd(12).clamp(0.0, 1.0);
-    state.write_pos = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as usize;
+    // `write_pos` is restored from the state blob and then used to index the ring
+    // BEFORE the `% ring_len` wrap in `process`. Every other field is clamped,
+    // but this one was not, so any persisted value >= MAX_DELAY_SAMPLES
+    // overflows the `Vec<f32>` on the audio thread. The blob is attacker-
+    // reachable through the engine config (`PluginSlotConfig.state` ->
+    // `PluginHostNode::attach` -> `load_state`), so this must be bounded here
+    // rather than trusted.
+    state.write_pos =
+        u32::from_le_bytes(raw[16..20].try_into().unwrap()) as usize % MAX_DELAY_SAMPLES;
     AbiStatus::Ok as i32
 }
 
-unsafe extern "C" fn reset(instance: *mut std::ffi::c_void) {
+unsafe extern "C-unwind" fn reset(instance: *mut std::ffi::c_void) {
     if instance.is_null() {
         return;
     }
@@ -300,7 +321,7 @@ unsafe extern "C" fn reset(instance: *mut std::ffi::c_void) {
     state.write_pos = 0;
 }
 
-unsafe extern "C" fn drop_instance(instance: *mut std::ffi::c_void) {
+unsafe extern "C-unwind" fn drop_instance(instance: *mut std::ffi::c_void) {
     if instance.is_null() {
         return;
     }

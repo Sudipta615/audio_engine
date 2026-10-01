@@ -310,7 +310,10 @@ impl PluginInstance {
         };
         // SAFETY: the caller guarantees plane lengths; the plugin owns
         // no retained pointers. Fault isolation wraps the call in catch_unwind
-        // so a plugin panic does not bring down the audio host.
+        // so a plugin panic does not bring down the audio host — which works
+        // because the vtable entries are `extern "C-unwind"` (see
+        // `PluginVTable`'s docs). Under plain `extern "C"` an unwind crossing
+        // the plugin frame would abort instead of reaching here.
         let raw_ptr = self.raw;
         let call_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             proc(raw_ptr, &block as *const AudioBlockMut)
