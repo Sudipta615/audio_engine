@@ -200,7 +200,11 @@ impl Dither {
     /// the same material differ only in their dither, and that is sometimes
     /// exactly what a comparison wants.
     pub fn set_random_seed(&mut self, seed: u64) {
-        let seed = if seed == 0 { 0x1234_5678_9ABC_DEF0 } else { seed };
+        let seed = if seed == 0 {
+            0x1234_5678_9ABC_DEF0
+        } else {
+            seed
+        };
         self.rng_state_left = seed;
         self.rng_state_right = seed.wrapping_add(0xDEAD_BEEF_1234_5678);
     }
@@ -822,9 +826,12 @@ mod tests {
     fn format_converter_carries_the_rate_into_its_dither() {
         use crate::output::format_converter::{AudioFormatConverter, TargetFormat};
 
-        let at_44k = AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 44_100);
-        let at_48k = AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 48_000);
-        let at_96k = AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 96_000);
+        let at_44k =
+            AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 44_100);
+        let at_48k =
+            AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 48_000);
+        let at_96k =
+            AudioFormatConverter::new_at_rate(TargetFormat::I16, DitherType::Shibata, 96_000);
 
         assert_eq!(at_44k.sample_rate(), 44_100);
         assert_eq!(at_48k.sample_rate(), 48_000);

@@ -1005,7 +1005,12 @@ impl DspNode for MixBusNode {
         let slot_planes: usize = self
             .inputs
             .iter()
-            .map(|i| i.planes.iter().map(|p| p.capacity() * size_of::<f32>()).sum::<usize>())
+            .map(|i| {
+                i.planes
+                    .iter()
+                    .map(|p| p.capacity() * size_of::<f32>())
+                    .sum::<usize>()
+            })
             .sum();
         std::mem::size_of_val(self) + slot_planes
     }

@@ -222,7 +222,9 @@ fn second_order_adds_more_reflection_energy() {
     // Early-reflection energy = everything after the direct impulse at
     // frame 0, summed over the block.
     let energy = |out: &[f32]| -> f32 {
-        out.as_chunks::<6>().0.iter()
+        out.as_chunks::<6>()
+            .0
+            .iter()
             .skip(1)
             .map(|f| f.iter().map(|v| v * v).sum::<f32>())
             .sum()
@@ -335,13 +337,17 @@ fn late_mix_zero_removes_late_field() {
     // dry render is silent while the wet render carries the decaying tail.
     let late_frame = 3_000usize;
     let late_dry: f32 = out_dry
-        .as_chunks::<6>().0.iter()
+        .as_chunks::<6>()
+        .0
+        .iter()
         .skip(late_frame)
         .map(|f| f.iter().map(|v| v.abs()).sum::<f32>())
         .take(500)
         .sum();
     let late_wet: f32 = out_wet
-        .as_chunks::<6>().0.iter()
+        .as_chunks::<6>()
+        .0
+        .iter()
         .skip(late_frame)
         .map(|f| f.iter().map(|v| v.abs()).sum::<f32>())
         .take(500)

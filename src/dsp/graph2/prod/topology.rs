@@ -130,7 +130,11 @@ impl std::fmt::Display for ChainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChainError::DuplicateStage(s) => {
-                write!(f, "stage '{}' appears more than once in the chain", s.stage_name())
+                write!(
+                    f,
+                    "stage '{}' appears more than once in the chain",
+                    s.stage_name()
+                )
             }
             ChainError::RequiredStageMissing { stage, reason } => write!(
                 f,
@@ -286,18 +290,8 @@ impl ProdTopology {
     /// the *peak* it is and the resource report labels its own scope rather
     /// than claiming an exact total.
     pub fn compilation_bytes(&self) -> usize {
-        let nodes: usize = self
-            .graph
-            .nodes
-            .values()
-            .map(std::mem::size_of_val)
-            .sum();
-        let edges: usize = self
-            .graph
-            .edges
-            .values()
-            .map(std::mem::size_of_val)
-            .sum();
+        let nodes: usize = self.graph.nodes.values().map(std::mem::size_of_val).sum();
+        let edges: usize = self.graph.edges.values().map(std::mem::size_of_val).sum();
         let order: usize = self
             .order
             .steps
@@ -455,8 +449,14 @@ mod tests {
         assert_eq!(a.order, b.order);
         assert_eq!(a.graph.node_count(), b.graph.node_count());
         assert_eq!(a.graph.edge_count(), b.graph.edge_count());
-        assert_eq!(a.stereo_steps().collect::<Vec<_>>(), b.stereo_steps().collect::<Vec<_>>());
-        assert_eq!(a.mc_steps().collect::<Vec<_>>(), b.mc_steps().collect::<Vec<_>>());
+        assert_eq!(
+            a.stereo_steps().collect::<Vec<_>>(),
+            b.stereo_steps().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            a.mc_steps().collect::<Vec<_>>(),
+            b.mc_steps().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -576,11 +576,7 @@ mod tests {
 
         // Behind the head is fine.
         assert!(build_requested_topology(&ChainRequest {
-            stages: vec![
-                ProdStage::Routing,
-                ProdStage::MixBus,
-                ProdStage::Volume
-            ],
+            stages: vec![ProdStage::Routing, ProdStage::MixBus, ProdStage::Volume],
             routing: ChainRouting::Trimmed,
         })
         .is_ok());

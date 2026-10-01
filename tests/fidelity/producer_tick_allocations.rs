@@ -109,7 +109,8 @@ fn sine_wav(secs: f32) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("ue_tick_alloc_{}.wav", std::process::id()));
     let mut f = std::fs::File::create(&path).expect("create wav");
     f.write_all(b"RIFF").unwrap();
-    f.write_all(&(36 + (pcm.len() * 2) as u32).to_le_bytes()).unwrap();
+    f.write_all(&(36 + (pcm.len() * 2) as u32).to_le_bytes())
+        .unwrap();
     f.write_all(b"WAVEfmt ").unwrap();
     f.write_all(&16u32.to_le_bytes()).unwrap();
     f.write_all(&1u16.to_le_bytes()).unwrap();
@@ -119,7 +120,8 @@ fn sine_wav(secs: f32) -> std::path::PathBuf {
     f.write_all(&2u16.to_le_bytes()).unwrap();
     f.write_all(&16u16.to_le_bytes()).unwrap();
     f.write_all(b"data").unwrap();
-    f.write_all(&((pcm.len() * 2) as u32).to_le_bytes()).unwrap();
+    f.write_all(&((pcm.len() * 2) as u32).to_le_bytes())
+        .unwrap();
     for s in &pcm {
         f.write_all(&s.to_le_bytes()).unwrap();
     }

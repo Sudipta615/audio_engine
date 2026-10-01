@@ -6,8 +6,10 @@ mod clock;
 mod commands;
 mod construction;
 mod crossfade;
+pub mod cue_split;
 mod decode_loop;
 mod dsd_state;
+pub mod dsp_persistence;
 pub mod graph_plan;
 pub mod handle;
 pub mod helpers;
@@ -39,10 +41,10 @@ pub use clock::AudioClock;
 pub(crate) use dsd_state::{dop_exclusive_reason, DsdTransportState};
 pub use graph_plan::GraphPlanReport;
 pub use handle::EngineHandle;
-pub use wake::EngineWake;
 pub(crate) use loudness_state::LoudnessScanState;
 pub(crate) use recovery::RecoveryState;
 pub(crate) use telemetry::EngineTelemetry;
+pub use wake::EngineWake;
 
 use std::sync::{atomic::AtomicBool, Arc};
 

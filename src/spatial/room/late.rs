@@ -61,11 +61,9 @@ impl RoomLateField {
         fn t<T>(v: &Vec<T>) -> usize {
             v.capacity() * std::mem::size_of::<T>()
         }
-            t(&self.delay_buf)+
-            t(&self.diff_buf)
+        t(&self.delay_buf) + t(&self.diff_buf)
     }
 }
-
 
 impl Default for RoomLateField {
     fn default() -> Self {

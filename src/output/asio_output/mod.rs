@@ -72,8 +72,16 @@ struct CallbackState {
     /// The `bufferSwitch` callback selects one set and hands it straight to the
     /// render context. It must not build a `Vec` per invocation: that is a
     /// heap allocation on the driver's audio thread, and a dropped or
-    /// reallocated `Vec` there is a dropout. `tests/realtime_contract_test.rs`
-    /// enforces this — see `RT_ENTRY_POINTS`.
+    /// reallocated `Vec` there is a dropout.
+    ///
+    /// Enforced by `tests/fidelity/realtime_allocation.rs`, which arms the
+    /// engine's quality-registration path (`src/eval/qualification.rs`) and
+    /// asserts zero allocations across the real production chain.
+    ///
+    /// (This previously cited a `tests/realtime_contract_test.rs` and an
+    /// `RT_ENTRY_POINTS` list. Neither exists — there is no such test file and
+    /// no such constant anywhere in the tree. The allocation guarantee is real
+    /// and is checked by the suite named above.)
     buffer_ptr_sets: [Vec<*mut std::ffi::c_void>; 2],
 }
 
@@ -81,15 +89,8 @@ struct CallbackState {
 /// callback never allocates. Called on the control thread at `create_buffers`
 /// time, never from the callback.
 #[cfg(windows)]
-fn build_buffer_ptr_sets(
-    buffer_infos: &[ASIOBufferInfo],
-) -> [Vec<*mut std::ffi::c_void>; 2] {
-    std::array::from_fn(|half| {
-        buffer_infos
-            .iter()
-            .map(|info| info.buffers[half])
-            .collect()
-    })
+fn build_buffer_ptr_sets(buffer_infos: &[ASIOBufferInfo]) -> [Vec<*mut std::ffi::c_void>; 2] {
+    std::array::from_fn(|half| buffer_infos.iter().map(|info| info.buffers[half]).collect())
 }
 
 /// Global active callback state. Set before `create_buffers`, cleared after

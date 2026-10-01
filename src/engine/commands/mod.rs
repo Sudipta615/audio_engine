@@ -574,6 +574,11 @@ impl AudioEngine {
             EngineCommand::Previous => self.handle_previous(),
             EngineCommand::SetRepeatMode(mode) => self.handle_set_repeat_mode(mode),
             EngineCommand::SetShuffle(enabled) => self.handle_set_shuffle(enabled),
+            EngineCommand::EnqueueCueSheet { path, pregap } => {
+                self.handle_enqueue_cue_sheet(path, pregap)
+            }
+            EngineCommand::LoadPlaylistFile(path) => self.handle_load_playlist_file(path),
+            EngineCommand::SavePlaylistFile(path) => self.handle_save_playlist_file(path),
 
             // ── Capture ──
             EngineCommand::CaptureStart { path, device } => self.handle_capture_start(path, device),

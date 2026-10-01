@@ -110,8 +110,7 @@ pub fn scan_decoder(decoder: &mut Decoder) -> Option<LoudnessScanResult> {
         None
     };
     // ReplayGain 2.0 target is -18.0 LUFS per BS.1770 specification
-    let replaygain_track_db =
-        ebu_r128_loudness.map(crate::standards::replaygain_2_track_db);
+    let replaygain_track_db = ebu_r128_loudness.map(crate::standards::replaygain_2_track_db);
     let replaygain_track_peak = if m.true_peak_linear > 0.0 {
         Some(m.true_peak_linear)
     } else {
@@ -129,6 +128,102 @@ pub fn scan_decoder(decoder: &mut Decoder) -> Option<LoudnessScanResult> {
             None
         },
         frames_scanned,
+    })
+}
+
+/// Album-level ReplayGain, accumulated across a set of scanned tracks.
+///
+/// ReplayGain 2.0's album gain is **not** the mean of the track gains and not
+/// the loudness of the concatenated audio. It is defined as a power mean over
+/// the tracks' *mean squares*, normalised by the count:
+///
+/// ```text
+///               1/N · Σ mean_square(i)
+///   album_gain = ────────────────────────
+///                        ref_mean_square
+/// ```
+///
+/// which in the log domain is `10 · log10(mean_square) + 18`, i.e. each track
+/// contributes with its loudness weight, so a quiet track pulls the album gain
+/// down proportionally to how quiet it actually is. Averaging the *dB* values
+/// instead — the obvious implementation — gives a close but wrong answer, and
+/// wrong in the direction that matters: it over-estimates an album's loudness
+/// when a quiet track is padded, which makes the album play too loudly.
+///
+/// The same normalisation gives the album peak: the maximum of the track
+/// peaks, because peaks are not additive in the mean-square sense and
+/// ReplayGain 2.0 specifies the album peak as the maximum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumReplayGain {
+    /// Album gain in dB, per the ReplayGain 2.0 power-mean definition above.
+    pub album_gain_db: f32,
+    /// Album peak (linear amplitude): the maximum track peak.
+    pub album_peak: f32,
+    /// How many tracks contributed.
+    pub track_count: usize,
+}
+
+/// Accumulate ReplayGain 2.0 album gain across per-track scan results.
+///
+/// Accepts anything that exposes the two fields the definition needs, so it
+/// composes over `LoudnessScanResult` and over any other per-track source.
+///
+/// Returns `None` when no track contributed a usable measurement — writing an
+/// album gain derived from zero tracks would be a fabricated value, and a
+/// player applying it would attenuate a whole album by a number that came from
+/// nothing.
+pub fn accumulate_album_replaygain<'a, I>(tracks: I) -> Option<AlbumReplayGain>
+where
+    I: IntoIterator<Item = &'a LoudnessScanResult>,
+{
+    let mut sum_mean_square = 0.0f64;
+    let mut count = 0usize;
+    let mut album_peak = 0.0f64;
+
+    for track in tracks {
+        let Some(lufs) = track.ebu_r128_loudness.filter(|v| v.is_finite()) else {
+            // A track with no usable integrated loudness is skipped rather
+            // than counted as silence. Counting it as 0 LUFS would drag the
+            // album gain down by up to 18 dB, which is the single largest
+            // error this function can make.
+            continue;
+        };
+        // Mean square in the amplitude domain. `10^(LUFS/20)` converts the
+        // BS.1770-5 loudness (which is already referenced to full scale) into
+        // a linear mean-square-equivalent.
+        let mean_square = 10f64.powf(f64::from(lufs) / 10.0);
+        if !mean_square.is_finite() || mean_square <= 0.0 {
+            continue;
+        }
+        sum_mean_square += mean_square;
+        count += 1;
+        if let Some(peak) = track
+            .replaygain_track_peak
+            .filter(|p| p.is_finite() && *p > 0.0)
+        {
+            album_peak = album_peak.max(f64::from(peak));
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+
+    let mean_square = sum_mean_square / count as f64;
+    let album_lufs = 10.0 * mean_square.log10();
+    // ReplayGain 2.0's reference is -18.0 LUFS; `replaygain_2_track_db` is the
+    // single definition of that relationship in the crate, and reusing it keeps
+    // the album and track paths from drifting apart.
+    let album_gain_db = crate::standards::replaygain_2_track_db(album_lufs as f32);
+
+    if !album_gain_db.is_finite() {
+        return None;
+    }
+
+    Some(AlbumReplayGain {
+        album_gain_db,
+        album_peak: album_peak as f32,
+        track_count: count,
     })
 }
 
@@ -260,6 +355,144 @@ mod tests {
         assert!(
             (peak - (-20.0)).abs() < 0.2,
             "peak should be ≈ -20 dBTP, got {peak:.3}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod album_tests {
+    use super::*;
+
+    /// A scan result with only the fields the album accumulator reads.
+    fn track(lufs: f32, peak: f32) -> LoudnessScanResult {
+        LoudnessScanResult {
+            ebu_r128_loudness: Some(lufs),
+            ebu_r128_peak_dbtp: None,
+            replaygain_track_db: Some(crate::standards::replaygain_2_track_db(lufs)),
+            replaygain_track_peak: Some(peak),
+            lra_lu: None,
+            frames_scanned: 48_000,
+        }
+    }
+
+    #[test]
+    fn a_single_track_album_equals_that_track() {
+        // The N=1 case is a useful anchor: album gain and track gain must
+        // agree, or the two paths have drifted apart.
+        let t = track(-18.0, 0.5);
+        let album = accumulate_album_replaygain([&t]).expect("one usable track");
+        assert_eq!(album.track_count, 1);
+        assert!(
+            (album.album_gain_db - t.replaygain_track_db.unwrap()).abs() < 1e-3,
+            "a one-track album must gain the same as the track: {} vs {}",
+            album.album_gain_db,
+            t.replaygain_track_db.unwrap()
+        );
+        assert_eq!(album.album_peak, 0.5);
+    }
+
+    #[test]
+    fn identical_tracks_do_not_change_the_gain() {
+        let tracks = [track(-20.0, 0.4), track(-20.0, 0.4), track(-20.0, 0.4)];
+        let album = accumulate_album_replaygain(&tracks).expect("three usable tracks");
+        assert_eq!(album.track_count, 3);
+        // -18 - (-20) = +2 dB.
+        assert!(
+            (album.album_gain_db - 2.0).abs() < 1e-3,
+            "three tracks at -20 LUFS must give +2 dB, got {}",
+            album.album_gain_db
+        );
+    }
+
+    #[test]
+    fn the_album_gain_is_a_power_mean_not_a_mean_of_decibels() {
+        // This is the case that separates the correct implementation from the
+        // obvious one. Two tracks: one at -20 LUFS, one 20 dB quieter at -40.
+        //
+        //   mean of dB   = (-20 + -40) / 2 = -30 LUFS  ->  +12 dB gain
+        //   power mean   = 10·log10((10^-2 + 10^-4)/2) = -23.01 LUFS -> +5.01 dB
+        //
+        // The dB average is 7 dB too generous, so an album with one quiet track
+        // would play 7 dB too loud. The assertion pins the power mean.
+        let tracks = [track(-20.0, 0.5), track(-40.0, 0.01)];
+        let album = accumulate_album_replaygain(&tracks).expect("two usable tracks");
+
+        // (10^(-20/10) + 10^(-40/10)) / 2 = (0.01 + 0.0001) / 2 = 0.00505,
+        // which is -22.97 dB, giving a +4.97 dB gain.
+        let mean_square = (10f64.powf(-2.0) + 10f64.powf(-4.0)) / 2.0;
+        let expected_gain = -18.0 - (10.0 * mean_square.log10()) as f32;
+
+        assert!(
+            (album.album_gain_db as f64 - expected_gain as f64).abs() < 1e-2,
+            "album gain should be ~{expected_gain:.2} dB (power mean over \
+             mean squares), got {:.2}",
+            album.album_gain_db
+        );
+        // And explicitly NOT the dB mean, which is the bug this guards.
+        let db_mean_gain = -18.0 - (-20.0f32 + -40.0f32) / 2.0;
+        assert!(
+            (album.album_gain_db - db_mean_gain).abs() > 5.0,
+            "a dB average would give {db_mean_gain:.2} dB, which is not what \
+             ReplayGain 2.0 specifies and over-boosts albums containing a \
+             quiet track"
+        );
+    }
+
+    #[test]
+    fn album_peak_is_the_maximum_track_peak() {
+        // Peaks are not additive in the mean-square sense; ReplayGain 2.0
+        // specifies the album peak as the maximum.
+        let tracks = [track(-20.0, 0.3), track(-20.0, 0.9), track(-20.0, 0.1)];
+        let album = accumulate_album_replaygain(&tracks).expect("three usable tracks");
+        assert!(
+            (album.album_peak - 0.9).abs() < 1e-6,
+            "album peak must be the maximum track peak, got {}",
+            album.album_peak
+        );
+    }
+
+    #[test]
+    fn tracks_without_a_usable_measurement_are_skipped_not_counted_as_silence() {
+        // The single largest error available: counting a track with no
+        // measurement as 0 LUFS drags the album gain down by up to 18 dB.
+        let mut no_loudness = track(-20.0, 0.5);
+        no_loudness.ebu_r128_loudness = None;
+        let mut nan_loudness = track(-20.0, 0.5);
+        nan_loudness.ebu_r128_loudness = Some(f32::NAN);
+
+        let tracks = [track(-20.0, 0.5), no_loudness, nan_loudness];
+        let album = accumulate_album_replaygain(&tracks).expect("one usable track");
+        assert_eq!(
+            album.track_count, 1,
+            "only the track with a real measurement contributes"
+        );
+        assert!(
+            (album.album_gain_db - 2.0).abs() < 1e-3,
+            "skipping unmeasured tracks must not change the answer, got {}",
+            album.album_gain_db
+        );
+    }
+
+    #[test]
+    fn no_usable_tracks_yields_no_album_gain() {
+        // Returning a fabricated gain from zero tracks would have a player
+        // attenuate a whole album by a number derived from nothing.
+        assert!(accumulate_album_replaygain([]).is_none());
+        let mut unmeasured = track(-20.0, 0.5);
+        unmeasured.ebu_r128_loudness = None;
+        assert!(accumulate_album_replaygain([&unmeasured]).is_none());
+    }
+
+    #[test]
+    fn a_loud_album_gets_attenuation() {
+        // The other direction: every track at -8 LUFS must come out negative,
+        // not clamped to zero.
+        let tracks = [track(-8.0, 0.95), track(-8.0, 0.8)];
+        let album = accumulate_album_replaygain(&tracks).expect("two usable tracks");
+        assert!(
+            (album.album_gain_db - (-10.0)).abs() < 1e-3,
+            "-18 - (-8) = -10 dB, got {}",
+            album.album_gain_db
         );
     }
 }

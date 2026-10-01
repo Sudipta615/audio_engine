@@ -322,13 +322,10 @@ impl DspGraph {
         {
             let mix = self.mix_mut();
             debug_assert!(
-                mix.inputs[slot].planes[0].len() >= k
-                    && mix.inputs[slot].planes[1].len() >= k,
+                mix.inputs[slot].planes[0].len() >= k && mix.inputs[slot].planes[1].len() >= k,
                 "secondary input plane under-allocated: needs {k} frames"
             );
-            if mix.inputs[slot].planes[0].len() < k
-                || mix.inputs[slot].planes[1].len() < k
-            {
+            if mix.inputs[slot].planes[0].len() < k || mix.inputs[slot].planes[1].len() < k {
                 underallocated = true;
             }
         }

@@ -219,9 +219,7 @@ impl DspNode for PluginHostNode {
             + self
                 .slots
                 .iter()
-                .map(|s| {
-                    std::mem::size_of_val(s) + s.source.capacity()
-                })
+                .map(|s| std::mem::size_of_val(s) + s.source.capacity())
                 .sum::<usize>()
     }
 

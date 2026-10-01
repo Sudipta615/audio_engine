@@ -2189,8 +2189,8 @@ fn analysis_engine_allocates_zero_bytes() {
 /// allocation-free is the *executing* generation, the same as any other.
 #[test]
 fn realtime_plan_driven_generation_executes_without_allocating() {
-    use engine::dsp::graph2::ProdStage;
     use engine::dsp::graph2::prod::{ChainRequest, ChainRouting};
+    use engine::dsp::graph2::ProdStage;
 
     let mut cfg = full_chain_config();
     cfg.precision_mode = config::PrecisionMode::Performance;
@@ -2259,8 +2259,8 @@ fn realtime_plan_driven_generation_executes_without_allocating() {
 /// only the pointer swap and the block-boundary activation are measured.
 #[test]
 fn realtime_plan_driven_swap_does_not_allocate_on_audio_thread() {
-    use engine::dsp::graph2::ProdStage;
     use engine::dsp::graph2::prod::{ChainRequest, ChainRouting};
+    use engine::dsp::graph2::ProdStage;
 
     let mut cfg = full_chain_config();
     cfg.precision_mode = config::PrecisionMode::Performance;
@@ -2293,8 +2293,7 @@ fn realtime_plan_driven_swap_does_not_allocate_on_audio_thread() {
         ],
         routing: ChainRouting::Trimmed,
     };
-    let (tx, rx) =
-        std::sync::mpsc::channel::<Box<engine::dsp::graph2::prod::GraphGeneration>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Box<engine::dsp::graph2::prod::GraphGeneration>>();
     for i in 0..N_SWAPS {
         let request = if i % 2 == 0 { &wide } else { &narrow };
         tx.send(

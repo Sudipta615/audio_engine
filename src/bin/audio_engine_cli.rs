@@ -812,6 +812,16 @@ fn print_event(event: EngineEvent) {
                 println!("\n  \x1b[2m[Engine] Playlist cleared ({} entries removed)\x1b[0m", length);
             }
         }
+        EngineEvent::PlaylistLoadFailed { path, message } => {
+            // Red: the queue is unchanged, so a host (or a user) needs to know
+            // the file was not what they asked for rather than discovering an
+            // unchanged queue later.
+            println!(
+                "\n  \x1b[31m[Engine] Playlist file error ({}): {}\x1b[0m",
+                path.display(),
+                message
+            );
+        }
         EngineEvent::CaptureStarted { ref path } => {
             println!(
                 "\n  \x1b[35m[Engine] Capture started -> '{}' (system audio)\x1b[0m",

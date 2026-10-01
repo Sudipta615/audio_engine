@@ -980,9 +980,13 @@ fn graph_nodes_reflect_active_stages_and_latency_terms() {
     // against `latency_ms()` and not `lookahead_ms()`; the drift guard below
     // is what would catch the two diverging again.
     assert!((get("limiter").latency_ms - pipeline.limiter.latency_ms()).abs() < 1e-6);
-    println!("DBG latency_ms={} lookahead_ms={} detector={} mode={:?}",
-        pipeline.limiter.latency_ms(), pipeline.limiter.lookahead_ms(),
-        pipeline.limiter.detector_delay_samples(), pipeline.limiter.detector_delay_ms());
+    println!(
+        "DBG latency_ms={} lookahead_ms={} detector={} mode={:?}",
+        pipeline.limiter.latency_ms(),
+        pipeline.limiter.lookahead_ms(),
+        pipeline.limiter.detector_delay_samples(),
+        pipeline.limiter.detector_delay_ms()
+    );
     assert!((get("limiter").tail_ms - pipeline.limiter.release_ms()).abs() < 1e-6);
     assert_eq!(get("eq").latency_ms, 0.0);
 

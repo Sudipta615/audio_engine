@@ -136,13 +136,13 @@ fn test_resampler_speed_2x_not_inverted() {
     }
     let ratio = n_output as f32 / n_input as f32;
     assert!(
-            ratio <= 1.25,
-            "speed=2.0 with {} input frames produced {} output (ratio {:.3}). \
+        ratio <= 1.25,
+        "speed=2.0 with {} input frames produced {} output (ratio {:.3}). \
              Correct ratio is ~0.5; inverted ratio is ~2.0.",
-            n_input,
-            n_output,
-            ratio,
-        );
+        n_input,
+        n_output,
+        ratio,
+    );
 }
 
 #[test]
@@ -171,13 +171,13 @@ fn test_resampler_speed_half_not_inverted() {
     }
     let ratio = n_output as f32 / n_input as f32;
     assert!(
-            ratio >= 1.25,
-            "speed=0.5 with {} input frames produced {} output (ratio {:.3}). \
+        ratio >= 1.25,
+        "speed=0.5 with {} input frames produced {} output (ratio {:.3}). \
              Correct ratio is ~2.0; inverted ratio is ~0.5.",
-            n_input,
-            n_output,
-            ratio,
-        );
+        n_input,
+        n_output,
+        ratio,
+    );
 }
 
 #[test]

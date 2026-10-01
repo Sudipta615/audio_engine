@@ -101,7 +101,6 @@ mod format;
 mod render;
 mod volume;
 
-pub(crate) use render::AUDCLNT_E_DEVICE_INVALIDATED;
 use client::{
     open_exclusive_client, open_exclusive_client_preferring, select_device, ExclusiveClient,
     RenderContext, RenderFailure,
@@ -111,6 +110,7 @@ use format::{
     default_exclusive_rate, probe_exclusive_rates, probe_supported_formats, WasapiContainer,
 };
 use render::render_loop;
+pub(crate) use render::AUDCLNT_E_DEVICE_INVALIDATED;
 
 /// Native WASAPI exclusive-mode output.
 pub struct WasapiOutput {
@@ -318,7 +318,9 @@ impl WasapiOutput {
             // this is the control thread that turns them into a log and a
             // user-visible stream error.
             if let Some((interface, hresult)) = self.render_failure.take() {
-                log::error!("WASAPI render loop stopped: {interface} failed, HRESULT {hresult:#010X}");
+                log::error!(
+                    "WASAPI render loop stopped: {interface} failed, HRESULT {hresult:#010X}"
+                );
                 self.stream_errors.report(StreamErrorEvent {
                     kind: if hresult == AUDCLNT_E_DEVICE_INVALIDATED.0 {
                         crate::output::output::StreamErrorKind::DeviceUnavailable

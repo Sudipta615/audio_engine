@@ -228,10 +228,24 @@ impl Decoder {
     pub fn open_source(source: &crate::source::AudioSource) -> Result<Self, DecodeError> {
         match source {
             crate::source::AudioSource::File(path) => Self::open(path),
+            // A CUE segment is a slice of a file: open the file, then seek to
+            // the segment's start. The frame budget is enforced by the caller
+            // draining the decoder, not here, so that a gapless handoff reads
+            // the same way it does for any other source.
+            crate::source::AudioSource::CueSegment(seg) => {
+                let sample_rate = Self::open(&seg.path)?.info().sample_rate;
+                let mut decoder = Self::open(&seg.path)?;
+                if seg.start_frame > 0 {
+                    let secs = seg.start_frame as f64 / f64::from(sample_rate.max(1));
+                    decoder.seek(secs as f32)?;
+                }
+                Ok(decoder)
+            }
             crate::source::AudioSource::Uri(uri) => {
                 // One shared resolution, so an http(s) URI cannot quietly become
                 // a filesystem open here and something else elsewhere.
-                let path = crate::decode::uri_to_local_path(uri).map_err(DecodeError::InvalidSource)?;
+                let path =
+                    crate::decode::uri_to_local_path(uri).map_err(DecodeError::InvalidSource)?;
                 Self::open(&path)
             }
             crate::source::AudioSource::Memory {
@@ -640,11 +654,15 @@ mod tests {
         }
         assert_eq!(total, 48_000, "exact logical frames after gapless trim");
         // Metadata routing: the shared extractor must find OpusTags.
-        let (title, artist, album, dur, _) = crate::decode::extract_track_metadata(&path);
-        assert_eq!(title, path.file_stem().unwrap().to_str().unwrap());
-        assert_eq!(artist, "Unknown Artist");
-        assert_eq!(album, "Unknown Album");
-        assert!((dur - 1.0).abs() < 0.05, "duration {dur}");
+        let meta = crate::decode::extract_track_metadata(&path);
+        assert_eq!(meta.title, path.file_stem().unwrap().to_str().unwrap());
+        assert_eq!(meta.artist, "Unknown Artist");
+        assert_eq!(meta.album, "Unknown Album");
+        assert!(
+            (meta.duration_secs - 1.0).abs() < 0.05,
+            "duration {}",
+            meta.duration_secs
+        );
         let _ = std::fs::remove_file(&path);
     }
 

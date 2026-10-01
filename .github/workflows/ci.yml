@@ -1,0 +1,230 @@
+# Continuous integration for the `audio-engine` workspace.
+#
+# The job split is not arbitrary — it follows a measured property of this
+# repository discovered while establishing the baseline:
+#
+#   **The full test suite is green in `--release` and RED in debug.**
+#
+# Five suites assert wall-clock or allocation-*rate* properties that a
+# debug build cannot meet, because the DSP runs unoptimised:
+#
+#   | Suite                        | Debug   | Release |
+#   |------------------------------|---------|---------|
+#   | producer_tick_allocations    | ~40-55  | ~7      |
+#   | realtime_qualification       | 88% CPU | pass    |
+#   | long_duration_stress         | 1453 x  | pass    |
+#   | long_duration_realtime_qual. | 6814 x  | pass    |
+#   | headless_playback            | timing  | pass    |
+#
+# (Allocations per tick: the 2-second telemetry gate in `engine/tick.rs:190`
+# is TIME-based, so an unoptimised tick loop crosses it far more often per
+# tick than an optimised one, and each crossing costs ~106 allocations.)
+#
+# Encoding that as `--release` for the whole suite is the honest fix. The
+# alternative — forcing `--test-threads=1` or raising thresholds to make debug
+# pass — would hide real regressions behind a slower build, and a test that
+# passes for the wrong reason is worse than one that fails. So: `test` runs
+# `--release`, which is also the configuration a release is actually built in.
+#
+# `lint` still runs debug, because clippy and rustfmt are profile-independent.
+#
+# Two jobs are deliberately NOT `continue-on-error`, and their failures are
+# meant to block a merge:
+#   * `fixtures` — the generated decode corpus, which is the only coverage of
+#     the externally-encoded lossy/container decode paths.
+#   * `perf`     — the realtime wall-clock budget gate.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug assertions OFF globally so an accidental `cargo test` without
+  # `--release` in a script behaves like the release suite instead of
+  # producing a confusing wall-clock failure. Individual jobs still choose
+  # their profile explicitly.
+  RUSTFLAGS: -D warnings
+  # The in-tree `.cargo/config.toml` pins `jobs = 2` for low-end hardware.
+  # That is right for a developer's machine and wrong for CI, which should
+  # use every core it was given.
+  CARGO_BUILD_JOBS: 4
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Lint ───────────────────────────────────────────────────────────────────
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # NOTE: `RUSTFLAGS: -D warnings` is set workflow-wide, so the explicit
+      # `-D warnings` below is redundant for clippy but kept for the case
+      # where this file is run locally without the env var.
+      - name: clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Optional-feature builds. AGENTS.md's completeness checklist requires
+      # these to compile when the change touches their paths; compiling them
+      # unconditionally is cheaper than working out which change did.
+      #
+      # `asio-native` / `wasapi-native` are `#[cfg(windows)]` and compile as
+      # no-ops here — the Windows legs of `test` are where they actually build.
+      - name: clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ── Test ───────────────────────────────────────────────────────────────────
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Any single failing leg fails the job, but do not cancel in-flight legs:
+      # a macOS failure plus a cancelled Windows run tells you much less than
+      # both results.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        features: [default, all-features]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # Linux needs ALSA headers for `cpal`; the engine does not open a device
+      # in CI, but the crate still links against `libasound`.
+      - name: Install ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.features }}
+
+      - name: test (release)
+        run: |
+          if [ "${{ matrix.features }}" = "all-features" ]; then
+            cargo test --workspace --release --all-features --no-fail-fast
+          else
+            cargo test --workspace --release --no-fail-fast
+          fi
+
+      # The fixture smoke test skips itself when `testdata/fixtures/` is
+      # absent, so the corpus is built in a dedicated job rather than here.
+      # This is intentional: it keeps the `test` matrix from depending on
+      # GStreamer being installed, which is not true on every runner image.
+
+  # ── Fixtures ───────────────────────────────────────────────────────────────
+  fixtures:
+    name: decode fixture corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # The encoders the generator needs, verified present on GStreamer 1.24.x.
+      # `aiffenc`, `avenc_pcm_s16be` and `adtsmux` are absent upstream and the
+      # script routes around all three; see scripts/make_fixtures.sh.
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate fixtures + manifest
+        run: ./scripts/make_fixtures.sh
+
+      - name: Verify corpus decodes to the manifest
+        run: cargo test --release --test decode_fixture_smoke -- --nocapture
+
+      # The manifest is committed. If the corpus no longer decodes to it, the
+      # failure above says so. This step catches the other direction: a
+      # regenerated corpus that no longer matches a committed manifest is a
+      # change to record explicitly in review, not something to absorb.
+      - name: Check the committed manifest is unchanged
+        run: |
+          if ! git diff --quiet -- testdata/fixtures.toml; then
+            echo "::error::testdata/fixtures.toml changed. The recorded decode"
+            echo "::error::expectations drifted from the committed manifest."
+            echo "::error::Review the diff, then commit it deliberately."
+            git --no-pager diff -- testdata/fixtures.toml
+            exit 1
+          fi
+
+      - name: Upload corpus (for debugging a failed run)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decode-fixtures
+          path: testdata/fixtures/
+          retention-days: 7
+
+  # ── Realtime performance budget ────────────────────────────────────────────
+  perf:
+    name: realtime budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+
+      # A wall-clock assertion is meaningless in a debug build — see the header
+      # comment. `--release` is not optional here.
+      - name: realtime budget (release)
+        run: cargo test --release --test realtime_budget -- --nocapture
+
+  # ── Docs ───────────────────────────────────────────────────────────────────
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No `RUSTDOCFLAGS` deny here: intra-doc-link warnings are noisy across
+      # 460 files and would block every PR. Broken *code* in a doc example is
+      # caught by the doctest run inside the `test` job.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps

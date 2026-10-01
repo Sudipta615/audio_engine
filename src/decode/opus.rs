@@ -635,10 +635,9 @@ impl OpusSource {
         }
         // Window-relative labels increase per row, so a fully-kept final row
         // proves every later packet is past the skip target.
-        if self.skip_to.is_some()
-            && last_drop == 0 {
-                self.skip_to = None;
-            }
+        if self.skip_to.is_some() && last_drop == 0 {
+            self.skip_to = None;
+        }
         self.pending_rows = kept_rows;
         self.pending_emitted = 0;
         self.pending_total = kept_total;
@@ -782,42 +781,57 @@ pub fn extract_loudness_metadata(path: &Path) -> crate::dsp::LoudnessMetadata {
     meta
 }
 
-/// Extract title, artist, album, duration (seconds), and a formatted
-/// duration string from OpusTags. Same shape as Symphonia's extractor so the
-/// `decode::extract_track_metadata` dispatcher can route by extension.
-pub fn extract_track_metadata(path: &Path) -> (String, String, String, f64, String) {
-    let default_title = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Unknown Track")
-        .to_string();
-    let Some((tags, duration_secs)) = extract_opus_info(path) else {
-        return (
-            default_title,
-            "Unknown Artist".into(),
-            "Unknown Album".into(),
-            0.0,
-            "0:00".into(),
-        );
+/// Extract editorial tags and duration from OpusTags.
+///
+/// Returns the same [`ExtractedTags`] as Symphonia's extractor so the
+/// `decode::extract_track_metadata` dispatcher can route by extension. Opus
+/// comment fields are plain key/value strings, so the album/genre/date/track
+/// numbers are read from the conventional Vorbis-comment keys rather than from
+/// typed values.
+pub fn extract_track_metadata(path: &Path) -> crate::decode::ExtractedTags {
+    use crate::decode::ExtractedTags;
+
+    let mut tags = ExtractedTags::unknown_for(path);
+
+    let Some((comment_tags, duration_secs)) = extract_opus_info(path) else {
+        return tags;
     };
+    tags.duration_secs = duration_secs;
+
     let get = |key: &str| -> Option<String> {
-        tags.get(key)
+        comment_tags
+            .get(key)
             .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
     };
-    let title = get("title").unwrap_or(default_title);
-    let artist = get("artist").unwrap_or_else(|| "Unknown Artist".to_string());
-    let album = get("album").unwrap_or_else(|| "Unknown Album".to_string());
-    let duration_str = if duration_secs > 0.0 {
-        format!(
-            "{}:{:02}",
-            (duration_secs as i32) / 60,
-            (duration_secs as i32) % 60
-        )
-    } else {
-        "0:00".to_string()
-    };
-    (title, artist, album, duration_secs, duration_str)
+
+    // `ARTIST` is the track artist; `ALBUMARTIST` is separate and must not be
+    // folded into it.
+    tags.title = get("title").unwrap_or_else(|| tags.title.clone());
+    tags.artist =
+        ExtractedTags::or_placeholder(get("artist").unwrap_or_default(), "Unknown Artist");
+    tags.album = ExtractedTags::or_placeholder(get("album").unwrap_or_default(), "Unknown Album");
+    tags.album_artist = get("albumartist").unwrap_or_default();
+    tags.genre = get("genre").unwrap_or_default();
+    tags.date = get("date").or_else(|| get("year")).unwrap_or_default();
+
+    // Vorbis comments express position as `N` and total as `TOTALTRACKS` /
+    // `TRACKTOTAL`, so they are read from separate keys rather than parsed
+    // out of one `3/12` string.
+    if let Some(n) = get("track").and_then(|v| v.parse::<u32>().ok()) {
+        tags.track_number = n;
+    }
+    if let Some(n) = get("tracktotal")
+        .or_else(|| get("totaltracks"))
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        tags.track_total = n;
+    }
+    if let Some(n) = get("disc").and_then(|v| v.parse::<u32>().ok()) {
+        tags.disc_number = n;
+    }
+
+    tags
 }
 
 // ── Test support: deterministic Ogg Opus fixture generation ─────────────────
@@ -1125,16 +1139,46 @@ mod tests {
 
     #[test]
     fn test_metadata_extractors() {
-        let tags = [("TITLE", "Song"), ("ARTIST", "Artist"), ("ALBUM", "Album")];
+        let tags = [
+            ("TITLE", "Song"),
+            ("ARTIST", "Artist"),
+            ("ALBUM", "Album"),
+            ("ALBUMARTIST", "Various"),
+            ("GENRE", "Techno"),
+            ("DATE", "1994"),
+            ("TRACK", "3"),
+            ("TRACKTOTAL", "12"),
+            ("DISC", "1"),
+        ];
         let path = write_test_opus(2, 24_000, 0, &tags);
-        let (title, artist, album, dur, dur_str) = extract_track_metadata(&path);
-        assert_eq!(title, "Song");
-        assert_eq!(artist, "Artist");
-        assert_eq!(album, "Album");
+        let meta = extract_track_metadata(&path);
+        assert_eq!(meta.title, "Song");
+        assert_eq!(meta.artist, "Artist");
+        assert_eq!(meta.album, "Album");
+        // The version-2 fields. `ALBUMARTIST` is read separately rather than
+        // overwriting the track artist, which is the whole point of the field.
+        assert_eq!(meta.album_artist, "Various");
+        assert_eq!(meta.genre, "Techno");
+        assert_eq!(meta.date, "1994");
+        assert_eq!(meta.track_number, 3);
+        assert_eq!(meta.track_total, 12);
+        assert_eq!(meta.disc_number, 1);
+
+        let dur = meta.duration_secs;
         assert!((dur - 0.5).abs() < 0.05, "duration {dur}");
-        assert_eq!(dur_str, "0:00", "under a minute formats as 0:SS");
-        let meta = extract_loudness_metadata(&path);
-        assert!(meta.replaygain_track_db.is_none(), "no gain tag in fixture");
+        assert_eq!(
+            crate::decode::symphonia_decoder::format_duration(dur),
+            // Rounded, not truncated: a 0.5 s fixture is 0.5 s, and showing
+            // `0:00` for it is the same class of "reads as a mistake" as the
+            // old `72:03` for a one-hour track.
+            "0:01",
+            "duration rounds to the nearest second"
+        );
+        let loudness = extract_loudness_metadata(&path);
+        assert!(
+            loudness.replaygain_track_db.is_none(),
+            "no gain tag in fixture"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

@@ -260,7 +260,11 @@ fn render_period(ctx: &mut RenderContext, scratch: &mut [f32]) -> bool {
     let buffer_size = match unsafe { ctx.audio_client.0.GetCurrentPadding() } {
         Ok(padding) => ctx.buffer_size_frames.saturating_sub(padding),
         Err(e) => {
-            record_client_error(&ctx.fatal_failure, "windows::IAudioClient::GetCurrentPadding", e);
+            record_client_error(
+                &ctx.fatal_failure,
+                "windows::IAudioClient::GetCurrentPadding",
+                e,
+            );
             return false;
         }
     };
@@ -277,7 +281,11 @@ fn render_period(ctx: &mut RenderContext, scratch: &mut [f32]) -> bool {
     let out = match unsafe { ctx.render_client.0.GetBuffer(n_frames as u32) } {
         Ok(ptr) => ptr,
         Err(e) => {
-            record_client_error(&ctx.fatal_failure, "windows::IAudioRenderClient::GetBuffer", e);
+            record_client_error(
+                &ctx.fatal_failure,
+                "windows::IAudioRenderClient::GetBuffer",
+                e,
+            );
             return false;
         }
     };
@@ -372,7 +380,11 @@ fn render_period(ctx: &mut RenderContext, scratch: &mut [f32]) -> bool {
     }
 
     if let Err(e) = unsafe { ctx.render_client.0.ReleaseBuffer(n_frames as u32, 0) } {
-        record_client_error(&ctx.fatal_failure, "windows::IAudioRenderClient::ReleaseBuffer", e);
+        record_client_error(
+            &ctx.fatal_failure,
+            "windows::IAudioRenderClient::ReleaseBuffer",
+            e,
+        );
         return false;
     }
     true

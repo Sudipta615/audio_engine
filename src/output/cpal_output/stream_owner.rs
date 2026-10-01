@@ -61,8 +61,11 @@ impl CpalOutput {
                             };
                             let mut scratch_buffer = vec![0.0f32; scratch_cap];
                             let mut declick = UnderrunState::new(sample_rate);
-                            let mut converter =
-                                AudioFormatConverter::new_at_rate(TargetFormat::I32, DitherType::None, sample_rate);
+                            let mut converter = AudioFormatConverter::new_at_rate(
+                                TargetFormat::I32,
+                                DitherType::None,
+                                sample_rate,
+                            );
 
                             device
                         .build_output_stream(
@@ -103,8 +106,11 @@ impl CpalOutput {
                             };
                             let mut scratch_buffer = vec![0.0f32; scratch_cap];
                             let mut declick = UnderrunState::new(sample_rate);
-                            let mut converter =
-                                AudioFormatConverter::new_at_rate(TargetFormat::F64, DitherType::None, sample_rate);
+                            let mut converter = AudioFormatConverter::new_at_rate(
+                                TargetFormat::F64,
+                                DitherType::None,
+                                sample_rate,
+                            );
 
                             device
                         .build_output_stream(
@@ -137,8 +143,11 @@ impl CpalOutput {
                             let callback_initialized = Arc::clone(&callback_initialized);
                             let clip_counter = Arc::clone(&clip_counter);
                             let nan_counter = Arc::clone(&nan_counter);
-                            let mut converter =
-                                AudioFormatConverter::new_at_rate(TargetFormat::F32, DitherType::None, sample_rate);
+                            let mut converter = AudioFormatConverter::new_at_rate(
+                                TargetFormat::F32,
+                                DitherType::None,
+                                sample_rate,
+                            );
                             let mut declick = UnderrunState::new(sample_rate);
 
                             device

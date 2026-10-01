@@ -1,6 +1,6 @@
 # Shadow Desktop Audio Engine — Owner's Guide & Architectural Map
 
-**Version:** 0.1.0 (engine + config in lockstep)
+**Version:** 0.2.0 (engine + config in lockstep)
 **License:** Apache-2.0
 **Language:** 100% pure Rust (no C/C++ components)
 **Audience:** the project owner and directors — people who need a reliable mental

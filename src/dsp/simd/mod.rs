@@ -7,7 +7,6 @@
 
 #[cfg(target_arch = "aarch64")]
 pub mod arm;
-pub mod biquad;
 pub mod dispatch;
 pub mod gain;
 pub mod interpolate;
@@ -18,7 +17,6 @@ pub mod scalar;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod x86;
 
-pub use biquad::process_biquad_stereo;
 pub use dispatch::{
     dispatch_accumulate_scaled, dispatch_dot_product, dispatch_mix_slices, dispatch_scale_slice,
     dispatch_scale_slice_f64, execute_accumulate_scaled_at_level, execute_at_level,

@@ -68,7 +68,28 @@ fn test_p1_parameter_metadata_bidirectional_conversion() {
 #[test]
 fn test_p1_versioned_state_v0_v1_v2_migrations() {
     assert_eq!(STATE_SCHEMA_VERSION, 2);
-    assert_eq!(CURRENT_ENGINE_VERSION, "0.1.0");
+    // The schema version is a migration key and is pinned: it changes only when
+    // a migration is added. The *engine* version is descriptive and comes from
+    // the config crate's manifest (`env!("CARGO_PKG_VERSION")`), so asserting a
+    // literal here would break on every release for no gain — the previous
+    // form (`assert_eq!(CURRENT_ENGINE_VERSION, "0.1.0")`) failed the moment the
+    // version was bumped, which is exactly the "descriptive field pinned as if
+    // it were a contract" mistake the constant's own doc comment warns about.
+    //
+    // What is worth asserting is that the two crates move in lockstep, since
+    // `CURRENT_ENGINE_VERSION` names the config crate while the workspace ships
+    // one product version.
+    assert_eq!(
+        CURRENT_ENGINE_VERSION,
+        env!("CARGO_PKG_VERSION"),
+        "the engine's reported version must match the crate the test is compiled \
+         into; a divergence means the crates are out of lockstep"
+    );
+    assert!(
+        !CURRENT_ENGINE_VERSION.is_empty(),
+        "the engine version must never be blank — a persisted envelope \
+         recording an unidentifiable version cannot be traced to a release"
+    );
 
     // Test legacy unversioned / v0 schema payload
     let v0_json = serde_json::json!({

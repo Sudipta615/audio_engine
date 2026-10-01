@@ -34,6 +34,22 @@ pub enum EngineEvent {
         /// Total number of queue entries.
         length: usize,
     },
+    /// A playlist file could not be loaded or saved.
+    ///
+    /// The queue is **unchanged** when this arrives: a failed load leaves the
+    /// existing queue exactly as it was, so a host can report the error and
+    /// carry on playing rather than discovering its queue has been replaced
+    /// with nothing.
+    ///
+    /// This exists because `EngineCommand` is fire-and-forget over an MPSC
+    /// channel — a `Result` in the command would have nowhere to go, and a
+    /// host would have no way to learn a load had silently failed.
+    PlaylistLoadFailed {
+        /// The file the engine tried to read or write.
+        path: std::path::PathBuf,
+        /// A human-readable description of what went wrong.
+        message: String,
+    },
     /// Playback started or resumed.
     PlaybackStarted,
     /// Playback was paused.

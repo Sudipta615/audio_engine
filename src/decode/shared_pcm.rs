@@ -306,7 +306,9 @@ impl SharedPcmDecoder {
         // happens after the first.
         chunk.samples.clear();
         chunk.samples.reserve(end - start);
-        chunk.samples.extend_from_slice(&self.pcm.samples[start..end]);
+        chunk
+            .samples
+            .extend_from_slice(&self.pcm.samples[start..end]);
         chunk.channels = ch;
         chunk.channel_layout = self.format_info.channel_layout.clone();
         chunk.sample_rate = self.pcm.sample_rate;
@@ -490,7 +492,11 @@ mod layout_tests {
         .expect("a 3-channel custom payload");
         assert_eq!(
             ids(&pcm.channel_layout()),
-            vec![ChannelId::FrontLeft, ChannelId::Unknown(7), ChannelId::FrontRight],
+            vec![
+                ChannelId::FrontLeft,
+                ChannelId::Unknown(7),
+                ChannelId::FrontRight
+            ],
             "role order must be preserved exactly"
         );
     }
@@ -501,9 +507,8 @@ mod layout_tests {
     fn supplying_a_layout_does_not_copy_the_payload() {
         let samples = Arc::new(vec![0.5f32; 64]);
         let weak = Arc::downgrade(&samples);
-        let pcm =
-            SharedPcm::new_with_layout(samples, 8_000, 2, ChannelLayout::Stereo, "shared")
-                .expect("valid");
+        let pcm = SharedPcm::new_with_layout(samples, 8_000, 2, ChannelLayout::Stereo, "shared")
+            .expect("valid");
         let _dec = SharedPcmDecoder::new(pcm);
         assert!(
             weak.upgrade().is_some(),

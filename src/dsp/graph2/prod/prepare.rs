@@ -161,7 +161,8 @@ impl GraphPreparationEstimate {
     /// The figure a reservation must cover: the moment when the retained
     /// generation and the compilation peak are both live.
     pub fn peak_bytes(&self) -> usize {
-        self.persistent_bytes.saturating_add(self.compilation_peak_bytes)
+        self.persistent_bytes
+            .saturating_add(self.compilation_peak_bytes)
     }
 
     /// Additional bytes a reservation must carry for assets that will be
@@ -631,11 +632,7 @@ mod tests {
             prepared.mc_steps(),
             &["routing", "mixer", "volume", "spatial"]
         );
-        let pinned: Vec<&str> = prepared
-            .retained_stages()
-            .iter()
-            .map(|r| r.stage)
-            .collect();
+        let pinned: Vec<&str> = prepared.retained_stages().iter().map(|r| r.stage).collect();
         assert_eq!(
             pinned,
             vec!["mixer", "volume"],
@@ -751,7 +748,10 @@ mod tests {
     #[test]
     fn a_preparation_peak_is_bounded_and_additive() {
         let est = estimate_graph_preparation(4);
-        assert!(est.compilation_peak_bytes > 0, "a build needs working memory");
+        assert!(
+            est.compilation_peak_bytes > 0,
+            "a build needs working memory"
+        );
         assert_eq!(
             est.peak_bytes(),
             est.persistent_bytes + est.compilation_peak_bytes,

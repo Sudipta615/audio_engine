@@ -45,8 +45,8 @@ pub use spatial_render::{
 };
 pub use versioned::{migrate_step, ConfigLoadError, VersionedConfig, CONFIG_VERSION};
 pub use versioned_state::{
-    migrate_json_value, EngineState, GraphState, NodeState, OutputProfileState, PluginState,
-    SpatialSceneState, StateMigrationError, VersionedEnvelope, CURRENT_ENGINE_VERSION,
+    migrate_json_value, DspState, EngineState, GraphState, NodeState, OutputProfileState,
+    PluginState, SpatialSceneState, StateMigrationError, VersionedEnvelope, CURRENT_ENGINE_VERSION,
     STATE_SCHEMA_VERSION,
 };
 

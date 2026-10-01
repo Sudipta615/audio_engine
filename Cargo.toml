@@ -11,7 +11,7 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on. See `docs/MIGRATION.md`.
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
@@ -42,7 +42,15 @@ wasapi-native = ["audio-output"]
 resample = ["rubato"]
 codec-mp3 = ["symphonia/mp3"]
 codec-flac = ["symphonia/flac"]
-codec-ogg = ["symphonia/ogg"]
+# Ogg *container* + Vorbis *codec*. These are two separate Symphonia features
+# and both are required: without `symphonia/vorbis` the container opens but
+# `Decoder::open` fails with "unsupported audio codec", because Symphonia
+# gates the Vorbis decoder behind its own codec feature. The fixture corpus
+# (`tests/decode_fixture_smoke.rs`) caught this — an Ogg Vorbis file produced
+# by `scripts/make_fixtures.sh` was undecodable until this was added.
+# NOTE: `symphonia/vorbis` is deliberately NOT part of `codec-opus`, which
+# supplies its own Ogg demuxer (`ogg`) and RFC 8251 decoder (`opus-decoder`).
+codec-ogg = ["symphonia/ogg", "symphonia/vorbis"]
 codec-wav = ["symphonia/wav"]
 codec-aac = ["symphonia/aac"]
 # ALAC is supplied by Symphonia's maintained ALAC codec feature.
@@ -160,7 +168,15 @@ wavicle = { version = "0.1", optional = true }
 # Pure-Rust Ogg demuxer and RFC 8251 Opus decoder, enabled by the
 # `codec-opus` feature.
 ogg = { version = "0.9", optional = true }
-opus-decoder = { version = "0.1.1", optional = true }
+# Pure-Rust RFC 8251 Opus decoder. Path dependency, NOT the crates.io
+# 0.1.1: the registry release panics in debug builds with "attempt to shift
+# left with overflow" at `celt/vq.rs:118` (`mask |= 1 << i` with `mask: u8` and
+# `i` up to `b`), which the fixture corpus hit immediately on any Ogg Opus
+# input. The in-tree fork at `crates/opus-decoder` carries the fix
+# (`mask: u32` plus an `i < 32` bound), so the fork is what gets built. It is
+# kept as an optional dependency rather than a workspace member so that
+# `--workspace` and `--all-features` do not change its build profile.
+opus-decoder = { path = "crates/opus-decoder", version = "0.1.1", optional = true }
 # Blocking HTTP client for network audio streaming (`network-streaming` feature).
 # Pure Rust, no async runtime — fits the synchronous `AudioByteSource` trait.
 ureq = { version = "2.12", optional = true }
@@ -253,6 +269,15 @@ wavicle = { version = "0.1", features = ["encode"] }
 # The reference plugin (in-process, via the static registry).
 plugin-abi = { path = "crates/plugin-abi", default-features = false }
 plugin-test-echo = { path = "crates/plugin-test-echo", default-features = false }
+# Parses `testdata/fixtures.toml` for the decode fixture smoke test. Test-only:
+# the library itself has no TOML dependency.
+toml = "0.8"
+# Also only a test dependency, and the same crate the optional `tag-write`
+# feature pulls in. `metadata_tags.rs` uses it to write real tags onto corpus
+# fixtures, so the metadata extractor is tested against bytes an encoder did
+# not produce by hand. Keeping it a dev-dependency as well means the test
+# suite builds without `tag-write` enabled.
+lofty = "0.22"
 
 [[bin]]
 name = "audio-engine-cli"
@@ -620,6 +645,51 @@ path = "tests/fidelity/long_duration_realtime_qualification.rs"
 [[test]]
 name = "song_evaluation"
 path = "tests/song_evaluation.rs"
+
+# Decode fixture corpus (see scripts/make_fixtures.sh). `decode_fixture_smoke`
+# is the gate; `decode_fixture_measure` is `#[ignore]`d and regenerates the
+# manifest, so the two are registered separately to keep the gate read-only.
+[[test]]
+name = "decode_fixture_smoke"
+path = "tests/decode_fixture_smoke.rs"
+
+[[test]]
+name = "decode_fixture_measure"
+path = "tests/decode_fixture_measure.rs"
+
+# Wall-clock budget for the production chain. MUST be run with `--release`
+# (the `perf` CI job does); it asserts its own profile rather than trusting
+# the caller to pass the right flag.
+[[test]]
+name = "realtime_budget"
+path = "tests/fidelity/realtime_budget.rs"
+
+# Decoder streaming audit: chunk-size independence, allocation-free
+# `decode_next_into`, and single-pass source reads.
+[[test]]
+name = "decode_streaming"
+path = "tests/fidelity/decode_streaming.rs"
+
+# Playlist file I/O through the engine command path (M3U / PLS / XSPF).
+[[test]]
+name = "playlist_io"
+path = "tests/playlist_io.rs"
+
+# Version-2 metadata fields (album artist, genre, date, track/disc numbers)
+# are actually read from real tags.
+[[test]]
+name = "metadata_tags"
+path = "tests/metadata_tags.rs"
+
+# CUE sheet expansion reaches the queue, including every fallback path.
+[[test]]
+name = "cue_split_queue"
+path = "tests/cue_split_queue.rs"
+
+# The loudness meter's LRA path does not allocate on the telemetry publish.
+[[test]]
+name = "lra_allocation"
+path = "tests/fidelity/lra_allocation.rs"
 
 
 

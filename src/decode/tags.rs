@@ -83,10 +83,17 @@ pub fn write_loudness_tags(path: &Path, meta: &LoudnessMetadata) -> Result<(), T
     }
 
     // Nothing to write → no-op (avoids creating an empty tag).
+    //
+    // The album fields are included in this check: a caller that has computed
+    // only an album gain (no per-track values) must still get tags written,
+    // and a check that omitted them would return early and silently write
+    // nothing.
     let has_values = meta.ebu_r128_loudness.is_some()
         || meta.ebu_r128_peak.is_some()
         || meta.replaygain_track_db.is_some()
-        || meta.replaygain_track_peak.is_some();
+        || meta.replaygain_track_peak.is_some()
+        || meta.replaygain_album_db.is_some()
+        || meta.replaygain_album_peak.is_some();
     if !has_values {
         return Ok(());
     }
@@ -161,6 +168,24 @@ fn set_loudness(tag: &mut Tag, meta: &LoudnessMetadata) {
     }
     if let Some(rg_peak) = meta.replaygain_track_peak {
         tag.insert_text(ItemKey::ReplayGainTrackPeak, format!("{:.8}", rg_peak));
+    }
+    // Album gain and album peak, same value in every file of a set. Writing
+    // them is what makes `LoudnessMode::AlbumReplayGain` work: a player using
+    // album mode reads `REPLAYGAIN_ALBUM_GAIN` and applies it to every track
+    // alike, which preserves the relative loudness between tracks instead of
+    // flattening each one to the same target.
+    //
+    // They were silently dropped before: `write_loudness_tags` accepted a
+    // `LoudnessMetadata` carrying album values and dropped them on the floor,
+    // so `--album` had no observable effect.
+    if let Some(album_gain) = meta.replaygain_album_db {
+        tag.insert_text(
+            ItemKey::ReplayGainAlbumGain,
+            format!("{:.2} dB", album_gain),
+        );
+    }
+    if let Some(album_peak) = meta.replaygain_album_peak {
+        tag.insert_text(ItemKey::ReplayGainAlbumPeak, format!("{:.8}", album_peak));
     }
 }
 
@@ -242,6 +267,87 @@ mod tests {
         // these up for Vorbis-comment containers (FLAC/Ogg/Opus); symphonia's
         // WAV probe does not surface custom ID3v2 TXXX frames, which is a
         // pre-existing symphonia limitation rather than a write-back defect.
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn album_gain_is_written_and_round_trips() {
+        // Album gain and album peak were silently dropped by `set_loudness`
+        // before this test existed: `write_loudness_tags` accepted a
+        // `LoudnessMetadata` carrying them and wrote nothing, so `--album` had
+        // no observable effect on any file. Verified through lofty for the
+        // same reason as the track-gain test above — the write is what is
+        // under test, and Symphonia's WAV/MP3 probes do not surface these keys
+        // (a pre-existing limitation, not a write-back defect).
+        let dir = test_dir("album_tags");
+        let path = dir.join("album.flac");
+        // A minimal FLAC is not needed: `write_loudness_tags` only requires a
+        // container lofty recognises, and a copied corpus fixture is the most
+        // representative thing available.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/fixtures/flac_s16.flac");
+        if !fixture.is_file() {
+            eprintln!("skipping: testdata corpus absent — run scripts/make_fixtures.sh");
+            return;
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(&fixture, &path).expect("copy fixture");
+
+        let meta = LoudnessMetadata {
+            replaygain_album_db: Some(-5.80),
+            replaygain_album_peak: Some(0.522_182_05),
+            ..Default::default()
+        };
+        write_loudness_tags(&path, &meta).expect("album tags must be written");
+
+        let tagged = lofty::read_from_path(&path).expect("read back");
+        let tag = tagged.primary_tag().expect("tag must exist");
+        assert_eq!(
+            tag.get_string(&ItemKey::ReplayGainAlbumGain),
+            Some("-5.80 dB"),
+            "album gain must be written, not silently dropped"
+        );
+        assert_eq!(
+            tag.get_string(&ItemKey::ReplayGainAlbumPeak),
+            Some("0.52218205"),
+            "album peak must be written"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn album_only_metadata_still_writes_tags() {
+        // The "nothing to write" early-return used to consider only the track
+        // fields, so a caller holding just an album gain got a silent no-op.
+        let dir = test_dir("album_only");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata/fixtures/flac_s16.flac");
+        if !fixture.is_file() {
+            eprintln!("skipping: testdata corpus absent — run scripts/make_fixtures.sh");
+            return;
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("album_only.flac");
+        std::fs::copy(&fixture, &path).expect("copy fixture");
+
+        write_loudness_tags(
+            &path,
+            &LoudnessMetadata {
+                replaygain_album_db: Some(-3.0),
+                ..Default::default()
+            },
+        )
+        .expect("must not no-op");
+
+        let tagged = lofty::read_from_path(&path).expect("read back");
+        assert_eq!(
+            tagged
+                .primary_tag()
+                .and_then(|t| t.get_string(&ItemKey::ReplayGainAlbumGain)),
+            Some("-3.00 dB")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

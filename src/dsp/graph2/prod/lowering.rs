@@ -45,9 +45,7 @@ pub fn lowered_plans() -> PlanSet {
 ///
 /// A request the arena cannot schedule is **refused** here, before any node has
 /// been allocated, so a bad plan never reaches a generation.
-pub(crate) fn compile_chain(
-    request: &ChainRequest,
-) -> Result<(ProdTopology, PlanSet), ChainError> {
+pub(crate) fn compile_chain(request: &ChainRequest) -> Result<(ProdTopology, PlanSet), ChainError> {
     let topology = build_requested_topology(request)?;
     let plans = lower(&topology);
     Ok((topology, plans))
@@ -83,21 +81,18 @@ fn is_output_domain(slot: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::topology::build_topology;
+    use super::*;
 
-/// The lowered steps as `(arena slot, scope)` pairs, for introspection
-/// and tests. `None` when the topology fails to compile (a programming
-/// error — the topology is a constant).
-fn lowered_plan_steps() -> Vec<(usize, bool)> {
-    let topo = build_topology();
-    topo.mc_steps()
-        .filter(|&(slot, _)| !is_output_domain(slot))
-        .collect()
-}
-
-
-
+    /// The lowered steps as `(arena slot, scope)` pairs, for introspection
+    /// and tests. `None` when the topology fails to compile (a programming
+    /// error — the topology is a constant).
+    fn lowered_plan_steps() -> Vec<(usize, bool)> {
+        let topo = build_topology();
+        topo.mc_steps()
+            .filter(|&(slot, _)| !is_output_domain(slot))
+            .collect()
+    }
 
     /// The stereo plan must not contain the routing head; the MC plan
     /// must start with it.
@@ -155,7 +150,11 @@ fn lowered_plan_steps() -> Vec<(usize, bool)> {
         assert_eq!(narrowed.normal_mc.steps.len(), 4, "+ the routing head");
         assert!(narrowed.normal.steps.len() < canonical.normal.steps.len());
         assert_eq!(
-            compile_chain(&ChainRequest::default()).unwrap().1.normal.steps,
+            compile_chain(&ChainRequest::default())
+                .unwrap()
+                .1
+                .normal
+                .steps,
             canonical.normal.steps
         );
     }

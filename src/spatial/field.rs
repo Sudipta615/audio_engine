@@ -187,13 +187,9 @@ impl AmbisonicFieldMixer {
         fn t<T>(v: &Vec<T>) -> usize {
             v.capacity() * std::mem::size_of::<T>()
         }
-            t(&self.bus)+
-            t(&self.delay)+
-            t(&self.delay_samples)+
-            t(&self.speakers)
+        t(&self.bus) + t(&self.delay) + t(&self.delay_samples) + t(&self.speakers)
     }
 }
-
 
 impl Default for AmbisonicFieldMixer {
     fn default() -> Self {

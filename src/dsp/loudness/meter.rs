@@ -518,6 +518,30 @@ pub struct LoudnessMeter {
     // History of short-term loudness (3s window) values for EBU Tech 3342 LRA calculation
     short_term_history: Vec<f32>,
 
+    /// Scratch buffer reused by [`Self::compute_lra`] for the gated-and-sorted
+    /// block values.
+    ///
+    /// `compute_lra` takes `&self` because it is called from `snapshot()`, which
+    /// is `&self` and runs on the control path. That signature could not be
+    /// changed to `&mut self` without threading mutability through the
+    /// telemetry publish path, and the alloc it removes is on that path — every
+    /// snapshot while a track plays.
+    ///
+    /// The earlier version of this function allocated a fresh `Vec` per call
+    /// via `.collect()` and then sorted it. Two consequences: a heap allocation
+    /// on every snapshot, and — more subtly — a *growing* one, because the
+    /// capacity was whatever `collect` inferred and was released immediately
+    /// afterwards, so each call paid for a fresh allocation of the full gated
+    /// history length. At a 100 ms hop that is 600+ blocks after a minute of
+    /// music, re-allocated and re-sorted on every snapshot.
+    ///
+    /// `RefCell` rather than `Cell` because the buffer is a `Vec` and must be
+    /// borrowed mutably. Not `Sync`, and does not need to be: `LoudnessMeter`
+    /// is a control-path type, never shared across threads. The borrow is held
+    /// only for the duration of this function and cannot panic while held,
+    /// since nothing inside it re-enters the meter.
+    lra_scratch: std::cell::RefCell<Vec<f32>>,
+
     /// BS.1770-5 channel weights for the current layout (semantic, not
     /// raw index). Rebuilt by `set_channel_layout`.
     channel_weights: [f32; MAX_CHANNELS],
@@ -554,6 +578,9 @@ impl LoudnessMeter {
             short_term_idx: 0,
             short_term_filled: 0,
             short_term_history: Vec::with_capacity(65536),
+            // Sized to the history's capacity: the gated set is never larger
+            // than the ungated one, so this never has to grow in steady state.
+            lra_scratch: std::cell::RefCell::new(Vec::with_capacity(65536)),
             channel_weights: bs1770_weights_for_layout(&ChannelLayout::from_count(_channels)),
             true_peak_meters: std::array::from_fn(|_| TruePeakMeter::new()),
         }
@@ -775,7 +802,6 @@ impl LoudnessMeter {
         Self::ms_to_lufs(integrated_ms as f32)
     }
 
-
     /// Compute Loudness Range (LRA) per EBU Tech 3342.
     ///
     /// Returns `(lra_lu, lra_valid)` where `lra_valid` is `false` when the
@@ -797,23 +823,28 @@ impl LoudnessMeter {
 
         let rel_gate = abs_mean_lufs - 20.0;
 
-        let mut gated: Vec<f32> = self
-            .short_term_history
-            .iter()
-            .copied()
-            .filter(|&lufs| lufs > rel_gate)
-            .collect();
+        // Reused across calls — see `lra_scratch`. The clear() keeps the
+        // already-allocated capacity, so a steady-state snapshot does no
+        // allocation at all.
+        let mut scratch = self.lra_scratch.borrow_mut();
+        scratch.clear();
+        scratch.extend(
+            self.short_term_history
+                .iter()
+                .copied()
+                .filter(|&lufs| lufs > rel_gate),
+        );
 
-        if gated.len() < 2 {
+        if scratch.len() < 2 {
             return (0.0, false);
         }
 
-        gated.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        scratch.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let low_idx = ((gated.len() as f32 * 0.10).floor() as usize).min(gated.len() - 1);
-        let high_idx = ((gated.len() as f32 * 0.95).ceil() as usize).min(gated.len() - 1);
+        let low_idx = ((scratch.len() as f32 * 0.10).floor() as usize).min(scratch.len() - 1);
+        let high_idx = ((scratch.len() as f32 * 0.95).ceil() as usize).min(scratch.len() - 1);
 
-        let lra = (gated[high_idx] - gated[low_idx]).max(0.0);
+        let lra = (scratch[high_idx] - scratch[low_idx]).max(0.0);
         (lra, true)
     }
 
@@ -830,6 +861,10 @@ impl LoudnessMeter {
         self.short_term_idx = 0;
         self.short_term_filled = 0;
         self.short_term_history.clear();
+        // The LRA scratch is a pure reuse buffer with no state of its own, so
+        // it keeps its capacity across a reset — which is the point of it.
+        // Clearing it is still correct hygiene for a very long-lived meter.
+        self.lra_scratch.borrow_mut().clear();
         // Reset K-weight filter state and true-peak detectors
         self.stage1 = KWeightStage1::new(self.sample_rate);
         self.stage2 = KWeightStage2::new(self.sample_rate);
@@ -886,7 +921,7 @@ mod lra_cost_tests {
     // structural rather than temporal: `cached_integrated_lufs` and
     // `cached_lra` had no readers anywhere in the workspace, and
     // `compute_lra_internal` existed only to feed them. Both facts are
-    // checkable with a grep, and are recorded in docs/BASELINE.md.
+    // checkable with a grep.
 
     /// The measurement the dead per-hop work was recomputing is still correct.
     ///

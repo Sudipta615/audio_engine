@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::source::AudioSource;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +85,43 @@ pub enum EngineCommand {
     SetRepeatMode(crate::playlist::RepeatMode),
     /// Enable or disable shuffle.
     SetShuffle(bool),
+    /// Expand a CUE sheet into one queue entry per track.
+    ///
+    /// `path` is the *audio* file (e.g. `album.flac`); the sibling `.cue` is
+    /// found automatically. A ripped CD is one continuous file plus a sheet
+    /// describing the divisions, so without this a user gets a single queue
+    /// entry playing the whole album with every title discarded.
+    ///
+    /// The per-track `INDEX 00` pre-gap is assigned to its **own** track, which
+    /// is the common tagging convention; see
+    /// [`crate::engine::cue_split::PregapPolicy`].
+    ///
+    /// A file with no adjacent `.cue` is loaded as a single track — the
+    /// ordinary case, and not an error.
+    EnqueueCueSheet {
+        /// The audio file whose divisions to expand.
+        path: PathBuf,
+        /// How to assign a track's `INDEX 00` pre-gap.
+        pregap: crate::engine::cue_split::PregapPolicy,
+    },
+    /// Replace the playback queue with the contents of a playlist file.
+    ///
+    /// The format is inferred from the extension. The command carries the
+    /// *outcome* rather than the success flag: [`EngineCommand`] is
+    /// fire-and-forget through an MPSC channel, so a `Result` here would have
+    /// nowhere to go and a host would have no way to learn that a malformed
+    /// file left the queue untouched. The outcome arrives as an
+    /// `EngineEvent::PlaylistLoadFailed` instead, and the queue is left
+    /// unchanged on failure — a caller that has just asked to load a broken
+    /// file and silently lost its existing queue is worse off than one that
+    /// got an error and kept playing.
+    LoadPlaylistFile(PathBuf),
+    /// Write the playback queue to a playlist file.
+    ///
+    /// Format is inferred from the extension, same as
+    /// [`EngineCommand::LoadPlaylistFile`], and a save failure is reported the
+    /// same way.
+    SavePlaylistFile(PathBuf),
 
     Shutdown,
     SetOutputBackend(config::AudioBackend),

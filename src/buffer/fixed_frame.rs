@@ -252,11 +252,15 @@ mod tests {
         );
         assert_eq!(buffer.capacity_frames(2), buffered_frames);
 
-        // 1365 ms at 48 kHz is quoted in buffer.rs and docs/BASELINE.md.
+        // The 1365 ms figure is derived above from the ring sizing, not from a
+        // named constant: the buffer is sized for MAX_CHANNELS width, so a
+        // stereo stream fills half of it. This assertion exists to keep that
+        // arithmetic honest if either number changes.
         let latency_ms = buffered_frames as f64 / 48_000.0 * 1000.0;
         assert!(
             (latency_ms - 1365.3).abs() < 0.5,
-            "the output ring holds {latency_ms:.1} ms at 48 kHz; the docs quote 1365.3 ms"
+            "the output ring holds {latency_ms:.1} ms at 48 kHz; this figure is \
+             quoted in the doc comment above and must move with it"
         );
     }
 

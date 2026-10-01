@@ -21,7 +21,8 @@
 //!
 //! # Realtime contract: no logging in the callback
 //!
-//! `REALTIME_CONTRACT.md` forbids logging/blocking/I/O/locking inside the
+//! `AGENTS.md` ("Realtime & concurrency rules") forbids
+//! logging/blocking/I/O/locking inside the
 //! callback — even an error-only `log::error!` can allocate, format, take a
 //! logger lock and perform platform I/O. Where the callback previously
 //! logged "Scratch buffer too small", it now only bumps the existing
@@ -793,9 +794,14 @@ mod tests {
         }
         assert!(out.iter().all(|&s| s == 0), "must latch to true silence");
 
-        run_i16(FRAMES, |b| {
-            b.push_block_interleaved(&vec![1.0f32; FRAMES * 2]);
-        }, &mut declick, &mut out);
+        run_i16(
+            FRAMES,
+            |b| {
+                b.push_block_interleaved(&vec![1.0f32; FRAMES * 2]);
+            },
+            &mut declick,
+            &mut out,
+        );
 
         assert!(
             out[0] == 0,
@@ -829,7 +835,11 @@ mod tests {
             &nans,
         );
         assert!(out.iter().all(|&s| s == 0), "pause must be silent");
-        assert_eq!(underruns.load(Ordering::Relaxed), 0, "pause is not an underrun");
+        assert_eq!(
+            underruns.load(Ordering::Relaxed),
+            0,
+            "pause is not an underrun"
+        );
         assert!(declick.is_live(), "pause re-arms the smoother");
     }
 }

@@ -12,12 +12,19 @@ impl DspGraph {
     /// the running graph can never be describing a plan that has been prepared
     /// but not swapped in.
     pub fn active_chain(&self) -> (Vec<&'static str>, Vec<&'static str>) {
-        let name = |slot: usize| {
-            crate::dsp::graph2::ProdStage::from_slot(slot).map(|s| s.stage_name())
-        };
+        let name =
+            |slot: usize| crate::dsp::graph2::ProdStage::from_slot(slot).map(|s| s.stage_name());
         (
-            self.active.plan_steps(false).iter().filter_map(|s| name(*s)).collect(),
-            self.active.plan_steps(true).iter().filter_map(|s| name(*s)).collect(),
+            self.active
+                .plan_steps(false)
+                .iter()
+                .filter_map(|s| name(*s))
+                .collect(),
+            self.active
+                .plan_steps(true)
+                .iter()
+                .filter_map(|s| name(*s))
+                .collect(),
         )
     }
 

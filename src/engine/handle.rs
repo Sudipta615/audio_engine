@@ -14,6 +14,7 @@ use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender};
 
 use crate::buffer::{EngineCommand, PlaybackInfo, PlaybackState};
+use crate::engine::cue_split::PregapPolicy;
 use crate::events::{EngineEvent, OutputEvent};
 use crate::source::AudioSource;
 
@@ -199,6 +200,64 @@ impl EngineHandle {
     /// Set the repeat mode (Off / All / One).
     pub fn set_repeat_mode(&self, mode: crate::playlist::RepeatMode) {
         let _ = self.send_command(EngineCommand::SetRepeatMode(mode));
+    }
+
+    /// Expand a CUE sheet into one queue entry per track.
+    ///
+    /// A ripped CD is one continuous audio file plus a `.cue` describing the
+    /// track divisions. Without this, such a file enters the queue as a single
+    /// entry that plays the entire album with every title discarded.
+    ///
+    /// The sheet is found automatically beside `path`; a file with no adjacent
+    /// `.cue` is enqueued as one ordinary track, so this is safe to call on
+    /// every file a user opens.
+    ///
+    /// `pregap` decides where a track's `INDEX 00` pre-gap goes — see
+    /// [`PregapPolicy`](crate::engine::cue_split::PregapPolicy). The default
+    /// assigns it to its own track, which matches the common convention.
+    ///
+    /// Fire-and-forget, like every other queue mutation: the resulting length
+    /// arrives in `EngineEvent::PlaylistChanged`.
+    pub fn enqueue_cue_sheet(&self, path: impl Into<PathBuf>, pregap: PregapPolicy) {
+        let _ = self.send_command(EngineCommand::EnqueueCueSheet {
+            path: path.into(),
+            pregap,
+        });
+    }
+
+    /// Replace the playback queue with the contents of a playlist file.
+    ///
+    /// The format (M3U, PLS, XSPF) is inferred from the extension. This is
+    /// fire-and-forget: the queue is a control-path structure and the engine
+    /// owns it, so the read happens on the control thread rather than here.
+    ///
+    /// To learn whether it worked, listen for events. A successful load emits
+    /// [`EngineEvent::PlaylistChanged`](crate::events::EngineEvent::PlaylistChanged);
+    /// a failure emits
+    /// [`EngineEvent::PlaylistLoadFailed`](crate::events::EngineEvent::PlaylistLoadFailed)
+    /// and leaves the queue **unchanged**, so a malformed file cannot wipe a
+    /// queue the user built up.
+    ///
+    /// Loading a playlist does not start playback. A playlist says what to
+    /// play, not what *is* playing, and auto-starting on load would surprise
+    /// anyone who opened a 500-track list expecting nothing to happen. Call
+    /// [`Self::play_index`] to start.
+    pub fn load_playlist_file(&self, path: impl Into<PathBuf>) {
+        let _ = self.send_command(EngineCommand::LoadPlaylistFile(path.into()));
+    }
+
+    /// Write the playback queue to a playlist file, inferring the format from
+    /// its extension.
+    ///
+    /// Entries under the output file's directory are written relative to it, so
+    /// the folder can be moved without breaking the playlist. Entries outside
+    /// it are written absolute.
+    ///
+    /// A queue holding buffered or in-memory audio is refused rather than
+    /// written with those entries silently dropped; the failure arrives as
+    /// [`EngineEvent::PlaylistLoadFailed`](crate::events::EngineEvent::PlaylistLoadFailed).
+    pub fn save_playlist_file(&self, path: impl Into<PathBuf>) {
+        let _ = self.send_command(EngineCommand::SavePlaylistFile(path.into()));
     }
 
     /// Enable or disable shuffle.

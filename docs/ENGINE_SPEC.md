@@ -1,6 +1,6 @@
 # Shadow Desktop Engine Specification (`ENGINE_SPEC.md`)
 
-**Document Version**: 0.1.0  
+**Document Version**: 0.2.0  
 **Specification Status**: Authoritative Engineering Contract  
 **Standard**: Strict ISO / ITU-R / EBU Audiophile Architecture
 

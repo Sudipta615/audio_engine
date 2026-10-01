@@ -7,7 +7,7 @@ use symphonia::core::{
     units::Time,
 };
 
-use crate::decode::symphonia_decoder::downmix_interleaved_to_stereo;
+use crate::decode::channel_mix::downmix_interleaved_to_stereo;
 use crate::decode::symphonia_decoder::{DecodeError, DecodeInfo, SymphoniaDecoder};
 use crate::decode::{ChannelLayout, DecodedChunk};
 

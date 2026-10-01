@@ -903,7 +903,9 @@ impl ConvolutionEngine {
     /// Control path only — this walks every buffer the engine owns.
     pub fn heap_bytes(&self) -> usize {
         fn flat<T>(v: &[Vec<T>]) -> usize {
-            v.iter().map(|b| b.capacity() * std::mem::size_of::<T>()).sum()
+            v.iter()
+                .map(|b| b.capacity() * std::mem::size_of::<T>())
+                .sum()
         }
         fn one<T>(v: &Vec<T>) -> usize {
             v.capacity() * std::mem::size_of::<T>()

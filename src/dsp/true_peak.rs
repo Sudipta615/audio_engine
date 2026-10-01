@@ -505,7 +505,8 @@ mod tests {
         let mut worst_engine_stopband = f64::NEG_INFINITY;
         for hz in (24000..=96000).step_by(25) {
             let (mag, _) = frequency_response(hz as f32, base_rate as f32);
-            worst_engine_stopband = worst_engine_stopband.max(20.0 * (mag / FIR_BRANCHES as f64).log10());
+            worst_engine_stopband =
+                worst_engine_stopband.max(20.0 * (mag / FIR_BRANCHES as f64).log10());
         }
         assert!(
             worst_engine_stopband <= -required,

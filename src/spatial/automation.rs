@@ -300,7 +300,11 @@ impl SpatialAutomation {
     /// the scenes that are expensive.
     pub fn heap_bytes(&self) -> usize {
         self.position.as_ref().map(|c| c.heap_bytes()).unwrap_or(0)
-            + self.orientation.as_ref().map(|c| c.heap_bytes()).unwrap_or(0)
+            + self
+                .orientation
+                .as_ref()
+                .map(|c| c.heap_bytes())
+                .unwrap_or(0)
             + self.gain.as_ref().map(|c| c.heap_bytes()).unwrap_or(0)
             + self.spread.as_ref().map(|c| c.heap_bytes()).unwrap_or(0)
     }

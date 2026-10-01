@@ -1,11 +1,7 @@
 //! Equalizer filter-bank implementation.
 
 use super::types::{EqBand, EqBandParams, EqFilterType, MAX_EQ_BANDS};
-use crate::{
-    buffer::AudioFrame,
-    dsp::biquad::SmoothedBiquad,
-    dsp::gain::GainProcessor,
-};
+use crate::{buffer::AudioFrame, dsp::biquad::SmoothedBiquad, dsp::gain::GainProcessor};
 
 /// Parametric EQ processor — configurable multi-band equaliser
 ///
@@ -922,8 +918,14 @@ mod tests {
     #[test]
     fn post_gain_and_headroom_also_ramp() {
         for (name, set) in [
-            ("post_gain", ParametricEq::set_post_gain_db as fn(&mut ParametricEq, f32)),
-            ("headroom", ParametricEq::set_headroom_db as fn(&mut ParametricEq, f32)),
+            (
+                "post_gain",
+                ParametricEq::set_post_gain_db as fn(&mut ParametricEq, f32),
+            ),
+            (
+                "headroom",
+                ParametricEq::set_headroom_db as fn(&mut ParametricEq, f32),
+            ),
         ] {
             let mut eq = enabled_eq();
             settled_gain(&mut eq);
@@ -966,7 +968,10 @@ mod tests {
         settled_gain(&mut eq);
 
         let before = eq.applied_headroom_gain();
-        assert!(before < 0.9, "auto headroom should have attenuated: {before}");
+        assert!(
+            before < 0.9,
+            "auto headroom should have attenuated: {before}"
+        );
 
         // The ordinary case: a host moves one slider, which re-derives the
         // headroom from the new curve.

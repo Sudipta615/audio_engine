@@ -15,7 +15,10 @@ src/
 ├── events.rs                 # EngineEvent / OutputEvent — discrete lifecycle notifications
 ├── playback_info.rs          # PlaybackInfo — lock-free telemetry snapshot
 ├── source.rs                 # AudioSource — File / Uri / Memory abstraction
-├── playlist.rs               # Playback queue: shuffle, repeat, history
+├── playlist/                 # Playback queue
+│   ├── mod.rs                #   Playlist: shuffle, repeat, history
+│   ├── io.rs                 #   M3U / PLS / XSPF parse + write (PlaylistFormat)
+│   └── tests.rs              #   queue-semantics unit tests
 ├── sink.rs                   # SampleSink trait — where processed audio goes
 ├── audio_io.rs               # Async file/URI I/O helpers (memory-mapped + async)
 ├── diagnostics.rs            # Typed diagnostics: DiagnosticKind (EngineFault /
@@ -93,7 +96,8 @@ src/
 │       ├── mod.rs            # Dispatch table
 │       ├── playback.rs       # play / pause / stop / seek / speed / pitch
 │       ├── lifecycle.rs      # open / prepare-next / recover / tag write-back
-│       ├── playlist.rs       # enqueue / next / previous / shuffle / repeat
+│       ├── playlist.rs       # enqueue / next / previous / shuffle / repeat /
+│       │                      #   load / save playlist file
 │       ├── lanes.rs          # add/remove track, track gain/pan, duck tracks
 │       ├── eq.rs             # parametric + graphic EQ, shelves, preamp
 │       ├── dsp.rs            # dither, crossfeed, compressor, limiter, bit-perfect
@@ -642,6 +646,23 @@ current stream reaches EndOfStream the engine chooses, per `TransitionMode`:
 The playlist auto-advances on EOS: `RepeatMode::One` restarts the current
 track, `RepeatMode::All` wraps, shuffle cycles play every entry exactly once
 before repeating.
+
+### Playlist files
+
+`playlist::io` reads and writes the three formats that exist in real user
+libraries — M3U/M3U8, PLS, and XSPF — inferred from the file extension. Entries
+are resolved against the playlist file's own directory on read and written
+relative to it when they live underneath, so a folder containing a playlist and
+its tracks can be moved without breaking. Repeat mode and shuffle are **not**
+in any of the three formats and so survive a load unchanged: the file specifies
+the queue, the playback settings are the user's.
+
+Both directions are fire-and-forget through `EngineCommand`
+(`LoadPlaylistFile` / `SavePlaylistFile`). A failure is reported as
+`EngineEvent::PlaylistLoadFailed` and **leaves the queue untouched** — opening
+a corrupt file must not empty a queue the user spent an hour building. A queue
+holding buffered or in-memory audio is refused on save rather than written with
+those entries silently dropped.
 
 ## Realtime-safety rules
 

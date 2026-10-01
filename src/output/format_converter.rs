@@ -464,11 +464,7 @@ mod tests {
 
     /// Push a signal through one of the mono integer conversions and return the
     /// reconstructed `f32` values, normalised so 1.0 is full scale.
-    fn round_trip_mono(
-        c: &mut AudioFormatConverter,
-        input: &[f32],
-        scale: f32,
-    ) -> Vec<f32> {
+    fn round_trip_mono(c: &mut AudioFormatConverter, input: &[f32], scale: f32) -> Vec<f32> {
         input
             .iter()
             .map(|&s| match c.format() {
@@ -496,16 +492,16 @@ mod tests {
     ];
 
     /// Formats where dither is actually applied.
-    const DITHERED: [(TargetFormat, f32); 2] =
-        [(TargetFormat::I16, 32768.0), (TargetFormat::I24Le, 8388608.0)];
+    const DITHERED: [(TargetFormat, f32); 2] = [
+        (TargetFormat::I16, 32768.0),
+        (TargetFormat::I24Le, 8388608.0),
+    ];
 
     /// 1 kHz at `amplitude` full scale.
     fn sine(n: usize, amplitude: f32) -> Vec<f32> {
         (0..n)
             .map(|i| {
-                amplitude
-                    * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin()
-                    as f32
+                amplitude * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin() as f32
             })
             .collect()
     }
@@ -666,11 +662,7 @@ mod tests {
     /// correlation is the audible artefact: a truncating quantiser's error is
     /// always downward, so its error rides on the waveform and shows up as
     /// harmonic distortion at the signal's own frequencies.
-    fn error_signal_correlation(
-        c: &mut AudioFormatConverter,
-        input: &[f32],
-        scale: f32,
-    ) -> f64 {
+    fn error_signal_correlation(c: &mut AudioFormatConverter, input: &[f32], scale: f32) -> f64 {
         let out = round_trip_mono(c, input, scale);
         let err: Vec<f64> = input
             .iter()
@@ -681,7 +673,11 @@ mod tests {
         let n = err.len() as f64;
         let mean_e = err.iter().sum::<f64>() / n;
         let mean_s = sig.iter().sum::<f64>() / n;
-        let cov: f64 = err.iter().zip(&sig).map(|(e, s)| (e - mean_e) * (s - mean_s)).sum();
+        let cov: f64 = err
+            .iter()
+            .zip(&sig)
+            .map(|(e, s)| (e - mean_e) * (s - mean_s))
+            .sum();
         let var_e: f64 = err.iter().map(|e| (e - mean_e).powi(2)).sum();
         let var_s: f64 = sig.iter().map(|s| (s - mean_s).powi(2)).sum();
         if var_e == 0.0 || var_s == 0.0 {

@@ -23,6 +23,86 @@ impl AudioEngine {
         self.maybe_preload_next();
     }
 
+    /// Expand a CUE sheet into one queue entry per track.
+    ///
+    /// Falls back to a plain enqueue when there is no adjacent `.cue`, which is
+    /// the overwhelmingly common case for a file opened this way — a user
+    /// double-clicking a track should not have to know whether a sheet exists.
+    ///
+    /// The decoded duration is needed to bound the *last* track, which has no
+    /// following `INDEX`. It is obtained by opening the file briefly here, on
+    /// the control path; no audio is decoded, so this is cheap.
+    pub(super) fn handle_enqueue_cue_sheet(
+        &mut self,
+        path: std::path::PathBuf,
+        pregap: crate::engine::cue_split::PregapPolicy,
+    ) {
+        use crate::engine::cue_split;
+
+        let Some(sheet_path) = cue_split::find_sibling_cue(&path) else {
+            info!(
+                "No CUE sheet beside {}; enqueuing as a single track",
+                path.display()
+            );
+            self.handle_enqueue(AudioSource::File(path));
+            return;
+        };
+
+        let text = match std::fs::read_to_string(&sheet_path) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Cannot read {}: {e}", sheet_path.display());
+                self.handle_enqueue(AudioSource::File(path));
+                return;
+            }
+        };
+        let sheet = match crate::decode::CueSheet::parse(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                // A malformed sheet must not block the audio behind it: fall
+                // back to playing the whole file, which is what the user had
+                // before this feature existed.
+                warn!("Cannot parse {}: {e}", sheet_path.display());
+                self.handle_enqueue(AudioSource::File(path));
+                return;
+            }
+        };
+
+        // The duration and sample rate, needed to bound the final track and to
+        // convert `INDEX` timestamps to frames.
+        let (total_secs, sample_rate) = match crate::decode::Decoder::open(&path) {
+            Ok(d) => {
+                let info = d.info();
+                (Some(f64::from(info.duration_secs)), info.sample_rate)
+            }
+            Err(e) => {
+                warn!("Cannot open {} for CUE expansion: {e}", path.display());
+                self.handle_enqueue(AudioSource::File(path));
+                return;
+            }
+        };
+
+        let segments =
+            cue_split::expand_cue_sheet(&sheet, &sheet_path, total_secs, sample_rate, pregap);
+
+        if segments.is_empty() {
+            warn!(
+                "{} parsed but produced no playable tracks; enqueuing the whole file",
+                sheet_path.display()
+            );
+            self.handle_enqueue(AudioSource::File(path));
+            return;
+        }
+
+        let count = segments.len();
+        for segment in segments {
+            self.playlist.enqueue(segment.to_source());
+        }
+        self.emit_playlist_changed();
+        info!("Expanded {count} tracks from {}", sheet_path.display());
+        self.maybe_preload_next();
+    }
+
     /// Remove and discard the next track from the playback queue.
     pub(super) fn handle_dequeue(&mut self) {
         if let Some(removed) = self.playlist.dequeue() {
@@ -72,6 +152,67 @@ impl AudioEngine {
         self.emit_playlist_changed();
         self.preload.cancel();
         info!("Playlist cleared");
+    }
+
+    /// Replace the queue with the contents of a playlist file.
+    ///
+    /// The format is inferred from the extension. On failure the queue is left
+    /// **exactly** as it was and `PlaylistLoadFailed` is emitted — the point of
+    /// loading a playlist is to replace the queue, so a partial replacement
+    /// would leave the engine in a state neither the host nor the user asked
+    /// for. Preload is cancelled because it was targeting entries that no
+    /// longer exist.
+    pub(super) fn handle_load_playlist_file(&mut self, path: std::path::PathBuf) {
+        let parsed = match crate::playlist::PlaylistFormat::read_auto(&path) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!("LoadPlaylistFile({}) failed: {e}", path.display());
+                self.emit_event(EngineEvent::PlaylistLoadFailed {
+                    path: path.clone(),
+                    message: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        let entry_count = parsed.entries.len();
+        let mut queue = crate::playlist::Playlist::from_parsed(parsed);
+
+        // Carry the transport settings across the replacement. None of the three
+        // playlist formats expresses repeat mode or shuffle, so a file cannot
+        // say anything about them — and silently resetting a user's "repeat
+        // all" because they opened a file is the wrong direction. The *queue*
+        // is what the file specifies; the playback settings are the user's.
+        queue.set_repeat(self.playlist.repeat());
+        queue.set_shuffle(self.playlist.is_shuffle_enabled());
+
+        self.playlist = queue;
+        self.emit_playlist_changed();
+        self.preload.cancel();
+        info!("Loaded {} entries from {}", entry_count, path.display());
+        self.maybe_preload_next();
+    }
+
+    /// Write the queue to a playlist file, inferring the format from the
+    /// extension.
+    ///
+    /// Unlike loading, a failed save needs no rollback — the queue was never
+    /// modified — but it is reported the same way, so a host has one failure
+    /// path for playlist I/O rather than two.
+    pub(super) fn handle_save_playlist_file(&mut self, path: std::path::PathBuf) {
+        if let Err(e) = self.playlist.save_to_path_auto(&path) {
+            warn!("SavePlaylistFile({}) failed: {e}", path.display());
+            self.emit_event(EngineEvent::PlaylistLoadFailed {
+                path: path.clone(),
+                message: e.to_string(),
+            });
+            return;
+        }
+        info!(
+            "Saved {} entries to {}",
+            self.playlist.len(),
+            path.display()
+        );
     }
 
     /// Jump directly to playlist index `index` and start playing it.  If the

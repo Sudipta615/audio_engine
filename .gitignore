@@ -43,3 +43,10 @@ desktop.ini
 *.wav.tmp
 *.pcm.tmp
 *.raw.tmp
+
+# Generated decode fixture corpus. `testdata/fixtures.toml` (the manifest) IS
+# committed — it is the recorded expectation the smoke test checks against —
+# but the encoded audio is not: 35 s of lossless stereo is several MB per file,
+# and every GStreamer version bump would churn them for no reviewable benefit.
+# Regenerate with `scripts/make_fixtures.sh`.
+/testdata/fixtures/

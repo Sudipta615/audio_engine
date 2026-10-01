@@ -488,10 +488,7 @@ fn k_weighting_matches_the_itu_de_man_coefficients() {
         (hp_f0 - 38.135_47_f32).abs() < 1e-3,
         "high-pass corner drift"
     );
-    assert!(
-        (hp_q - 0.500_327_05_f32).abs() < 1e-6,
-        "high-pass Q drift"
-    );
+    assert!((hp_q - 0.500_327_05_f32).abs() < 1e-6, "high-pass Q drift");
 
     // And the shelf must actually realise that response: +4 dB well above the
     // corner, ~0 dB far below it. A coefficient typo still produces *a*

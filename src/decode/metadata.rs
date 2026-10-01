@@ -23,7 +23,16 @@ use crate::dsp::LoudnessMetadata;
 
 /// Current schema version of [`TrackMetadata`]. Bump when the model changes;
 /// a future persistence/caching layer should carry it.
-pub const METADATA_VERSION: u32 = 1;
+///
+/// **Version 2** — `from_path` populates `album_artist`, `genre`, `date`,
+/// `track_number`, `track_total` and `disc_number`. Those fields existed in
+/// [`TrackTags`] at version 1 but nothing ever wrote them: the extractor
+/// returned a 5-tuple that could not carry them, so every read of a tagged file
+/// reported a blank genre and a year of "". A consumer written against
+/// version 1 that treated a missing value as "not tagged" is unaffected; one
+/// that cached version-1 output would now see populated fields, which is the
+/// correction, not a regression.
+pub const METADATA_VERSION: u32 = 2;
 
 /// Editorial / human-facing tags for a single track.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -76,13 +85,22 @@ impl TrackMetadata {
     /// Never decodes audio. Reuses the shared, codec-routing extractors so
     /// the values match what the playback chain reads on load.
     pub fn from_path(path: &Path) -> Self {
-        let (title, artist, album, duration_secs, _) = super::extract_track_metadata(path);
+        let extracted = super::extract_track_metadata(path);
         let loudness = extract_loudness_metadata(path);
         let mut tags = TrackTags {
-            title: Some(title),
-            artist: Some(artist),
-            album: Some(album),
-            ..Default::default()
+            title: Some(extracted.title),
+            artist: Some(extracted.artist),
+            album: Some(extracted.album),
+            album_artist: non_empty(extracted.album_artist),
+            genre: non_empty(extracted.genre),
+            date: non_empty(extracted.date),
+            // 0 is the extractors' "untagged" sentinel; `TrackTags` models
+            // absence as `None`, so the two are reconciled here rather than
+            // letting 0 reach a host as a real track number.
+            track_number: (extracted.track_number > 0).then_some(extracted.track_number),
+            track_total: (extracted.track_total > 0).then_some(extracted.track_total),
+            disc_number: (extracted.disc_number > 0).then_some(extracted.disc_number),
+            artwork_ref: None,
         };
         // The extractors fill "Unknown …" placeholders when no tag exists;
         // normalise them away so consumers can rely on `None` meaning absent.
@@ -90,7 +108,7 @@ impl TrackMetadata {
         Self {
             version: Self::current_version(),
             tags,
-            duration_secs,
+            duration_secs: extracted.duration_secs,
             loudness,
             format: None,
             measured: None,
@@ -123,6 +141,16 @@ impl TrackMetadata {
         self.cue = Some(cue);
         self
     }
+}
+
+/// `Some(value)` when the value is worth keeping, `None` when it is empty.
+///
+/// The extractors use `String` with a placeholder for the three fields the
+/// playback chain has always read, and an empty string for the rest. A host
+/// rendering `Some("")` as a genre or a year shows a blank row where it should
+/// show nothing, so the reconciliation happens once here.
+fn non_empty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
 }
 
 /// Collapse the extractors' "Unknown …" placeholder strings back to `None`.
@@ -209,6 +237,18 @@ mod tests {
         );
         // Loudness tags struct is always present (empty when untagged).
         assert!(meta.measured.is_none() && meta.cue.is_none());
+
+        // The version-2 fields must be `None` rather than zero/empty, so a
+        // host can rely on `None` meaning "the file did not tag this".
+        assert!(meta.tags.genre.is_none(), "untagged genre must be None");
+        assert!(meta.tags.date.is_none(), "untagged date must be None");
+        assert!(
+            meta.tags.track_number.is_none() && meta.tags.track_total.is_none(),
+            "an untagged track number must be None, not Some(0)"
+        );
+        assert!(meta.tags.disc_number.is_none());
+        assert!(meta.tags.album_artist.is_none());
+        assert!(meta.tags.artwork_ref.is_none());
     }
 
     #[test]
@@ -235,6 +275,11 @@ mod tests {
         };
         let b = a.clone();
         assert_eq!(a, b);
-        assert_eq!(METADATA_VERSION, 1);
+        assert_eq!(
+            METADATA_VERSION, 2,
+            "the model gained populated tag fields at version 2; if the struct \
+             changes shape again, this constant and the doc comment above it \
+             are what a persistence layer would read"
+        );
     }
 }

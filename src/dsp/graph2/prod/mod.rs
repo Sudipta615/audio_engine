@@ -79,11 +79,11 @@ pub use arena::nodes::{
 };
 pub use arena::{DspGraph, DspNode, GraphControlHandle, GraphGeneration, GraphScratch};
 pub use control::Graph2ControlHandle;
+pub use plugins::{register_static_host, resolve_host};
 pub use prepare::{
     estimate_graph_preparation, scratch_bytes, GraphPreparationEstimate, GraphPreparationResources,
     PreparedGraph2, ResourceMeasurementScope, RetainedStage,
 };
-pub use plugins::{register_static_host, resolve_host};
 pub use topology::{
     build_requested_topology, required_stages, ChainError, ChainRequest, ChainRouting,
     ProdTopology, CANONICAL_CHAIN, OUTPUT_DOMAIN_STAGES,
@@ -135,8 +135,6 @@ impl Graph2Engine {
     pub fn with_graph<R>(&mut self, f: impl Fn(&mut DspGraph) -> R) -> R {
         f(&mut self.inner)
     }
-
-
 
     /// The active engine's arena graph — the single node implementation.
     /// Read-only view for hosts and tests; mutations go through

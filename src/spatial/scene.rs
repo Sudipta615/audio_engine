@@ -134,7 +134,8 @@ impl SpatialScene {
             + self.cue_bank.heap_bytes()
     }
 
-    pub fn new(sample_rate: u32) -> Self {        Self {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
             listener: Listener::default(),
             objects: SpatialObjectStore::new(),
             beds: SpatialBedStore::new(),

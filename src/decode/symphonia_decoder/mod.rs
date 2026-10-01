@@ -101,12 +101,11 @@ pub struct SymphoniaDecoder {
 }
 
 mod decode;
-mod downmix;
 mod metadata;
 mod source;
 
-pub use downmix::downmix_interleaved_to_stereo;
-pub use metadata::{extract_loudness_metadata_symphonia, extract_track_metadata};
+pub use metadata::ExtractedTags;
+pub use metadata::{extract_loudness_metadata_symphonia, extract_track_metadata, format_duration};
 
 impl SymphoniaDecoder {
     pub fn gapless_info(&self) -> &GaplessInfo {

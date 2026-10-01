@@ -240,7 +240,7 @@ impl AudioEngine {
     /// ```no_run
     /// # use std::sync::{Arc, Mutex};
     /// # use std::time::Duration;
-    /// # fn drive(engine: Arc<Mutex<Option<ultimate_audio_engine::engine::AudioEngine>>>) {
+    /// # fn drive(engine: Arc<Mutex<Option<engine::engine::AudioEngine>>>) {
     /// let wake = engine.lock().unwrap().as_ref().unwrap().wake_handle();
     /// loop {
     ///     // Scoped: the guard is released before the wait.

@@ -36,11 +36,13 @@ pub use fingerprint::{
 };
 #[cfg(feature = "codec-opus")]
 pub use opus::OpusSource;
-pub use scanner::{scan_track_loudness, LoudnessScanResult};
+pub use scanner::{
+    accumulate_album_replaygain, scan_decoder, scan_track_loudness, AlbumReplayGain,
+    LoudnessScanResult,
+};
 pub use shared_pcm::{SharedPcm, SharedPcmDecoder};
 pub use symphonia_decoder::{
-    downmix_interleaved_to_stereo, extract_loudness_metadata_symphonia, DecodeError, DecodeInfo,
-    DecodedChunk, SymphoniaDecoder,
+    extract_loudness_metadata_symphonia, DecodeError, DecodeInfo, DecodedChunk, SymphoniaDecoder,
 };
 #[cfg(feature = "tag-write")]
 pub use tags::write_loudness_tags;
@@ -58,11 +60,15 @@ pub mod format_descriptors;
 
 // Re-export types now living in sub-modules
 pub use channel_layout::{ChannelId, ChannelLayout};
-pub use channel_mix::{mix_interleaved_to_stereo_with_template, mix_interleaved_with_template};
+pub use channel_mix::{
+    downmix_interleaved_to_stereo, mix_interleaved_to_stereo_with_template,
+    mix_interleaved_with_template,
+};
 pub use format_descriptors::{
     AudioFormatInfo, DsdTransport, DsdTransportReport, GaplessInfo, RawDsdChunk,
 };
 pub use metadata::{TrackMetadata, TrackTags, METADATA_VERSION};
+pub use symphonia_decoder::ExtractedTags;
 
 // The standalone metadata extractors below dispatch by file extension so a
 // single entry point serves every codec: Ogg Opus tags can only be read by
@@ -87,10 +93,9 @@ fn is_opus_path(path: &Path) -> bool {
     }
 }
 
-/// Extract title, artist, album, duration (seconds), and a formatted
-/// duration string. Routes `.opus` to the Opus backend, everything else to
-/// Symphonia.
-pub fn extract_track_metadata(path: &Path) -> (String, String, String, f64, String) {
+/// Extract editorial tags and duration from a file. Routes `.opus` to the
+/// Opus backend, everything else to Symphonia.
+pub fn extract_track_metadata(path: &Path) -> symphonia_decoder::ExtractedTags {
     #[cfg(feature = "codec-opus")]
     if is_opus_path(path) {
         return opus::extract_track_metadata(path);
@@ -159,9 +164,9 @@ pub fn uri_to_local_path(uri: &str) -> Result<std::path::PathBuf, String> {
                  Download the file and open it locally, or enable that feature once the \
                  decode path is wired end to end."
             ),
-            other => format!(
-                "unsupported URI scheme '{other}': only 'file' resolves to a local path"
-            ),
+            other => {
+                format!("unsupported URI scheme '{other}': only 'file' resolves to a local path")
+            }
         });
     }
 

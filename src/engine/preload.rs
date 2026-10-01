@@ -233,6 +233,11 @@ impl PreloadManager {
             AudioSource::File(path) => {
                 Decoder::open(path).map_err(|e| format!("Decoder::open failed: {e}"))?
             }
+            // A CUE segment preloads exactly like its underlying file, then
+            // seeks. Same path as `Decoder::open_source` so a preloaded
+            // segment and a directly-opened one are positioned identically.
+            AudioSource::CueSegment(_) => Decoder::open_source(source)
+                .map_err(|e| format!("Decoder::open_source failed: {e}"))?,
             AudioSource::Uri(uri) => {
                 let path_buf = crate::decode::uri_to_local_path(uri)?;
                 Decoder::open(&path_buf).map_err(|e| format!("Decoder::open failed: {e}"))?

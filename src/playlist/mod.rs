@@ -18,6 +18,29 @@
 //!   a copy and the host can inspect it via the handle.  Mutations go through
 //!   commands, so the authoritative copy is always the one inside
 //!   [`AudioEngine`](crate::engine::AudioEngine).
+//!
+//! # Module layout
+//!
+//! | File | Contents |
+//! |------|----------|
+//! | `mod.rs`  | [`Playlist`], [`RepeatMode`], queue semantics |
+//! | `io.rs`   | M3U / PLS / XSPF parsing and writing ([`PlaylistFormat`]) |
+//! | `tests.rs`| queue-semantics unit tests |
+//!
+//! `io.rs` is split out because the three on-disk formats are a separate
+//! concern from the queue's behaviour, and folding parsing into this module
+//! would make it own both "what the queue does" and "how playlists are spelled
+//! on disk".
+
+mod io;
+
+// The `src` helper in `tests` is only used by that module; `io`'s test module
+// imports this one with a glob, which would otherwise pull it in unused and
+// trip a dead-code warning.
+#[cfg(test)]
+mod tests;
+
+pub use io::{ParsedPlaylist, PlaylistFormat, PlaylistIoError, TrackMetadata};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -72,6 +95,61 @@ impl Playlist {
             order_pos: 0,
             history: Vec::new(),
         }
+    }
+
+    /// Build a queue from a parsed playlist file.
+    ///
+    /// The queue is left with `current` unset even when entries were loaded:
+    /// a playlist says what to play, not what *is* playing, and auto-starting
+    /// on load would surprise a user who opened a 500-track list expecting
+    /// nothing to happen. A caller that wants to start calls
+    /// [`Self::play_index`].
+    ///
+    /// `ParsedPlaylist::repeat` is applied when the file expressed one. None of
+    /// M3U / PLS / XSPF do, so in practice this is the default — the plumbing
+    /// exists so a format that does express it needs no signature change.
+    pub fn from_parsed(parsed: ParsedPlaylist) -> Self {
+        let mut queue = Self::new();
+        for source in parsed.entries {
+            // `enqueue` maintains the shuffled order and the current index;
+            // appending to `items` directly would leave `order` empty and the
+            // queue would misbehave the moment shuffle was switched on.
+            queue.enqueue(source);
+        }
+        if let Some(repeat) = parsed.repeat {
+            queue.repeat = repeat;
+        }
+        queue
+    }
+
+    /// Load a playlist file, inferring the format from its extension.
+    ///
+    /// Replaces the queue's contents. A parse failure leaves the queue
+    /// untouched, because a caller that has just asked to load a broken file
+    /// and silently lost its existing 200-track queue is worse off than one
+    /// that got an error and kept playing.
+    pub fn load_from_path(&mut self, path: &std::path::Path) -> Result<(), PlaylistIoError> {
+        let parsed = PlaylistFormat::read_auto(path)?;
+        *self = Self::from_parsed(parsed);
+        Ok(())
+    }
+
+    /// Write the queue to `path` in the given format.
+    pub fn save_to_path(
+        &self,
+        path: &std::path::Path,
+        format: PlaylistFormat,
+    ) -> Result<(), PlaylistIoError> {
+        format.write_to(path, self)
+    }
+
+    /// Write the queue to `path`, inferring the format from its extension.
+    pub fn save_to_path_auto(&self, path: &std::path::Path) -> Result<(), PlaylistIoError> {
+        let format =
+            PlaylistFormat::from_path(path).ok_or_else(|| PlaylistIoError::UnknownFormat {
+                path: path.to_path_buf(),
+            })?;
+        format.write_to(path, self)
     }
 
     /// Number of entries.
@@ -407,149 +485,4 @@ fn random_index(cap: usize) -> usize {
         s.set(x);
         (x as usize) % cap
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn src(name: &str) -> AudioSource {
-        AudioSource::File(std::path::PathBuf::from(name))
-    }
-
-    #[test]
-    fn empty_playlist_returns_none() {
-        let mut q = Playlist::new();
-        assert!(q.current_source().is_none());
-        assert!(q.advance().is_none());
-        assert!(q.previous().is_none());
-        assert_eq!(q.len(), 0);
-    }
-
-    #[test]
-    fn sequential_playback_with_repeat_off() {
-        let mut q = Playlist::new();
-        q.enqueue(src("a.flac"));
-        q.enqueue(src("b.flac"));
-        q.enqueue(src("c.flac"));
-
-        // Play first track explicitly.
-        let a = q.play_index(0).unwrap();
-        assert_eq!(a.to_string(), "a.flac");
-        assert_eq!(q.current_index(), Some(0));
-        assert_eq!(q.peek_previous(), None);
-
-        let b = q.advance().unwrap();
-        assert_eq!(b.to_string(), "b.flac");
-        assert_eq!(q.current_index(), Some(1));
-        assert_eq!(q.peek_previous().unwrap().to_string(), "a.flac");
-
-        let c = q.advance().unwrap();
-        assert_eq!(c.to_string(), "c.flac");
-        assert_eq!(q.current_index(), Some(2));
-
-        // Repeat off → exhausted.
-        assert!(q.advance().is_none());
-        assert!(q.current_index().is_none());
-    }
-
-    #[test]
-    fn repeat_all_wraps() {
-        let mut q = Playlist::new();
-        q.set_repeat(RepeatMode::All);
-        q.enqueue(src("a.flac"));
-        q.enqueue(src("b.flac"));
-        q.play_index(0);
-        q.advance().unwrap(); // b
-        let wrap = q.advance().unwrap(); // wraps back to a
-        assert_eq!(wrap.to_string(), "a.flac");
-    }
-
-    #[test]
-    fn repeat_one_preserves_current_on_advance() {
-        // RepeatOne does NOT make advance() return the same track — manual
-        // Next always skips.  The engine handles repeat-one at EOS by seeking
-        // to 0 without calling advance().
-        let mut q = Playlist::new();
-        q.set_repeat(RepeatMode::One);
-        q.enqueue(src("song.flac"));
-        q.play_index(0);
-        // Single-track queue: advance returns None (nothing follows).
-        assert!(q.advance().is_none());
-        assert!(q.current_index().is_none());
-    }
-
-    #[test]
-    fn previous_rewinds_history() {
-        let mut q = Playlist::new();
-        q.enqueue(src("1.flac"));
-        q.enqueue(src("2.flac"));
-        q.enqueue(src("3.flac"));
-        q.play_index(0);
-        q.advance(); // 1→2
-        q.advance(); // 2→3
-
-        let back = q.previous().unwrap();
-        assert_eq!(back.to_string(), "2.flac");
-        let back2 = q.previous().unwrap();
-        assert_eq!(back2.to_string(), "1.flac");
-        assert!(q.previous().is_none());
-    }
-
-    #[test]
-    fn remove_fixes_indices() {
-        let mut q = Playlist::new();
-        q.enqueue(src("a.flac"));
-        q.enqueue(src("b.flac"));
-        q.enqueue(src("c.flac"));
-        q.play_index(2); // "c.flac" at index 2
-
-        q.remove(1); // remove "b.flac"
-        assert_eq!(q.len(), 2);
-        assert_eq!(q.current_index(), Some(1)); // c moved from 2→1
-        assert_eq!(q.items[0].to_string(), "a.flac");
-        assert_eq!(q.items[1].to_string(), "c.flac");
-    }
-
-    #[test]
-    fn clear_resets_everything() {
-        let mut q = Playlist::new();
-        q.enqueue(src("x.flac"));
-        q.enqueue(src("y.flac"));
-        q.play_index(0);
-        q.advance();
-        assert!(q.current_source().is_some());
-        q.clear();
-        assert!(q.is_empty());
-        assert!(q.current_index().is_none());
-        assert!(q.history.is_empty());
-    }
-
-    #[test]
-    fn sequential_advances_play_all_tracks() {
-        // Deterministic: no shuffle, nothing played yet, advance from start.
-        let mut q = Playlist::new();
-        q.set_shuffle(false);
-        q.enqueue(src("a.flac"));
-        q.enqueue(src("b.flac"));
-        q.enqueue(src("c.flac"));
-
-        // No current track — advance picks index 0.
-        assert_eq!(q.advance().unwrap().to_string(), "a.flac");
-        assert_eq!(q.advance().unwrap().to_string(), "b.flac");
-        assert_eq!(q.advance().unwrap().to_string(), "c.flac");
-        assert!(q.advance().is_none());
-    }
-
-    #[test]
-    fn peek_next_does_not_mutate() {
-        let mut q = Playlist::new();
-        q.enqueue(src("a.flac"));
-        q.enqueue(src("b.flac"));
-        q.play_index(0);
-        assert_eq!(q.peek_next().unwrap().to_string(), "b.flac");
-        // State unchanged.
-        assert_eq!(q.current_index(), Some(0));
-        assert!(q.advance().is_some()); // still b
-    }
 }

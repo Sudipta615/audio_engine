@@ -989,7 +989,9 @@ mod tests {
         let mut checked = 0usize;
         for c in all_codecs() {
             let cap = capability(*c);
-            let Some(ext) = extension_for(*c) else { continue };
+            let Some(ext) = extension_for(*c) else {
+                continue;
+            };
 
             // The extension must map back to this codec, or the row and the
             // extension map already disagree with each other.

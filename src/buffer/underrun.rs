@@ -43,8 +43,12 @@
 //!   covering and playback would never reach unity gain again.
 //!
 //! [`declick_ramp_frames`] derives the frame count from the sample rate and
-//! clamps it into that band. `docs/REALTIME_CONTRACT.md` records the effective
-//! figures alongside the ring's.
+//! clamps it into that band.
+//!
+//! (This cited `docs/REALTIME_CONTRACT.md`, which was never written. The rules
+//! it would have held are stated in `AGENTS.md` under "Realtime & concurrency
+//! rules", and the ring sizing is derived in
+//! [`FixedFrameBuffer::available_frames`](super::FixedFrameBuffer::available_frames).)
 
 use super::MAX_CHANNELS;
 
@@ -61,10 +65,11 @@ pub const DECLICK_MIN_FRAMES: usize = 16;
 
 /// Ceiling on the ramp length.
 ///
-/// The output ring is far larger than this — see `docs/REALTIME_CONTRACT.md`
-/// for the effective capacity — but the ramp is deliberately capped well below
-/// it, so a fade-in always completes many times over before the producer has
-/// refilled the buffer it just fell behind on.
+/// The output ring is far larger than this — 1365 ms at 48 kHz, derived in
+/// [`FixedFrameBuffer::available_frames`](super::FixedFrameBuffer::available_frames)
+/// — but the ramp is deliberately capped well below it, so a fade-in always
+/// completes many times over before the producer has refilled the buffer it
+/// just fell behind on.
 pub const DECLICK_MAX_FRAMES: usize = 512;
 
 /// Declick ramp length in frames for a given sample rate.
@@ -407,17 +412,10 @@ mod tests {
         let l = left(&block);
 
         // The real region is untouched (still unity gain).
-        assert!(
-            (l[63] - 0.5).abs() < 1e-9,
-            "real region altered: {}",
-            l[63]
-        );
+        assert!((l[63] - 0.5).abs() < 1e-9, "real region altered: {}", l[63]);
         let (max_step, _) = step_profile(&l[62..]);
         let bound = 0.5 / ramp as f32 * 1.05;
-        assert!(
-            max_step <= bound,
-            "step {max_step} exceeds bound {bound}"
-        );
+        assert!(max_step <= bound, "step {max_step} exceeds bound {bound}");
     }
 
     #[test]

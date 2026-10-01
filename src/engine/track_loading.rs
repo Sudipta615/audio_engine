@@ -382,8 +382,29 @@ impl AudioEngine {
     pub fn load_source(&mut self, source: &AudioSource) -> Result<DecodeInfo, EngineError> {
         match source {
             AudioSource::File(path) => self.load_track(path),
+            // A CUE segment plays through the same load path as its file, then
+            // seeks to the segment start. Going through `load_opened_decoder`
+            // (rather than a parallel implementation) is what keeps transport
+            // negotiation, loudness metadata, and resampler setup identical
+            // between a whole album file and one of its tracks.
+            AudioSource::CueSegment(seg) => {
+                // Open the underlying file and seek it, then hand the
+                // positioned decoder to the same `load_opened_decoder` the
+                // whole-file path uses. Going through the shared seam is what
+                // keeps transport negotiation, loudness metadata, and
+                // resampler setup identical between an album file and one of
+                // its tracks.
+                let mut decoder = Decoder::open(&seg.path)?;
+                if seg.start_frame > 0 {
+                    let sample_rate = decoder.info().sample_rate.max(1);
+                    let secs = seg.start_frame as f64 / f64::from(sample_rate);
+                    decoder.seek(secs as f32)?;
+                }
+                self.load_opened_decoder(source.clone(), decoder, Some(&seg.path))
+            }
             AudioSource::Uri(uri) => {
-                let path_buf = crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
+                let path_buf =
+                    crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
                 self.load_track(&path_buf)
             }
             AudioSource::Memory {
@@ -417,8 +438,28 @@ impl AudioEngine {
     pub fn prepare_next_source(&mut self, source: &AudioSource) -> Result<DecodeInfo, EngineError> {
         match source {
             AudioSource::File(path) => self.prepare_next_track(path),
+            // Preload a CUE segment the same way as its file: open, seek, and
+            // stash the positioned decoder in the same cache the whole-file
+            // path uses, so a gapless transition into track 7 of an album
+            // behaves like any other. `prepare_next_track` cannot be reused
+            // because it opens the path itself; the parts that are *not* about
+            // opening (the loudness-metadata prep and the next-track bookkeeping)
+            // are reached by first letting it open the file, then replacing the
+            // cached decoder with the seeked one.
+            AudioSource::CueSegment(seg) => {
+                let info = self.prepare_next_track(&seg.path)?;
+                let mut decoder = Decoder::open(&seg.path)?;
+                if seg.start_frame > 0 {
+                    let sample_rate = decoder.info().sample_rate.max(1);
+                    let secs = seg.start_frame as f64 / f64::from(sample_rate);
+                    decoder.seek(secs as f32)?;
+                }
+                self.scratch.cached_incoming_decoder = Some(decoder);
+                Ok(info)
+            }
             AudioSource::Uri(uri) => {
-                let path_buf = crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
+                let path_buf =
+                    crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
                 self.prepare_next_track(&path_buf)
             }
             AudioSource::Memory {

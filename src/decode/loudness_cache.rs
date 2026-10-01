@@ -119,9 +119,11 @@ fn lookup_in(cache_path: &Path, path: &Path) -> Option<LoudnessScanResult> {
     if entry.size != size || entry.mtime_secs != mtime_secs {
         return None;
     }
-    let rg_gain = entry
-        .replaygain_track_db
-        .or_else(|| entry.ebu_r128_loudness.map(crate::standards::replaygain_2_track_db));
+    let rg_gain = entry.replaygain_track_db.or_else(|| {
+        entry
+            .ebu_r128_loudness
+            .map(crate::standards::replaygain_2_track_db)
+    });
     let rg_peak = entry.replaygain_track_peak.or_else(|| {
         entry
             .ebu_r128_peak_dbtp

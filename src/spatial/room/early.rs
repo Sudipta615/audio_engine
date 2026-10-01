@@ -98,17 +98,16 @@ impl EarlyReflections {
         fn t<T>(v: &Vec<T>) -> usize {
             v.capacity() * std::mem::size_of::<T>()
         }
-            t(&self.ring)+
-            t(&self.rsm)+
-            t(&self.ref_cut)+
-            t(&self.ref_cut_log)+
-            t(&self.ref_active)+
-            t(&self.ref_state)+
-            t(&self.ref_coeffs)+
-            t(&self.send)
+        t(&self.ring)
+            + t(&self.rsm)
+            + t(&self.ref_cut)
+            + t(&self.ref_cut_log)
+            + t(&self.ref_active)
+            + t(&self.ref_state)
+            + t(&self.ref_coeffs)
+            + t(&self.send)
     }
 }
-
 
 impl Default for EarlyReflections {
     fn default() -> Self {

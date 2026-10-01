@@ -32,11 +32,11 @@
 //! roll back because nothing was mutated.
 
 use super::AudioEngine;
+use crate::buffer::EngineCommand;
+use crate::engine::stream::EngineError;
 use config::EngineConfig;
 use log::warn;
 use std::sync::Arc;
-use crate::buffer::EngineCommand;
-use crate::engine::stream::EngineError;
 
 use crate::dsp::graph2::prod::{
     ChainError, ChainRequest, GraphPreparationResources, RetainedStage,
@@ -152,11 +152,11 @@ impl AudioEngine {
         let Some(ref governor) = self.governor else {
             return Ok(None);
         };
-        let estimate = crate::dsp::graph2::prod::estimate_graph_preparation(
-            config.mix_slots,
-        );
-        governor.reserve(estimate).map(Some).ok_or_else(|| {
-            ChainError::PlanRejected {
+        let estimate = crate::dsp::graph2::prod::estimate_graph_preparation(config.mix_slots);
+        governor
+            .reserve(estimate)
+            .map(Some)
+            .ok_or_else(|| ChainError::PlanRejected {
                 detail: format!(
                     "{}: a graph generation of ~{} bytes (plus a ~{}-byte preparation \
                      peak) was refused before it was built",
@@ -164,8 +164,7 @@ impl AudioEngine {
                     estimate.persistent_bytes,
                     estimate.compilation_peak_bytes,
                 ),
-            }
-        })
+            })
     }
 
     /// Publish a prepared generation for the audio thread to swap in.
@@ -347,8 +346,14 @@ impl AudioEngine {
             self.graph.process_block(&mut l, &mut r);
             rendered.push((l, r));
         }
-        planes[0] = rendered.iter().flat_map(|(l, _)| l.iter().copied()).collect();
-        planes[1] = rendered.iter().flat_map(|(_, r)| r.iter().copied()).collect();
+        planes[0] = rendered
+            .iter()
+            .flat_map(|(l, _)| l.iter().copied())
+            .collect();
+        planes[1] = rendered
+            .iter()
+            .flat_map(|(_, r)| r.iter().copied())
+            .collect();
         Ok(planes)
     }
 
@@ -373,12 +378,10 @@ impl AudioEngine {
         // The graph's own control queues are drained whatever the command queue
         // does, so no node command is left half-applied.
         self.graph.drain_queued_control();
-        self.cmd_tx
-            .try_send(EngineCommand::Stop)
-            .map_err(|e| {
-                EngineError::Output(crate::output::cpal_output::OutputError::StreamError(
-                    format!("could not queue the park command: {e}"),
-                ))
-            })
+        self.cmd_tx.try_send(EngineCommand::Stop).map_err(|e| {
+            EngineError::Output(crate::output::cpal_output::OutputError::StreamError(
+                format!("could not queue the park command: {e}"),
+            ))
+        })
     }
 }

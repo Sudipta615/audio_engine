@@ -40,6 +40,8 @@ pub use playlist::{Playlist, RepeatMode};
 pub use source::AudioSource;
 pub use track_cache::{CachedTrackInfo, TrackCache};
 
+pub use engine::cue_split::{CueSegmentInfo, PregapPolicy};
+pub use engine::dsp_persistence::DspStateStore;
 #[cfg(feature = "audio-output")]
 pub use engine::{AudioEngine, EngineError, EngineHandle, EngineWake};
 pub use engine::{OfflineRenderResult, OfflineRenderer};
@@ -54,10 +56,9 @@ pub use profile::{AnalysisMask, AudioProfile, DynamicCharacter, ProfileError};
 pub use sink::{DacSink, NoopSink, SampleSink, VecSink};
 
 pub mod prelude {
+    pub use crate::engine::dsp_persistence::DspStateStore;
     #[cfg(feature = "audio-output")]
-    pub use crate::engine::{
-        AudioEngine, EngineError, EngineHandle, EngineWake, PlaybackStream,
-    };
+    pub use crate::engine::{AudioEngine, EngineError, EngineHandle, EngineWake, PlaybackStream};
     pub use crate::engine::{OfflineRenderResult, OfflineRenderer};
     pub use crate::{
         buffer::{

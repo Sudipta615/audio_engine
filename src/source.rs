@@ -36,6 +36,24 @@ pub enum AudioSource {
     /// variant exists, so identity-bearing code must compare the fields it
     /// cares about rather than whole sources.
     SharedPcm(crate::decode::shared_pcm::SharedPcm),
+
+    /// One track of a CUE-split album: a `[start_frame, start_frame +
+    /// frame_count)` slice of a larger audio file.
+    ///
+    /// A single ripped CD arrives as one continuous file plus a `.cue`
+    /// describing the track divisions. This variant plays one of those
+    /// divisions without re-encoding: the segment is a seek plus a frame
+    /// budget on the same decoder that would read the whole file, so gapless
+    /// boundaries are sample-exact and no new codec or format path is needed.
+    ///
+    /// Boxed because the payload is a few hundred bytes and `AudioSource` is
+    /// moved through the command channel per source; keeping the enum small
+    /// matters more than the extra indirection here.
+    ///
+    /// `#[derive(PartialEq, Eq, Hash)]` is not possible for the enum while
+    /// this variant exists, so identity-bearing code must compare the fields
+    /// it cares about rather than whole sources.
+    CueSegment(Box<crate::engine::cue_split::CueSegmentInfo>),
 }
 
 impl AudioSource {
@@ -101,6 +119,15 @@ impl AudioSource {
                 pcm.channels(),
                 pcm.sample_rate()
             ),
+            // The track's own title, not the underlying file name: a CUE album
+            // would otherwise show the same file name for every entry.
+            Self::CueSegment(seg) => format!(
+                "{} [cue {}: frames {}+{}]",
+                seg.display_label(),
+                seg.number,
+                seg.start_frame,
+                seg.frame_count
+            ),
         }
     }
 
@@ -115,6 +142,14 @@ impl AudioSource {
     /// True when this source needs no decode at all.
     pub fn is_predecoded(&self) -> bool {
         matches!(self, Self::SharedPcm(_))
+    }
+
+    /// The CUE segment payload, when this source is one.
+    pub fn as_cue_segment(&self) -> Option<&crate::engine::cue_split::CueSegmentInfo> {
+        match self {
+            Self::CueSegment(seg) => Some(seg),
+            _ => None,
+        }
     }
 }
 

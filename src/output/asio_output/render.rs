@@ -82,7 +82,19 @@ pub struct AsioRenderContext {
 fn target_format_for(sample_type: ASIOSampleType) -> TargetFormat {
     match sample_type {
         ASIOSampleType::Int16LSB | ASIOSampleType::Int16MSB => TargetFormat::I16,
-        ASIOSampleType::Int24LSB => TargetFormat::I24Le,
+        // `Int24MSB` was missing here and fell through to `F32` below. The
+        // sample-counting and packing arms both handle it, so the only effect
+        // was on the converter: dither ran at 32-bit depth and the 24-bit
+        // truncation that followed discarded it. An `Int24MSB` stream
+        // therefore came out *undithered* — the precise defect the
+        // `dither_toggle_measurably_raises_the_noise_floor` test exists to
+        // catch, and the reason it failed only for this one format.
+        //
+        // There is no byte-order-specific `TargetFormat`: the converter
+        // produces a signed 24-bit integer either way, and the render arm
+        // chooses the byte order when packing. So `Int24MSB` and `Int24LSB`
+        // share `I24Le`, and differ only in `render_block`.
+        ASIOSampleType::Int24LSB | ASIOSampleType::Int24MSB => TargetFormat::I24Le,
         ASIOSampleType::Int32LSB | ASIOSampleType::Int32MSB | ASIOSampleType::Int32LSB24 => {
             TargetFormat::I32
         }
@@ -249,14 +261,18 @@ impl AsioRenderContext {
                         }
                         ASIOSampleType::Float32MSB => {
                             let v = raw.clamp(-1.0, 1.0);
-                            (buf_ptr as *mut u32).add(frame).write(v.to_bits().swap_bytes());
+                            (buf_ptr as *mut u32)
+                                .add(frame)
+                                .write(v.to_bits().swap_bytes());
                         }
                         ASIOSampleType::Float64LSB => {
                             *(buf_ptr as *mut f64).add(frame) = raw.clamp(-1.0, 1.0) as f64;
                         }
                         ASIOSampleType::Float64MSB => {
                             let v = raw.clamp(-1.0, 1.0) as f64;
-                            (buf_ptr as *mut u64).add(frame).write(v.to_bits().swap_bytes());
+                            (buf_ptr as *mut u64)
+                                .add(frame)
+                                .write(v.to_bits().swap_bytes());
                         }
                         ASIOSampleType::Int32LSB
                         | ASIOSampleType::Int32LSB16
@@ -296,6 +312,10 @@ impl AsioRenderContext {
                         ASIOSampleType::Int24MSB => {
                             let v = converter.convert_mono_to_i24le(raw);
                             let out = buf_ptr as *mut u8;
+                            // Big-endian across 3 bytes. `to_be_bytes()` on the
+                            // i32 gives [0]=0, [1..4] the 24-bit payload, so
+                            // bytes 1..4 are the three bytes to emit, most
+                            // significant first.
                             let bytes = v.to_be_bytes();
                             *out.add(frame * 3) = bytes[1];
                             *out.add(frame * 3 + 1) = bytes[2];
@@ -423,13 +443,41 @@ mod tests {
     use super::*;
 
     /// 1 kHz at `amplitude` full scale, interleaved for `channels`.
+    /// A full-scale sine at 1 kHz.
+    ///
+    /// Used where the test measures something other than DC (quantiser error,
+    /// dither amplitude, clipping): a non-zero mean is harmless for those and
+    /// they only need a real signal.
     fn tone(frames: usize, channels: usize, amplitude: f32) -> Vec<f32> {
         (0..frames)
             .flat_map(|i| {
                 let v = amplitude
-                    * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin()
-                        as f32;
-                std::iter::repeat(v).take(channels)
+                    * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48_000.0).sin() as f32;
+                std::iter::repeat_n(v, channels)
+            })
+            .collect()
+    }
+
+    /// A tone whose mean over `frames` is zero to within one LSB.
+    ///
+    /// The 1 kHz `tone` above is **not** DC-free over an arbitrary frame
+    /// count: 4096 frames at 48 kHz is 85.33 periods, so the sine does not
+    /// complete and its discrete mean is 6.7e-4 — which the DC-bias test
+    /// measured and correctly reported. The number is a property of the
+    /// fixture, not of the converter under test; a test for a quantiser's DC
+    /// behaviour needs an input that has none.
+    ///
+    /// Rounding the period count to a whole number of cycles is the standard
+    /// fix. The frequency is derived from `frames` rather than fixed, so the
+    /// signal always closes exactly on zero.
+    fn dc_free_tone(frames: usize, channels: usize, amplitude: f32) -> Vec<f32> {
+        const WHOLE_CYCLES: f64 = 85.0;
+        let freq = WHOLE_CYCLES * 48_000.0 / frames as f64;
+        (0..frames)
+            .flat_map(|i| {
+                let v = amplitude
+                    * (2.0 * std::f64::consts::PI * freq * i as f64 / 48_000.0).sin() as f32;
+                std::iter::repeat_n(v, channels)
             })
             .collect()
     }
@@ -447,16 +495,27 @@ mod tests {
         samples: &[f32],
         dither: bool,
     ) -> Vec<Vec<u8>> {
-        let ring = Arc::new(FixedFrameBuffer::new(64).expect("ring"));
+        // The ring must be at least `frames` long. `push_block_interleaved`
+        // clamps its write to the ring's `frame_capacity`, so a 64-frame ring
+        // fed 128 frames only ever holds 64 of them and the rest of the
+        // driver's buffer is filled from an empty ring — which made every
+        // quantiser assertion below measure a starved read rather than the
+        // conversion under test. Sizing the ring to the render size is what
+        // these tests always meant to do.
+        let ring = Arc::new(FixedFrameBuffer::new(frames).expect("ring"));
         ring.push_block_interleaved(samples);
+        assert_eq!(
+            ring.available_frames(channels),
+            frames,
+            "the ring must hold every frame the render will request, or the \
+             test is measuring a starvation path instead of the conversion"
+        );
 
         let ctx = AsioRenderContext::new(Arc::clone(&ring), channels, sample_type, frames, 48_000);
         ctx.dither_enabled.store(dither, Ordering::Relaxed);
 
         let width = sample_type_byte_size(sample_type);
-        let mut out: Vec<Vec<u8>> = (0..channels)
-            .map(|_| vec![0u8; frames * width])
-            .collect();
+        let mut out: Vec<Vec<u8>> = (0..channels).map(|_| vec![0u8; frames * width]).collect();
         let ptrs: Vec<*mut std::ffi::c_void> = out
             .iter_mut()
             .map(|v| v.as_mut_ptr() as *mut std::ffi::c_void)
@@ -484,20 +543,25 @@ mod tests {
     /// `scale` is the format's full-scale value. A panic here means a format
     /// that is not an integer one was passed in by a test.
     fn dequantise(format: ASIOSampleType, bytes: &[u8], scale: f32) -> f32 {
-        let be = |b: &[u8]| -> i32 {
-            b.iter().fold(0i32, |acc, &x| (acc << 8) | x as i32)
+        let be = |b: &[u8]| -> i32 { b.iter().fold(0i32, |acc, &x| (acc << 8) | x as i32) };
+        // Little-endian 24-bit: the *first* byte is the least significant.
+        // Folding these big-endian instead reads every sample off by a factor
+        // of 256, which showed up as a −9.8e-4 DC bias on `Int24LSB` for a
+        // signal whose converter output has a mean of exactly zero. `Int16LSB`
+        // was unaffected because `from_le_bytes` was used there, so the two
+        // integer widths had been read with opposite byte orders.
+        let le24 = |b: &[u8]| -> i32 {
+            let v = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
+            if v & 0x0080_0000 != 0 {
+                v - 0x0100_0000
+            } else {
+                v
+            }
         };
         let raw: i32 = match format {
             ASIOSampleType::Int16LSB => i16::from_le_bytes([bytes[0], bytes[1]]) as i32,
             ASIOSampleType::Int16MSB => i16::from_be_bytes([bytes[0], bytes[1]]) as i32,
-            ASIOSampleType::Int24LSB => {
-                let v = be(&[bytes[0], bytes[1], bytes[2]]);
-                if v & 0x0080_0000 != 0 {
-                    v - 0x0100_0000
-                } else {
-                    v
-                }
-            }
+            ASIOSampleType::Int24LSB => le24(bytes),
             ASIOSampleType::Int24MSB => {
                 let v = be(&[bytes[0], bytes[1], bytes[2]]);
                 if v & 0x0080_0000 != 0 {
@@ -506,13 +570,21 @@ mod tests {
                     v
                 }
             }
-            ASIOSampleType::Int32LSB => i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            ASIOSampleType::Int32MSB => i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            ASIOSampleType::Int32LSB => {
+                i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            }
+            ASIOSampleType::Int32MSB => {
+                i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            }
             ASIOSampleType::Float32LSB => {
-                return f32::from_bits(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                return f32::from_bits(u32::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ]));
             }
             ASIOSampleType::Float32MSB => {
-                return f32::from_bits(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                return f32::from_bits(u32::from_be_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                ]));
             }
             other => panic!("not a format this test reads: {other:?}"),
         };
@@ -527,6 +599,11 @@ mod tests {
             // the value is unused; 1.0 keeps the multiplication honest.
             _ => 2147483648.0,
         }
+    }
+
+    /// Frames still buffered, for asserting a render drained what it should.
+    fn ring_drained(ring: &FixedFrameBuffer) -> usize {
+        ring.available_frames(2)
     }
 
     /// Left-channel samples, dequantised.
@@ -547,7 +624,11 @@ mod tests {
         // few parts in 100 000 — which is audiable as a DC step at a note
         // boundary and invisible in every other metric.
         let frames = 4096;
-        let input = tone(frames, 2, 0.25);
+        // `dc_free_tone`, not `tone`: see its doc comment. With a partial final
+        // period the fixture carries a 6.7e-4 mean of its own, and asserting
+        // the converter's DC offset against that is measuring the wrong thing —
+        // it reported a 6.719e-4 bias for a converter that has none.
+        let input = dc_free_tone(frames, 2, 0.25);
         for format in INTEGER_FORMATS {
             let lane = left_lane(format, &render(format, 2, frames, &input, false), frames);
             let mean = lane.iter().map(|&v| v as f64).sum::<f64>() / frames as f64;
@@ -642,6 +723,23 @@ mod tests {
             );
 
             let noisy = left_lane(format, &render(format, 2, frames, &silence, true), frames);
+
+            // 32-bit integer output is **not** dithered, by design:
+            // `Dither::with_sample_rate` documents dither as a no-op at >= 32
+            // bits, because at that depth truncation error is already far below
+            // any audible threshold and the noise would be pure addition. The
+            // previous version of this test demanded noise at every width and
+            // so failed on 32-bit for correct behaviour.
+            if full_scale(format) >= 2_147_483_648.0 {
+                assert!(
+                    noisy.iter().all(|&v| v == 0.0),
+                    "{format:?}: 32-bit integer truncation must stay silent; dither at \
+                     this depth is documented as a no-op and adding noise here \
+                     would be a defect, not a fix"
+                );
+                continue;
+            }
+
             assert!(
                 noisy.iter().any(|&v| v != 0.0),
                 "{format:?}: dither enabled produced no noise at all, so the toggle is \
@@ -649,14 +747,38 @@ mod tests {
             );
             // Triangular dither is +/- 0.5 LSB peak; anything outside a few LSB
             // means the noise is not dither.
-            let peak_lsb = noisy
-                .iter()
-                .fold(0.0f32, |m, v| m.max(v.abs()))
-                * full_scale(format);
+            let peak_lsb = noisy.iter().fold(0.0f32, |m, v| m.max(v.abs())) * full_scale(format);
             assert!(
                 peak_lsb < 4.0,
                 "{format:?}: dithered peak {peak_lsb:.2} LSB is far outside the +/- 0.5 LSB \
                  a triangular dither produces"
+            );
+        }
+    }
+
+    /// Every sample type the render path claims to support is dithered below 32
+    /// bits, and the 24-bit MSB path in particular.
+    ///
+    /// This is the regression guard for the `target_format_for` gap that let
+    /// `Int24MSB` fall through to `F32`: the dither then ran at 32-bit depth
+    /// and the 24-bit truncation discarded it, so the format was silently
+    /// undithered while every other integer width worked. A per-format list in
+    /// the test above would not have caught it — the format *was* in the list,
+    /// it was the mapping underneath that was wrong.
+    #[test]
+    fn every_below_32_bit_integer_sample_type_is_dithered() {
+        let frames = 2048;
+        let silence = vec![0.0f32; frames * 2];
+        for format in INTEGER_FORMATS {
+            let noisy = left_lane(format, &render(format, 2, frames, &silence, true), frames);
+            let audible = full_scale(format) < 2_147_483_648.0;
+            let any_noise = noisy.iter().any(|&v| v != 0.0);
+            assert_eq!(
+                any_noise, audible,
+                "{format:?}: dither present = {any_noise}, expected {audible} for a \
+                 24/16-bit integer target. A false here is a missing \
+                 `target_format_for` arm, which dithers at the wrong depth and \
+                 loses the noise in the truncation that follows."
             );
         }
     }
@@ -672,7 +794,10 @@ mod tests {
         let frames = 128;
         let input = tone(frames, 2, 0.5);
         let out = render(ASIOSampleType::Unknown(9999), 2, frames, &input, false);
-        assert!(out[0].iter().all(|&b| b == 0), "unknown format must be silenced");
+        assert!(
+            out[0].iter().all(|&b| b == 0),
+            "unknown format must be silenced"
+        );
     }
 
     #[test]
@@ -691,8 +816,13 @@ mod tests {
         let ramp = crate::buffer::declick_ramp_frames(rate) as f32;
         let bound = 1.0 / ramp * 1.05;
 
-        let ring = Arc::new(FixedFrameBuffer::new(64).expect("ring"));
+        // Sized to the render, not to 64: `push_block_interleaved` clamps to
+        // the ring's `frame_capacity`, so a smaller ring would starve the very
+        // first buffer and the test could never reach the concealment path it
+        // exists to check.
+        let ring = Arc::new(FixedFrameBuffer::new(frames).expect("ring"));
         ring.push_block_interleaved(&tone(frames, 2, 1.0));
+        assert_eq!(ring.available_frames(2), frames);
         let ctx = AsioRenderContext::new(
             Arc::clone(&ring),
             2,
@@ -713,8 +843,32 @@ mod tests {
         // exactly what `render_block` writes for `Float32LSB`.
         unsafe { ctx.render_block(&ptrs, frames) };
         let first = left_lane(ASIOSampleType::Float32LSB, &out, frames);
+
+        // The buffer must carry the whole ringed tone, so its **peak** is full
+        // scale. Checking a single sample — as this did, via `first[frames-1]` —
+        // reads one arbitrary point of a 1 kHz sine, which lands wherever the
+        // cycle happens to be: 2048 frames at 48 kHz is 42.67 periods, so the
+        // last sample sits near a zero crossing and the check saw -0.79 and
+        // reported a starved ring that was in fact completely full. A peak
+        // measures what the assertion means.
+        let peak = first.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        assert!(
+            peak > 0.9,
+            "the first buffer must be full scale, peak was {peak}"
+        );
+        // The last sample of the *first* buffer is the starting point for the
+        // concealment ramp on the second, so it is kept for the comparison
+        // below.
         let last = first[frames - 1];
-        assert!(last > 0.9, "the first buffer should be full scale, got {last}");
+        // And the buffer must not be silent or truncated, which a peak alone
+        // would not distinguish from a one-sample buffer.
+        assert_eq!(
+            ring_drained(&ring),
+            0,
+            "the first render must drain the whole ring, leaving the second \
+             render genuinely starved — that is what makes the second half of \
+             this test meaningful"
+        );
 
         // Second buffer: starved. `out` is reused, so the previous contents are
         // what the conceal ramp has to bring down from.

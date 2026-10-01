@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::{AudioBackend, DsdOutput, EngineConfig, SpatialSceneConfig};
+use super::{AudioBackend, DsdOutput, EngineConfig, EqPreset, LimiterConfig, SpatialSceneConfig};
 
 /// Canonical schema version for all persisted state envelopes.
 pub const STATE_SCHEMA_VERSION: u32 = 2;
@@ -294,9 +294,100 @@ pub struct OutputProfileState {
     pub polarity_inverted: Vec<bool>,
 }
 
+/// Persisted DSP settings a host wants to survive a restart.
+///
+/// A deliberately narrow payload: the three things a user tunes by hand, and
+/// the engine has no way to recover if they are lost.
+///
+/// It is *not* the whole [`EngineConfig`]. A full config save would capture
+/// every derived field, every stage's internal default, and every field that
+/// changes meaning between engine versions — so a schema bump would be needed
+/// every time one of those changed, and a stale file would restore values the
+/// user never set. The narrower the payload, the more likely it is to load
+/// cleanly from a file written by any nearby version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DspState {
+    /// Saved equalizer presets, in the order the user arranged them.
+    ///
+    /// The *active* EQ curve lives in the live config, not here: it is part of
+    /// the running graph and is applied through the control path, so
+    /// persisting it here would give two sources of truth for one value.
+    #[serde(default)]
+    pub eq_presets: Vec<EqPreset>,
+    /// The limiter's user-facing parameters.
+    #[serde(default)]
+    pub limiter: LimiterConfig,
+    /// Name of the last used output device, if any.
+    ///
+    /// A name rather than an index, because indices are not stable across
+    /// reboots: a device that was second yesterday is third today if an
+    /// unrelated device was plugged in. The name is resolved against the
+    /// current device list at restore time and simply does not match if the
+    /// device is gone, which is the correct outcome.
+    #[serde(default)]
+    pub output_device: Option<String>,
+    /// The backend the user last selected.
+    #[serde(default)]
+    pub output_backend: AudioBackend,
+}
+
+impl Default for DspState {
+    fn default() -> Self {
+        Self {
+            eq_presets: Vec::new(),
+            limiter: LimiterConfig::default(),
+            output_device: None,
+            output_backend: AudioBackend::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dsp_state_round_trips() {
+        let state = DspState {
+            eq_presets: vec![EqPreset {
+                name: "Headphones".to_string(),
+                output_device_pattern: Some("HD".to_string()),
+                preamp_db: -3.0,
+                bands: vec![],
+            }],
+            limiter: LimiterConfig {
+                enabled: true,
+                lookahead_ms: 2.0,
+                attack_ms: 0.25,
+                release_ms: 80.0,
+                ceiling_db: -1.0,
+                soft_clip: true,
+            },
+            output_device: Some("Built-in".to_string()),
+            output_backend: AudioBackend::Alsa,
+        };
+
+        let json = VersionedEnvelope::new(state.clone(), 1)
+            .to_json_pretty()
+            .unwrap();
+        let loaded: VersionedEnvelope<DspState> = VersionedEnvelope::from_json(&json).unwrap();
+        assert_eq!(loaded.state, state);
+    }
+
+    #[test]
+    fn dsp_state_fields_added_later_default_instead_of_failing() {
+        // A file written by an older build must load. `#[serde(default)]` on
+        // each field is what makes that true, and this is the test that would
+        // fail first when someone adds a field without it.
+        let json = r#"{
+            "schema_version": 2,
+            "engine_version": "0.1.0",
+            "component_version": 1,
+            "state": {}
+        }"#;
+        let loaded: VersionedEnvelope<DspState> = VersionedEnvelope::from_json(json).unwrap();
+        assert_eq!(loaded.state, DspState::default());
+    }
 
     #[test]
     fn envelope_round_trip_and_defaults() {

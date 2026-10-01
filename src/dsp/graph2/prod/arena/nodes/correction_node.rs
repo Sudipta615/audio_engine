@@ -318,11 +318,7 @@ impl DspNode for CorrectionNode {
     /// counted at its allocated length.
     fn persistent_bytes(&self) -> usize {
         std::mem::size_of_val(self)
-            + self
-                .engines
-                .iter()
-                .map(|e| e.heap_bytes())
-                .sum::<usize>()
+            + self.engines.iter().map(|e| e.heap_bytes()).sum::<usize>()
             + self.scratch.capacity() * std::mem::size_of::<f32>()
             + self.scratch_f64.capacity() * std::mem::size_of::<f64>()
     }

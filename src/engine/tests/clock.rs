@@ -112,6 +112,16 @@ fn test_long_playback_clock_tracks_decoded_frames_exactly() {
     // frame count (zero drift) and the published playhead must match
     // frames / rate to sample precision. Any per-tick float accumulation or
     // dropped/duplicated frame would show up here.
+    //
+    // This is the longest test in the crate: decoding and simulating 60 s of
+    // audio takes ~56 s single-threaded on the reference machine, and this
+    // binary also holds ~1,100 other tests that libtest runs concurrently on
+    // 4 threads. The deadline below is therefore a *liveness backstop only* —
+    // it is not part of the claim under test, which is integer frame-count
+    // exactness, a machine-independent property. An earlier 90 s deadline
+    // failed intermittently purely because sibling tests slowed the loop past
+    // it while the frame assertions it was guarding were unaffected. Sized
+    // generously enough that only a genuine non-terminating loop trips it.
     let path = write_test_wav_duration(44_100, 60, "drift");
     let mut engine = AudioEngine::new_default().unwrap();
     let info = engine.load_track(&path).expect("load long track");
@@ -120,7 +130,7 @@ fn test_long_playback_clock_tracks_decoded_frames_exactly() {
 
     engine.send_command(EngineCommand::Play);
     let expected_frames = 44_100u64 * 60;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
     loop {
         engine.tick();
         if engine.stream_ended {

@@ -701,8 +701,7 @@ impl LookaheadLimiter {
             // the control is continuous rather than a switch that pops.
             for (i, gain) in per_channel_gain.iter_mut().take(ch).enumerate() {
                 let ch_peak = self.channel_peak(i, &clean_in, cur_idx);
-                let window_max = self
-                    .link_deques[i]
+                let window_max = self.link_deques[i]
                     .front()
                     .map(|&(_, v)| v)
                     .unwrap_or(ch_peak);
@@ -1109,9 +1108,8 @@ mod tests {
     fn intersample_probe(len: usize) -> Vec<f32> {
         (0..len)
             .map(|i| {
-                (2.0 * std::f64::consts::PI * 0.25 * i as f64
-                    + std::f64::consts::FRAC_PI_4)
-                    .sin() as f32
+                (2.0 * std::f64::consts::PI * 0.25 * i as f64 + std::f64::consts::FRAC_PI_4).sin()
+                    as f32
             })
             .collect()
     }
@@ -1124,7 +1122,10 @@ mod tests {
         // +3 dBTP through, and every downstream test would still pass because
         // the samples were in range.
         assert_eq!(TruePeakMode::default(), TruePeakMode::Fir4x);
-        assert_eq!(LookaheadLimiter::new(48_000.0).true_peak_mode, TruePeakMode::Fir4x);
+        assert_eq!(
+            LookaheadLimiter::new(48_000.0).true_peak_mode,
+            TruePeakMode::Fir4x
+        );
     }
 
     #[test]
@@ -1214,7 +1215,10 @@ mod tests {
             (armed - disarmed - 50.0 / 48.0).abs() < 1e-3,
             "the detector's 50-sample group delay: armed {armed} ms, disarmed {disarmed} ms"
         );
-        assert!((disarmed - 5.0).abs() < 1e-3, "5 ms of lookahead by default");
+        assert!(
+            (disarmed - 5.0).abs() < 1e-3,
+            "5 ms of lookahead by default"
+        );
     }
 
     #[test]
@@ -1269,7 +1273,11 @@ mod tests {
             }
             out
         }
-        assert_eq!(run(1.0), run(0.999), "link 1.0 must bypass the unlinked path");
+        assert_eq!(
+            run(1.0),
+            run(0.999),
+            "link 1.0 must bypass the unlinked path"
+        );
     }
     use super::*;
 
@@ -1418,8 +1426,14 @@ mod tests {
              against a ceiling of {ceiling_lin}"
         );
 
-        let mut disarmed =
-            LookaheadLimiter::new_with_mode(44100.0, 5.0, 0.5, 100.0, ceiling_db, LimiterMode::Transparent);
+        let mut disarmed = LookaheadLimiter::new_with_mode(
+            44100.0,
+            5.0,
+            0.5,
+            100.0,
+            ceiling_db,
+            LimiterMode::Transparent,
+        );
         disarmed.enable_true_peak(false);
         let mut max_disarmed = 0.0_f32;
         for _ in 0..5000 {
@@ -1610,24 +1624,46 @@ mod tests {
     /// first reconfiguration after construction is deliberately not excluded
     /// by construction alone: a host that reconfigures once at startup is a
     /// control path and can pay it.
+    ///
+    /// # Why the counter is thread-local
+    ///
+    /// This test lives in the lib binary alongside ~1,100 others that libtest
+    /// runs concurrently. A *process*-global counter also counts every
+    /// allocation made by those unrelated tests inside this test's measurement
+    /// window, which made this test fail intermittently with small spurious
+    /// counts (e.g. "allocated 47 times") that vanished under
+    /// `--test-threads=1` — a false negative, not a real regression.
+    /// `tests/fidelity/realtime_allocation.rs` hit the same hazard and
+    /// documents it further: libtest's own `get_timed_out_tests` busy-loop
+    /// floods the allocator once any sibling test exceeds the 60 s default
+    /// timeout.
+    ///
+    /// A thread-local counter restricts the assertion to allocations made by
+    /// the thread that actually runs the limiter — which is precisely the
+    /// property under test, and makes the result independent of scheduling.
     #[test]
     fn reconfiguring_the_limiter_downward_does_not_allocate() {
         use std::alloc::{GlobalAlloc, Layout, System};
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::cell::Cell;
 
-        static ALLOCS: AtomicU64 = AtomicU64::new(0);
+        thread_local! {
+            /// Heap allocations performed on THIS thread while the measurement
+            /// window is armed.
+            static THREAD_ALLOCS: Cell<usize> = const { Cell::new(0) };
+        }
+
         struct Counting;
         // SAFETY: forwards every call to `System` and only observes the count.
         unsafe impl GlobalAlloc for Counting {
             unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-                ALLOCS.fetch_add(1, Ordering::Relaxed);
+                THREAD_ALLOCS.with(|c| c.set(c.get() + 1));
                 System.alloc(l)
             }
             unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
                 System.dealloc(p, l)
             }
             unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-                ALLOCS.fetch_add(1, Ordering::Relaxed);
+                THREAD_ALLOCS.with(|c| c.set(c.get() + 1));
                 System.realloc(p, l, n)
             }
         }
@@ -1650,13 +1686,18 @@ mod tests {
         // first call allocates once, every call after it allocates nothing.
         limiter.set_lookahead(1.0);
 
-        let baseline = ALLOCS.load(Ordering::Relaxed);
+        let baseline = THREAD_ALLOCS.with(Cell::get);
         for _ in 0..100 {
             limiter.set_lookahead(1.0);
             let _ = limiter.process(0.3, 0.3);
         }
-        let now = ALLOCS.load(Ordering::Relaxed);
-        assert_eq!(now, baseline, "shrinking the lookahead allocated {} times", now - baseline);
+        let now = THREAD_ALLOCS.with(Cell::get);
+        assert_eq!(
+            now,
+            baseline,
+            "shrinking the lookahead allocated {} times",
+            now - baseline
+        );
 
         // Disarming the detector also shrinks the audio delay line, by 50
         // samples, and must likewise be free.
@@ -1664,9 +1705,10 @@ mod tests {
             limiter.enable_true_peak(false);
             let _ = limiter.process(0.3, 0.3);
         }
-        let now = ALLOCS.load(Ordering::Relaxed);
+        let now = THREAD_ALLOCS.with(Cell::get);
         assert_eq!(
-            now, baseline,
+            now,
+            baseline,
             "disabling the true-peak detector allocated {} times",
             now - baseline
         );
@@ -1677,9 +1719,10 @@ mod tests {
             limiter.enable_true_peak(true);
             let _ = limiter.process(0.3, 0.3);
         }
-        let now = ALLOCS.load(Ordering::Relaxed);
+        let now = THREAD_ALLOCS.with(Cell::get);
         assert_eq!(
-            now, baseline,
+            now,
+            baseline,
             "re-arming the true-peak detector allocated {} times",
             now - baseline
         );

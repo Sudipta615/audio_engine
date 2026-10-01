@@ -32,13 +32,20 @@ lets non-Rust hosts drive the whole surface.
 │   ├── commands.rs             # `EngineCommand` — the full host-control surface
 │   ├── events.rs               # `EngineEvent` / `OutputEvent` lifecycle events
 │   ├── playback_info.rs        # lock-free telemetry snapshot (published via ArcSwap)
-│   ├── playlist.rs, source.rs, sink.rs, audio_io.rs, ffi.rs, paths.rs, dsp_utils.rs
+│   ├── playlist/             # playback queue
+│   │   ├── mod.rs            #   Playlist: shuffle, repeat, history
+│   │   ├── io.rs             #   M3U / PLS / XSPF parse + write
+│   │   └── tests.rs          #   queue-semantics unit tests
+│   ├── source.rs             # AudioSource — File / Uri / Memory / SharedPcm / CueSegment
+│   ├── sink.rs, audio_io.rs, ffi.rs, paths.rs, dsp_utils.rs
 │   ├── buffer/                 # frames/chunks + lock-free SPSC rings + DSD bytes
 │   ├── engine/                 # core state machine
 │   │   ├── tick.rs · handle.rs · stream.rs · construction.rs · output_setup.rs
 │   │   ├── lanes.rs · track_loading.rs · crossfade.rs · recovery.rs · telemetry.rs
 │   │   ├── volume.rs · clock.rs · buffers.rs · dsd_state.rs · loudness_state.rs
 │   │   ├── spatial_persistence.rs  # auto-save/restore of the active spatial scene
+│   │   ├── dsp_persistence.rs      # persisted DSP state (EQ presets / limiter / output)
+│   │   ├── cue_split.rs            # CUE sheet → per-track queue segments
 │   │   ├── commands/           # command handlers by domain (playback/dsp/eq/lanes/…)
 │   │   ├── decode_loop/        # single-stream + crossfade decode loops
 │   │   └── tests/              # engine integration tests
