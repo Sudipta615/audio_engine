@@ -65,6 +65,9 @@ use crate::decode::{AudioFormatInfo, ChannelLayout, DecodeError, DecodeInfo, Dec
 /// from a malicious `block_len` claim.
 const MAX_BLOCK_BYTES: usize = 1 << 20;
 
+/// The fixed WavPack block header size (the `WavpackHeader` on-disk layout).
+const WVPACK_HEADER_LEN: usize = 32;
+
 /// One indexed audio block: where it lives in the file and which source
 /// frames it covers.
 #[derive(Debug, Clone, Copy)]
@@ -340,12 +343,20 @@ impl WavpackDecoder {
 fn scan_blocks(
     reader: &mut BufReader<File>,
 ) -> Result<(Vec<BlockEntry>, Option<StreamFacts>), DecodeError> {
+    // Bound every block against the real file length before trusting it.
+    // Without this a crafted header can drive an unbounded allocation.
+    let file_len = reader
+        .get_ref()
+        .metadata()
+        .map(|m| m.len())
+        .unwrap_or(u64::MAX);
+
     let mut blocks: Vec<BlockEntry> = Vec::new();
     let mut facts: Option<StreamFacts> = None;
     let mut offset: u64 = 0;
     let mut expected_frame: u64 = 0;
 
-    let mut header = [0u8; 32];
+    let mut header = [0u8; WVPACK_HEADER_LEN];
     loop {
         reader
             .seek(SeekFrom::Start(offset))
@@ -367,6 +378,36 @@ fn scan_blocks(
         let parsed = BlockHeader::parse(&header)
             .map_err(|e| map_wavicle_error(format!("WavPack header at byte {offset}: {e}"), &e))?;
         let len = parsed.block_len();
+        // Bound the block length HERE, at scan time, not only in `load_block`.
+        // `inspect_first_block` allocates `vec![0u8; entry.len]` for the first
+        // audio block, and that runs before any load-time guard. `block_len()`
+        // derives from the on-disk `ck_size`, whose upstream validity check
+        // (`ck_size + 8 > MAX_BLOCK_SIZE`) overflows in release builds, so a
+        // crafted header could otherwise reach a multi-gigabyte allocation
+        // from a 32-byte file.
+        if len > MAX_BLOCK_BYTES {
+            return Err(DecodeError::Decode(format!(
+                "WavPack block at byte {offset} declares {len} bytes, over the \
+                 {} byte format limit",
+                MAX_BLOCK_BYTES
+            )));
+        }
+        // A block is at minimum a 32-byte header; anything smaller is a
+        // malformed or truncated stream rather than a decodable block.
+        if len < WVPACK_HEADER_LEN {
+            return Err(DecodeError::Decode(format!(
+                "WavPack block at byte {offset} declares {len} bytes, below the \
+                 {WVPACK_HEADER_LEN} byte header size"
+            )));
+        }
+        // The block cannot extend past end-of-file. Checking here also stops a
+        // long run of bogus headers from building an enormous `blocks` vec.
+        if offset + len as u64 > file_len {
+            return Err(DecodeError::Decode(format!(
+                "WavPack block at byte {offset} declares {len} bytes, past the \
+                 {file_len} byte end of file"
+            )));
+        }
         if parsed.block_samples == 0 {
             offset += len as u64;
             continue; // metadata-only block
@@ -424,6 +465,15 @@ fn inspect_first_block(
     reader: &mut BufReader<File>,
     entry: &BlockEntry,
 ) -> Result<StreamFacts, DecodeError> {
+    // Defence in depth: `scan_blocks` already bounds `entry.len`, but this is
+    // the allocation that a crafted header would have blown up, so the guard
+    // belongs here too rather than relying on a caller several frames away.
+    if entry.len > MAX_BLOCK_BYTES {
+        return Err(DecodeError::Decode(format!(
+            "WavPack first block declares {} bytes, over the {} byte limit",
+            entry.len, MAX_BLOCK_BYTES
+        )));
+    }
     let mut bytes = vec![0u8; entry.len];
     reader
         .seek(SeekFrom::Start(entry.start))
@@ -432,7 +482,7 @@ fn inspect_first_block(
         .read_exact(&mut bytes)
         .map_err(|e| DecodeError::Decode(format!("truncated WavPack first block: {e}")))?;
 
-    let header = BlockHeader::parse(&bytes[..32])
+    let header = BlockHeader::parse(&bytes[..WVPACK_HEADER_LEN])
         .map_err(|e| map_wavicle_error(format!("WavPack header: {e}"), &e))?;
     let block = Block {
         header,

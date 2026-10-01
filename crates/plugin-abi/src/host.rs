@@ -275,11 +275,21 @@ impl PluginInstance {
     /// **Audio thread.** Process one planar block in place. The planes
     /// are borrowed for the call only; the plugin must not retain them.
     ///
+    /// Honours [`Self::set_bypass`]: when bypassed the block passes through
+    /// untouched and the plugin is not called at all. Bypass is checked HERE,
+    /// at the single entry point every caller funnels through — previously
+    /// only `process_busses` checked it, so the production path
+    /// (`PluginHostNode::process_block_f32` → `process`) silently ignored
+    /// bypass and `set_slot_bypass` had no audible effect.
+    ///
     /// # Safety (host contract, honored by the caller)
     /// `planes.len()` must equal the prepared channel count and every
     /// plane slice must be at least `frames` long. This facade assumes
     /// the caller (the graph plan runner) guarantees that.
     pub unsafe fn process(&mut self, planes: &mut [&mut [f32]]) -> Result<(), PluginAbiError> {
+        if self.bypassed {
+            return Ok(());
+        }
         let proc = self
             .vtable
             .process
@@ -321,6 +331,9 @@ impl PluginInstance {
 
     /// Process a multi-bus audio block (main audio channels + optional sidechain).
     /// If the plugin is bypassed, the main audio passes through unmodified.
+    ///
+    /// The bypass test is now inside [`Self::process`]; it is kept here too
+    /// so the intent is explicit at the busses entry point.
     pub unsafe fn process_busses(
         &mut self,
         busses: &mut crate::bus::AudioBussesMut,
@@ -566,5 +579,90 @@ mod tests {
         assert!(lookup_static(&uid).is_some());
         assert!(unregister_static(&uid));
         assert!(lookup_static(&uid).is_none());
+    }
+
+    /// Build a stub instance whose `process` writes a recognisable marker
+    /// into every sample, so a test can tell "the plugin ran" from "the
+    /// plugin was skipped".
+    fn stub_instance() -> PluginInstance {
+        unsafe extern "C" fn desc(d: *mut PluginDescriptor, v: u32) -> i32 {
+            if v != 1 {
+                return AbiStatus::VersionMismatch as i32;
+            }
+            unsafe {
+                *d = PluginDescriptor {
+                    abi_version: 1,
+                    uid: [0xcd; 16],
+                    name: [0; 32],
+                    version: [0; 32],
+                    vendor: [0; 32],
+                    param_count: 0,
+                    latency_samples: 0,
+                    tail_samples: 0,
+                    supports_multichannel: 0,
+                };
+            }
+            AbiStatus::Ok as i32
+        }
+        unsafe extern "C" fn inst(_v: u32, _sr: f32) -> *mut std::ffi::c_void {
+            // A non-null opaque instance pointer; the stub never derefs it.
+            0x1 as *mut std::ffi::c_void
+        }
+        // Marks every sample with 1.0 so "ran" is unambiguous.
+        unsafe extern "C" fn mark(_i: *mut std::ffi::c_void, b: *const AudioBlockMut) -> i32 {
+            let block = unsafe { &*b };
+            for p in 0..block.channels as usize {
+                let plane = unsafe {
+                    std::slice::from_raw_parts_mut(*block.planes.add(p), block.frames as usize)
+                };
+                plane.fill(1.0);
+            }
+            AbiStatus::Ok as i32
+        }
+        let vtable = crate::PluginVTable {
+            descriptor: Some(desc),
+            instantiate: Some(inst),
+            prepare: None,
+            set_param: None,
+            process: Some(mark),
+            save_state: None,
+            load_state: None,
+            reset: None,
+            drop_instance: None,
+        };
+        let host = unsafe { PluginHost::from_vtable(vtable) }.expect("stub host builds");
+        host.instantiate(48_000.0).expect("stub instance builds")
+    }
+
+    /// Regression: `set_bypass` used to be honoured only by `process_busses`,
+    /// so the production graph path (`process`) ignored it and toggling a slot
+    /// to bypass did nothing.
+    #[test]
+    fn bypass_is_honoured_by_the_process_entry_point() {
+        let mut inst = stub_instance();
+        let mut planes: Vec<Vec<f32>> = vec![vec![0.0; 8], vec![0.0; 8]];
+        let mut views: Vec<&mut [f32]> = planes.iter_mut().map(|p| p.as_mut_slice()).collect();
+
+        // Not bypassed: the plugin runs and writes its marker.
+        // SAFETY: planes match the prepared shape the stub expects.
+        unsafe { inst.process(&mut views) }.expect("process runs");
+        assert!(
+            planes.iter().all(|p| p.iter().all(|&s| s == 1.0)),
+            "an unbypassed plugin must process the block"
+        );
+
+        // Bypassed: the block must pass through untouched.
+        for p in planes.iter_mut() {
+            p.fill(0.25);
+        }
+        let mut views: Vec<&mut [f32]> = planes.iter_mut().map(|p| p.as_mut_slice()).collect();
+        inst.set_bypass(true);
+        assert!(inst.is_bypassed());
+        // SAFETY: same contract as above.
+        unsafe { inst.process(&mut views) }.expect("bypassed process is a no-op");
+        assert!(
+            planes.iter().all(|p| p.iter().all(|&s| s == 0.25)),
+            "a bypassed plugin must pass the block through unmodified"
+        );
     }
 }

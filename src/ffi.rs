@@ -37,11 +37,28 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex, OnceLock,
 };
 
 use crate::{AudioEngine, EngineHandle};
 use config::EngineConfig;
+
+/// The set of handles this process currently owns, so [`engine_destroy`] can
+/// be genuinely idempotent.
+///
+/// A raw pointer carries no way to tell "already freed" from "valid", so a
+/// second `engine_destroy(h)` would be a double free. Registration is a
+/// lifecycle-only operation (create/destroy), never a per-block or per-call
+/// path, so the mutex here is off every audio path.
+///
+/// Using raw pointers as set keys is sound because a freed allocation's
+/// address can be reused by a *later* `engine_create`, which registers the
+/// new handle before the old address can be handed out again — and by then
+/// the stale entry has already been removed by the first `engine_destroy`.
+fn live_handles() -> &'static Mutex<std::collections::HashSet<usize>> {
+    static LIVE: OnceLock<Mutex<std::collections::HashSet<usize>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
 
 /// Opaque handle to an audio engine instance.
 ///
@@ -92,31 +109,66 @@ pub enum EngineStatus {
     EngineNotRunning = -4,
 }
 
-/// Backend selection constants (must match `config::AudioBackend`).
-#[repr(u32)]
-pub enum EngineBackend {
-    Auto = 0,
-    ExclusiveAlsa = 1,
-    ExclusiveAsio = 2,
-    ExclusiveCoreAudio = 3,
-    Default = 4,
+/// Backend selection constants for `engine_create`.
+///
+/// These are plain `u32` constants, NOT a Rust enum. A `#[repr(u32)]` enum
+/// parameter in an `extern "C"` signature is unsound: the C caller fully
+/// controls the discriminant, and `match` on an out-of-range value is
+/// undefined behaviour that fires *before* any validation can run. The
+/// function therefore takes a `u32` and maps it explicitly, returning
+/// `NULL` for anything it does not recognise.
+///
+/// The numbering is shared with [`engine_upsert_endpoint`] so the two entry
+/// points cannot disagree about what `1` means.
+pub mod backend_id {
+    /// Let the platform choose its default shared output.
+    pub const AUTO: u32 = 0;
+    /// Native WASAPI exclusive mode.
+    pub const EXCLUSIVE_WASAPI: u32 = 1;
+    /// Direct ALSA `hw:`/`plughw:` access.
+    pub const EXCLUSIVE_ALSA: u32 = 2;
+    /// Native CoreAudio hog mode.
+    pub const EXCLUSIVE_CORE_AUDIO_HOG: u32 = 3;
+    /// ASIO direct output.
+    pub const EXCLUSIVE_ASIO: u32 = 4;
+    /// Native PipeWire pro-audio output.
+    pub const PIPEWIRE: u32 = 5;
+    /// Native JACK pro-audio output.
+    pub const JACK: u32 = 6;
+}
+
+/// Map a `u32` backend id onto [`config::AudioBackend`], or `None` when the
+/// id is not one this build knows about.
+fn backend_from_id(id: u32) -> Option<config::AudioBackend> {
+    use backend_id as b;
+    Some(match id {
+        b::AUTO => config::AudioBackend::Auto,
+        b::EXCLUSIVE_WASAPI => config::AudioBackend::ExclusiveWasapi,
+        b::EXCLUSIVE_ALSA => config::AudioBackend::ExclusiveAlsa,
+        b::EXCLUSIVE_CORE_AUDIO_HOG => config::AudioBackend::ExclusiveCoreAudioHog,
+        b::EXCLUSIVE_ASIO => config::AudioBackend::ExclusiveAsio,
+        b::PIPEWIRE => config::AudioBackend::PipeWire,
+        b::JACK => config::AudioBackend::Jack,
+        _ => return None,
+    })
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
 /// Create and start an audio engine with the default configuration.
 ///
-/// Returns `NULL` on failure (check logs). The caller must call
-/// `engine_destroy` to release resources.
+/// `backend` is one of the [`backend_id`] constants. Returns `NULL` on
+/// failure (including an unrecognised `backend` value) — check logs. The
+/// caller must call `engine_destroy` to release resources.
 #[no_mangle]
-pub extern "C" fn engine_create(backend: EngineBackend) -> *mut EngineHandleFFI {
+pub extern "C" fn engine_create(backend: u32) -> *mut EngineHandleFFI {
     let mut config = EngineConfig::default();
-    config.output_backend = match backend {
-        EngineBackend::Auto => config::AudioBackend::Auto,
-        EngineBackend::ExclusiveAlsa => config::AudioBackend::ExclusiveAlsa,
-        EngineBackend::ExclusiveAsio => config::AudioBackend::ExclusiveAsio,
-        EngineBackend::ExclusiveCoreAudio => config::AudioBackend::ExclusiveCoreAudioHog,
-        EngineBackend::Default => config::AudioBackend::default(),
+    config.output_backend = match backend_from_id(backend) {
+        Some(b) => b,
+        None => {
+            log::error!("engine_create: unknown backend id {backend}");
+            return std::ptr::null_mut();
+        }
     };
 
     let engine = match AudioEngine::new(config) {
@@ -135,23 +187,54 @@ pub extern "C" fn engine_create(backend: EngineBackend) -> *mut EngineHandleFFI 
     };
 
     let (stop, tick_thread) = EngineHandleFFI::spawn_tick_thread(engine.1);
-    Box::into_raw(Box::new(EngineHandleFFI {
+    let raw = Box::into_raw(Box::new(EngineHandleFFI {
         handle: engine.0,
         stop,
         tick_thread,
-    }))
+    }));
+    if let Ok(mut live) = live_handles().lock() {
+        live.insert(raw as usize);
+    }
+    raw
 }
 
 /// Destroy an engine and release all resources. Safe to call with `NULL`.
 ///
 /// Signals the background tick thread to stop, joins it (the engine's
 /// `Drop` impl stops the audio output there), and shuts down the command
-/// channel. Idempotent — the host may call it more than once.
+/// channel.
+///
+/// **Idempotent.** The handle is de-registered before it is freed, so calling
+/// this twice with the same pointer is a no-op the second time rather than a
+/// double free. Calling it with a pointer this process never returned is also
+/// a no-op.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_destroy(engine: *mut EngineHandleFFI) {
     if engine.is_null() {
         return;
+    }
+    // De-register first. If this pointer was never ours, or was already
+    // destroyed, leave it alone — the alternative is freeing memory that no
+    // longer belongs to us.
+    match live_handles().lock() {
+        Ok(mut live) => {
+            if !live.remove(&(engine as usize)) {
+                log::warn!(
+                    "engine_destroy: handle {:p} is not live; ignoring",
+                    engine
+                );
+                return;
+            }
+        }
+        Err(_) => {
+            // A poisoned registry means some other lifecycle call panicked.
+            // Refusing to free is the safe choice: we cannot prove the handle
+            // is ours exactly once, and a leak is recoverable where a double
+            // free is not.
+            log::error!("engine_destroy: handle registry poisoned; refusing to free");
+            return;
+        }
     }
     unsafe {
         let mut boxed = Box::from_raw(engine);
@@ -890,7 +973,17 @@ pub extern "C" fn engine_set_spatial_automation(
             .set_spatial_automation(object as u8, kind as u8, None, time_secs);
         return EngineStatus::Ok as i32;
     }
-    let count = (points_count as usize).min(64);
+    // Reject rather than clamp. Clamping would read `64` elements from arrays the
+    // caller sized for `points_count` — a silent over-read of up to 54
+    // floats. The capacity is a documented API limit, so exceeding it is a
+    // caller error we can report instead.
+    const MAX_AUTOMATION_POINTS: usize = 64;
+    if points_count as usize > MAX_AUTOMATION_POINTS {
+        return EngineStatus::InvalidArgument as i32;
+    }
+    let count = points_count as usize;
+    // SAFETY: `count == points_count`, the caller contract for these arrays,
+    // and both pointers were checked non-null above.
     let times_slice = unsafe { std::slice::from_raw_parts(times, count) };
     let values_slice = unsafe { std::slice::from_raw_parts(values, count) };
     if times_slice.iter().any(|t| !t.is_finite()) || values_slice.iter().any(|v| !v.is_finite()) {
@@ -1050,15 +1143,9 @@ pub extern "C" fn engine_upsert_endpoint(
             _ => return EngineStatus::InvalidArgument as i32,
         }
     };
-    let backend = match backend {
-        0 => config::AudioBackend::Auto,
-        1 => config::AudioBackend::ExclusiveWasapi,
-        2 => config::AudioBackend::ExclusiveAlsa,
-        3 => config::AudioBackend::ExclusiveCoreAudioHog,
-        4 => config::AudioBackend::ExclusiveAsio,
-        5 => config::AudioBackend::PipeWire,
-        6 => config::AudioBackend::Jack,
-        _ => return EngineStatus::InvalidArgument as i32,
+    let backend = match backend_from_id(backend) {
+        Some(b) => b,
+        None => return EngineStatus::InvalidArgument as i32,
     };
     h.handle.set_endpoint(config::EndpointConfig {
         id: id_str,
@@ -1141,7 +1228,14 @@ pub extern "C" fn engine_endpoint_id(
         Some(e) => e.id.as_bytes(),
         None => return EngineStatus::InvalidArgument as i32,
     };
-    let n = id.len().min(buf_len.saturating_sub(1));
+    // The return value is the length the id WOULD need (excluding the NUL), so
+    // the host can size its buffer and retry. With no room for even the
+    // terminator there is nothing to write — writing `*buf.add(0)` here would
+    // be a one-byte overflow of a zero-length buffer.
+    if buf_len == 0 {
+        return id.len() as i32;
+    }
+    let n = id.len().min(buf_len - 1);
     unsafe {
         std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, buf, n);
         *buf.add(n) = 0;

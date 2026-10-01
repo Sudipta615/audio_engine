@@ -302,12 +302,95 @@ pub(crate) struct ControlBus {
     /// object slot), mirrored as plain atomics so a live trigger survives
     /// a generation swap. `u32::MAX` = idle.
     user_active_cues: [AtomicU32; crate::spatial::cue::MAX_ACTIVE_CUES],
-    /// Plugin host enabled flag + the last live parameter
-    /// batch (plain data in a mutex written control-side only; never
-    /// contended on the audio path — same contract as
-    /// `user_correction_ir`).
+    /// Plugin host enabled flag.
     user_plugin_enabled: AtomicU8,
-    user_plugin_params: Mutex<plugin_abi::PluginParams>,
+    /// The last live plugin parameter batch, mirrored across the thread
+    /// boundary lock-free. See [`PluginParamsSlot`].
+    user_plugin_params: PluginParamsSlot,
+}
+
+/// Lock-free mirror of the live plugin parameter batch.
+///
+/// The batch is written by the AUDIO THREAD, at the block-boundary
+/// `NodeCmd::SetPluginParams` drain in `drain_control`, and read by the
+/// control thread when it takes a `snapshot()` for a generation build. It
+/// therefore cannot be a `Mutex`: locking on a hot path is exactly what this
+/// crate's realtime contract forbids, and `.expect()` on a poisoned mutex
+/// would turn one control-thread panic into a panic on every subsequent
+/// block. (The field doc previously claimed the write was control-side only;
+/// that was wrong and the mutex was genuinely on the audio path.)
+///
+/// Instead it is a seqlock over plain data. The writer bumps `seq` to an odd
+/// value, stores the batch, then bumps it to the next even value; a reader
+/// retries while `seq` is odd or changed across its copy. There is exactly
+/// one writer (the audio thread) and readers are control-side, so the copy
+/// can only ever race a torn read, which the version check discards.
+///
+/// # Safety
+///
+/// `value` is written only by the single audio-thread writer while `seq` is
+/// odd, and read only by control-side readers that re-validate `seq`
+/// afterwards. A reader that observes a stable even `seq` across its copy is
+/// guaranteed to have read a fully-published `PluginParams`. Nothing else
+/// touches `value`.
+struct PluginParamsSlot {
+    /// Even = quiescent, odd = write in progress.
+    seq: AtomicU32,
+    value: std::cell::UnsafeCell<plugin_abi::PluginParams>,
+}
+
+// SAFETY: see the type doc. The single-writer seqlock protocol means `value`
+// is only dereferenced mutably by the audio thread between the two `seq`
+// bumps, and only immutably by a reader that has verified `seq` is even and
+// unchanged across its copy.
+unsafe impl Sync for PluginParamsSlot {}
+
+impl PluginParamsSlot {
+    fn new() -> Self {
+        Self {
+            seq: AtomicU32::new(0),
+            value: std::cell::UnsafeCell::new(plugin_abi::PluginParams::empty()),
+        }
+    }
+
+    /// Publish a new batch. Audio thread only (single writer).
+    fn store(&self, batch: plugin_abi::PluginParams) {
+        // AcqRel: the odd store must be visible before the payload write, and
+        // the even store must not be reordered before it.
+        self.seq
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // SAFETY: single writer, and it is the only thread that ever takes
+        // this path. No reader can be copying at the same time because they
+        // only copy while `seq` reads even, and it is odd here.
+        unsafe { *self.value.get() = batch };
+        self.seq
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Read the last published batch. Control side.
+    fn load(&self) -> plugin_abi::PluginParams {
+        use std::sync::atomic::Ordering;
+        // Bounded retries: a writer that is preempted mid-publish can spin
+        // this, but the write is a 516-byte copy, so the window is tiny and
+        // the fallback below keeps the control thread from hanging.
+        for _ in 0..8 {
+            let before = self.seq.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            // SAFETY: `seq` was even, so no write is in flight; a writer
+            // starting now bumps `seq` odd before touching `value`, which the
+            // re-check below detects.
+            let copy = unsafe { *self.value.get() };
+            if self.seq.load(Ordering::Acquire) == before {
+                return copy;
+            }
+        }
+        // Persistently contended (or a hostile scheduler). Report the last
+        // known-good state rather than spinning forever on a control path.
+        unsafe { *self.value.get() }
+    }
 }
 
 impl ControlBus {
@@ -381,7 +464,7 @@ impl ControlBus {
                 ]
             },
             user_plugin_enabled: AtomicU8::new(1),
-            user_plugin_params: Mutex::new(plugin_abi::PluginParams::empty()),
+            user_plugin_params: PluginParamsSlot::new(),
         }
     }
 
@@ -591,25 +674,18 @@ impl ControlBus {
     }
 
     /// Mirror the live plugin parameter batch, audio side at
-    /// drain (a plain-data copy — allocation-free).
+    /// drain (a plain-data copy — allocation-free, and now also lock-free).
     pub(super) fn set_plugin_params_user_state(&self, batch: plugin_abi::PluginParams) {
-        let mut guard = self
-            .user_plugin_params
-            .lock()
-            .expect("plugin params mutex poisoned");
-        *guard = batch;
+        self.user_plugin_params.store(batch);
     }
 
     /// Control-side read of the mirrored live parameter batch.
     pub(super) fn user_plugin_params(&self) -> Option<plugin_abi::PluginParams> {
-        let guard = self
-            .user_plugin_params
-            .lock()
-            .expect("plugin params mutex poisoned");
-        if guard.is_empty() {
+        let batch = self.user_plugin_params.load();
+        if batch.is_empty() {
             None
         } else {
-            Some(*guard)
+            Some(batch)
         }
     }
 

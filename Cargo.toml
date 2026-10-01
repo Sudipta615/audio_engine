@@ -11,7 +11,7 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on. See `docs/MIGRATION.md`.
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"

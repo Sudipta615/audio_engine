@@ -5,6 +5,72 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-10-01
+
+Phase 1 of a security and correctness audit: the critical findings. Every
+item below is a memory-safety, undefined-behaviour, or silently-wrong-result
+defect that the existing test suite passed cleanly.
+
+### Fixed
+
+- **ASIO: the host callback table outlived its stack frame.** Both
+  `create_buffers` call sites (`src/output/asio_output/mod.rs`) built an
+  `ASIOCallbacks` on the stack and passed `&mut` to the driver, which
+  retains that pointer and dereferences it from the driver's audio thread
+  for the whole stream. Both enclosing functions returned immediately, so
+  the driver was left calling through a pointer into a reused stack frame.
+  The table now lives inside the heap-allocated `CallbackState`, whose
+  address is stable for as long as the driver can reach it.
+- **ASIO: teardown no longer frees callback state before stopping the
+  driver.** `teardown()` released `ACTIVE_STATE` first and called
+  `driver.stop()` afterwards, leaving a window in which a `bufferSwitch`
+  landing between the two read freed memory. The driver is now stopped and
+  its buffers disposed before the state is released.
+- **C FFI: `engine_create` no longer takes a Rust enum.** The parameter was
+  a `#[repr(u32)]` plain enum, so `match backend` on a C-supplied
+  out-of-range discriminant was undefined behaviour *before* any validation
+  ran — and its numbering disagreed with `engine_upsert_endpoint`, so even
+  in-range values selected the wrong backend. It now takes a `u32` mapped
+  explicitly through a shared `backend_id` module, returning `NULL` for
+  unrecognised values.
+- **C FFI: `engine_destroy` is genuinely idempotent.** It was documented as
+  safe to call more than once but was an unguarded `Box::from_raw` + drop, so
+  a second call was a double free. Live handles are now tracked in a
+  lifecycle-only registry and de-registered before the free.
+- **C FFI: `engine_endpoint_id` no longer writes one byte past a
+  zero-length buffer.** `buf_len == 0` produced `n = 0` and still executed
+  `*buf.add(0) = 0`.
+- **C FFI: `engine_set_spatial_automation` rejects oversized point counts
+  instead of clamping them.** Clamping read 64 elements from arrays the
+  caller had sized for `points_count` — a silent over-read of up to 54
+  floats.
+- **Realtime: the audio path no longer takes a mutex.** The mirrored live
+  plugin parameter batch was stored in a `Mutex` and written from
+  `drain_control`, which runs on the audio thread — the field's own doc
+  claimed the write was control-side only. It is now a single-writer
+  seqlock (`PluginParamsSlot`), with no lock, no poisoning panic, and no
+  allocation.
+- **WavPack: block length is bounded at scan time.** `inspect_first_block`
+  allocated `vec![0u8; entry.len]` before any guard ran, and the upstream
+  `ck_size + 8 > MAX_BLOCK_SIZE` check overflows in release builds, so a
+  crafted 32-byte header could drive a ~4 GiB allocation. Block length is now
+  bounded against both the format limit and the real file length during
+  `scan_blocks`, with a second guard at the allocation site.
+- **Plugin bypass is honoured on the production path.** `set_bypass` was
+  only consulted by `process_busses`; the graph's `process` entry point
+  ignored it, so toggling a slot to bypass did nothing. Bypass is now checked
+  in `process`, the single choke point all callers funnel through. Covered by
+  a new regression test in `plugin-abi`.
+
+### Changed
+
+- `engine_create`'s backend parameter is now `uint32_t`, which is what
+  `docs/EMBEDDING.md` already documented. The accepted values are unchanged
+  in intent but now match `engine_upsert_endpoint` exactly.
+- `EngineBackend` (the `#[repr(u32)]` enum) is replaced by the `backend_id`
+  constant module. The enum was unsound at an FFI boundary and was not
+  constructible with a safe value from C.
+
 ## [0.2.0] — 2026-10-01
 
 A minor release under 0.x semver. It adds a large amount of API, removes one

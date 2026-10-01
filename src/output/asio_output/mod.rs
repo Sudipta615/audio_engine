@@ -83,6 +83,30 @@ struct CallbackState {
     /// no such constant anywhere in the tree. The allocation guarantee is real
     /// and is checked by the suite named above.)
     buffer_ptr_sets: [Vec<*mut std::ffi::c_void>; 2],
+    /// The callback table handed to `IASIO::createBuffers`.
+    ///
+    /// ASIO retains the `*mut ASIOCallbacks` pointer for the lifetime of the
+    /// stream and dereferences it from the driver's audio thread on every
+    /// buffer switch. It therefore cannot be a stack local of the function
+    /// that calls `createBuffers` — that frame is gone by the time the first
+    /// switch arrives. The table is stored here so its address is stable for
+    /// exactly as long as the driver can reach it (this `Box` is only
+    /// released by [`clear_callback_state`], after `driver.stop()`).
+    callbacks: ASIOCallbacks,
+}
+
+/// The callback table the host installs with `createBuffers`.
+///
+/// Lives inside [`CallbackState`] (see the field's doc for why it cannot be a
+/// local of the `createBuffers` caller).
+#[cfg(windows)]
+fn host_callbacks() -> ASIOCallbacks {
+    ASIOCallbacks {
+        buffer_switch: Some(asio_buffer_switch),
+        sample_rate_did_change: None,
+        asio_message: None,
+        buffer_switch_time_info: None,
+    }
 }
 
 /// Precompute the per-half driver buffer pointer sets so the `bufferSwitch`
@@ -317,14 +341,25 @@ impl AsioOutput {
             })
             .collect();
 
-        let mut callbacks = ASIOCallbacks {
-            buffer_switch: Some(asio_buffer_switch),
-            sample_rate_did_change: None,
-            asio_message: None,
-            buffer_switch_time_info: None,
-        };
+        // The callback table must outlive this call: ASIO retains the
+        // `*mut ASIOCallbacks` and dereferences it on the driver's audio
+        // thread for the whole stream. It therefore cannot be a local of this
+        // function — that frame is gone by the first buffer switch. We build
+        // it inside the `CallbackState` allocation, whose heap address is
+        // stable across moves of the `Box` handle, and publish that
+        // allocation once it is fully populated (before `start`).
+        let mut state = Box::new(CallbackState {
+            buffer_infos: Vec::new(),
+            buffer_ptr_sets: [Vec::new(), Vec::new()],
+            context: Arc::clone(&context),
+            dsd_mode: false,
+            callbacks: host_callbacks(),
+        });
+        let callbacks_ptr: *mut ASIOCallbacks = &mut state.callbacks as *mut ASIOCallbacks;
 
-        driver.create_buffers(&mut buffer_infos, buffer_size as i32, &mut callbacks)?;
+        driver.create_buffers(&mut buffer_infos, buffer_size as i32, unsafe {
+            &mut *callbacks_ptr
+        })?;
 
         // Verify the driver filled in the buffer pointers.
         if buffer_infos.iter().any(|info| info.buffers[0].is_null()) {
@@ -332,15 +367,16 @@ impl AsioOutput {
                 "ASIO create_buffers succeeded but did not fill buffer pointers".into(),
             ));
         }
+
+        // Populate from the driver-filled infos, then publish. Publishing
+        // after population means the callback can never observe an empty
+        // `buffer_ptr_sets` even if a driver switches buffers eagerly.
+        state.buffer_infos = buffer_infos;
+        state.buffer_ptr_sets = build_buffer_ptr_sets(&state.buffer_infos);
         log::info!("ASIO: create_buffers succeeded ({channels} ch × {buffer_size} frames)");
 
         // ── 7. Register global callback state ────────────────────────────
-        set_callback_state(Box::new(CallbackState {
-            buffer_ptr_sets: build_buffer_ptr_sets(&buffer_infos),
-            buffer_infos,
-            context: Arc::clone(&context),
-            dsd_mode: false,
-        }));
+        set_callback_state(state);
 
         let device_name = driver_info.description.clone();
         let device_id = Some(driver_info.clsid.clone());
@@ -385,13 +421,25 @@ impl AsioOutput {
     }
 
     /// Release buffers and driver, clearing the global callback state.
+    ///
+    /// ORDERING IS SAFETY-CRITICAL. The driver's audio thread dereferences
+    /// `ACTIVE_STATE` on every buffer switch. Freeing that state while the
+    /// driver is still running is a use-after-free, so the driver must be
+    /// stopped and its buffers disposed BEFORE the state is released. The
+    /// previous order (state first, then `stop`) left a window in which a
+    /// switch landing between the two read freed memory.
     #[cfg(windows)]
     fn teardown(&mut self) {
-        clear_callback_state();
         if let Some(ref driver) = self.driver {
+            // Best-effort: a driver that is already dead must not block
+            // teardown. `stop()` is what guarantees no further
+            // `bufferSwitch` is dispatched.
+            let _ = driver.stop();
             driver.dispose_buffers();
         }
         self.driver = None;
+        // Only now is it safe to free what the callback dereferences.
+        clear_callback_state();
         if self.com_initialized {
             self.com_initialized = false;
             unsafe {
@@ -501,26 +549,29 @@ impl AsioOutput {
             })
             .collect();
 
-        let mut callbacks = ASIOCallbacks {
-            buffer_switch: Some(asio_buffer_switch),
-            sample_rate_did_change: None,
-            asio_message: None,
-            buffer_switch_time_info: None,
-        };
+        // Same lifetime rule as `new_inner`: the callback table lives inside the
+        // `CallbackState` allocation, not on this frame.
+        let mut state = Box::new(CallbackState {
+            buffer_infos: Vec::new(),
+            buffer_ptr_sets: [Vec::new(), Vec::new()],
+            context: Arc::clone(&context),
+            dsd_mode,
+            callbacks: host_callbacks(),
+        });
+        let callbacks_ptr: *mut ASIOCallbacks = &mut state.callbacks as *mut ASIOCallbacks;
 
-        driver.create_buffers(&mut buffer_infos, buf_size as i32, &mut callbacks)?;
+        driver.create_buffers(&mut buffer_infos, buf_size as i32, unsafe {
+            &mut *callbacks_ptr
+        })?;
         if buffer_infos.iter().any(|info| info.buffers[0].is_null()) {
             return Err(OutputError::StreamOpen(
                 "ASIO create_buffers succeeded but did not fill buffer pointers".into(),
             ));
         }
 
-        set_callback_state(Box::new(CallbackState {
-            buffer_ptr_sets: build_buffer_ptr_sets(&buffer_infos),
-            buffer_infos,
-            context: Arc::clone(&context),
-            dsd_mode,
-        }));
+        state.buffer_infos = buffer_infos;
+        state.buffer_ptr_sets = build_buffer_ptr_sets(&state.buffer_infos);
+        set_callback_state(state);
 
         self.context = context;
         self.buffer_size_frames = buf_size;
