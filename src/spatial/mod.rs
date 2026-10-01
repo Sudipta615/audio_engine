@@ -1,0 +1,292 @@
+//! # Spatial Audio — speaker-independent object rendering (spec Parts I–V)
+//!
+//! An independent, open spatial-audio layer layered **above** the engine's
+//! conventional multichannel core. It follows the spec's central rule:
+//!
+//! > **Channels describe the output reproduction system; spatial objects and
+//! > fields describe the content.**
+//!
+//! A spatial scene ([`SpatialScene`]) is authored in world space with a
+//! listener and a set of objects, **independently of the output speaker
+//! count**. A renderer ([`SpatialRenderer`]) then places that scene on
+//! whatever layout is active — stereo, 5.1, 7.1, 7.1.4, or a custom array —
+//! and writes a normal interleaved multichannel PCM buffer the engine's
+//! existing output core can deliver.
+//!
+//! This layer ships the full scene / speaker / listener / object data model,
+//! four renderers — the **equal-power [`BasicPanner`]**, the 3D
+//! **VBAP-style [`VbapRenderer`]** (speaker-geometry triangulation, 2D
+//! reduction for coplanar layouts, out-of-coverage fallback), the
+//! **ambisonic path** ([`AmbisonicRenderer`]: a documented FOA bus — ACN /
+//! SN3D — encoded by any spatial source and decoded onto any layout, Part
+//! VI), and the **binaural renderer** ([`BinauralRenderer`]: a head model —
+//! Woodworth ITD + Duda-Martens head shadow, Part VII) that renders the
+//! whole hybrid scene straight to headphones — object behavior
+//! (**directivity** [`Directivity`], **occlusion** [`Occlusion`],
+//! **angular-region spread** [`spread`]), and the three content classes
+//! mixed by the hybrid renderer: **objects** ([`SpatialAudioObject`]), **beds**
+//! ([`SpatialBed`], channel-based), and **fields** ([`SpatialField`],
+//! diffuse — encoded into the ambisonic bus and decoded with the `√N`
+//! diffuse compensation). The conventional PCM & DSP path is untouched;
+//! spatial rendering is opt-in.
+//!
+//! ## Module map
+//!
+//! - `acoustic/` — simulation-side acoustic world (v3.25) + baking
+//!   (v3.26): per-octave [`MaterialSpectrum`] materials + named presets,
+//!   [`AcousticRoom`] geometry with per-wall materials, [`Portal`]
+//!   openings and [`DiffractionEdge`]s, the [`AcousticWorld`] path solver
+//!   that enumerates direct / reflected / diffracted / transmitted
+//!   [`AcousticPath`]s — separating simulation from rendering — and the
+//!   [`AcousticBaker`] / [`BakedScene`] position-dependent response cache
+//!   the renderers consume via `set_baked` (cache, not a new model).
+//! - `math.rs` — [`Vec3`], [`Quat`] and the single documented coordinate
+//!   system (§17–18).
+//! - `level.rs` — [`DistanceModel`], [`AirAbsorption`] (level laws, §38–39).
+//! - `speaker.rs` — [`Speaker`], [`SpeakerLayout`] (named presets + custom),
+//!   [`LayoutCalibration`] (§19–20).
+//! - `object.rs` — [`SpatialAudioObject`], [`ObjectAudioRef`] (sharable
+//!   source), [`SpatialObjectStore`], [`SpatialSourceType`] (§13–15, §31).
+//! - `scene.rs` — [`SpatialScene`], [`Listener`], [`ListenerTransform`]
+//!   (§12, §16, §48).
+//! - `directivity.rs` — [`Directivity`], [`CustomDirectivity`], and the
+//!   shared `listener_angle_rad` transform (§41).
+//! - `occlusion.rs` — [`Occlusion`], [`AcousticTransmission`], per-object
+//!   low-pass state (§43–44).
+//! - `spread.rs` — angular-region spread sampling + energy-normalized
+//!   aggregation with constant-power spread (spec §29–30), including
+//!   [`SpreadMode`] (Point/Small/Medium/Wide/Diffuse), layout-proportional
+//!   half-angle via [`constant_spread_half_angle`], and
+//!   [`constant_power_spread_gains`] for variable ring-sample counts.
+//! - `bed.rs` — [`SpatialBed`] (channel-based content) routed by semantic
+//!   role, [`SpatialBedStore`] (§13.1).
+//! - `field.rs` — [`SpatialField`] (diffuse content) encoded into the
+//!   ambisonic bus + decoded with `√N` compensation, per-speaker
+//!   decorrelation ([`AmbisonicFieldMixer`], §13.3, §33).
+//! - `ambisonic.rs` — the FOA core: [`sh_foa`] SH basis, plane-wave
+//!   encoder, order-1 bus rotation, [`DecoderPolicy`] (Basic / Max-rE),
+//!   [`AmbisonicDecoder`], and the [`AmbisonicRenderer`] (Part VI §32–37,
+//!   §55).
+//! - `render.rs` — [`SpatialRenderer`] trait (incl. [`HybridBlockInputs`] /
+//!   `process_hybrid_block`), [`RenderError`], [`RendererKind`] (§22, §37,
+//!   §106).
+//! - `room.rs` — [`Room`] (spec §49): image-source early reflections
+//!   ([`EarlyReflections`], per-object delay rings + tap smoothing + the
+//!   binaural ring primitives) and the [`RoomLateField`] Schroeder tail
+//!   whose output encodes into the ambisonic bus (§55); occlusion's
+//!   `AcousticTransmission` is the transmission seam (§43–44).
+//! - `hrtf.rs` — the binaural head model ([`hrtf`]): Woodworth ITD,
+//!   Duda-Martens head-shadow shelf, fractional-delay ring read (§47–48,
+//!   §62).
+//! - `binaural.rs` — [`BinauralRenderer`]: the whole hybrid scene through
+//!   the head model, with a virtual 8-speaker ring for diffuse content
+//!   (Part VII).
+//! - `tracking.rs` — head tracking ([`HeadTracker`], [`HeadSample`],
+//!   [`TrackingConfig`]): interpolates and smooths a stream of IMU/VR
+//!   orientation samples into the listener's orientation at block rate —
+//!   the VR/AR seam (§48, §136).
+//! - `panner.rs` — [`BasicPanner`] (§24–30, §46, §56–57).
+//! - `vbap.rs` — [`VbapRenderer`]: 3-triplet VBAP, Delaunay region
+//!   preprocessor, out-of-coverage fallback (§21, §25–29).
+//!
+//! ## Conventions (documented, spec §18 & §153)
+//!
+//! - **Position**: metres, world/listener space.
+//! - **Coordinate frame**: `+X = right, +Y = front, +Z = up`; azimuth `0` =
+//!   front, `+π/2` = right; elevation `0` = horizon, `+π/2` = up (see
+//!   [`math`]).
+//! - **Angles**: radians internally, degrees at API boundaries.
+//! - **Gain**: linear (1.0 = unity); dB only at the trim/calibration
+//!   boundary ([`LayoutCalibration`]).
+//! - **LFE**: an effects path, never a spatial pan target (spec Part X).
+//! - **Directivity angle**: 0 = the source faces the listener, π = facing
+//!   away (spec §41; see [`directivity::listener_angle_rad`]).
+//! - **Equal-power law**: `la² + lb² = 1` across a bracketing speaker pair
+//!   ([`BasicPanner`]); VBAP energy-normalizes solved triplet gains instead
+//!   ([`VbapRenderer`], §29).
+//!
+//! ## Binaural rendering
+//!
+//! The binaural path (Part VII) renders the full hybrid scene — objects,
+//! beds, fields, and the room's reflections — to two ears through the
+//! documented head model: Woodworth ITD + a Duda-Martens head-shadow shelf
+//! plus a pinna [`ElevationNotch`] ([`hrtf`]), with diffuse content decoded
+//! onto a virtual 8-speaker ring before the head model. Mirror symmetry is
+//! the exact invariant, not constant power (the head diffracts). When a
+//! measured [`HrtfDataset`] is loaded, object direct paths replace the
+//! analytic chain with FIR convolution of the bilinearly interpolated
+//! spectral IR — carrying both ITD and elevation cues (§62).
+//!
+//! Head tracking is a live seam ([`HeadTracker`]): the listener's
+//! orientation is a first-class scene transform, so a host feeds IMU/VR
+//! samples and applies the smoothed result to the listener before each
+//! render block — the renderers never change (spec §48, §136).
+//!
+//! Higher-order ambisonics is implemented ([`ambisonic`]): the exact
+//! order-N SH basis (order-1 FOA pinned, order-2 `U/V/T/R/S` and order-3
+//! ACN 9–15 per the published Furse–Malham table), per-order max-rE
+//! decoder weights, and exact order-1/2/3 bus rotation (§34). Scenes
+//! persist through the scene-file format (Part XXVI):
+//! [`SpatialScene::to_config`] / [`SpatialScene::from_config`] convert
+//! losslessly to a Serde-serializable, renderer-independent model saved via
+//! [`save_scene_json`] / [`load_scene_json`]. And the spatial layer is a
+//! first-class part of the production graph via the `SpatialNode`
+//! (`crate::dsp::graph2::prod`), which spatializes the stereo master
+//! through the head model at the block boundary. Measured HRTF corpora load from the
+//! JSON interchange or, with the optional `sofa-import` feature, natively
+//! from the NetCDF-classic subset of a `.sofa` file ([`sofa`]). Still
+//! future: order-4+ and spatial recording. **Native NetCDF-4/HDF5 (`nc4`)
+//! SOFA is deliberately deferred** — a documented seam (module docs of
+//! [`sofa`]) — because the only robust HDF5 readers link `libhdf5`, which
+//! conflicts with this layer's parent crate's pure-Rust, no-FFI rule; the
+//! importer's typed rejection already isolates the gap behind [`HrtfCorpus`]
+//! so an optional future feature can close it without touching the renderer.
+//!
+//! The spatial layer contains **no** Dolby/DTS codecs, bitstreams, metadata,
+//! or trademarks — it is an independent implementation (§3, §115).
+
+pub mod acoustic;
+pub mod acoustics;
+pub mod adm;
+pub mod ambisonic;
+pub mod automation;
+pub mod bass;
+pub mod bed;
+pub mod binaural;
+pub mod buffers;
+pub mod bw64;
+pub mod channels;
+pub mod cue;
+pub mod diagnostics;
+pub mod directivity;
+pub mod doppler;
+pub mod field;
+pub mod health;
+pub mod hrtf;
+pub mod hybrid_renderer;
+pub mod level;
+pub mod math;
+pub mod metering;
+pub mod nearfield;
+pub mod object;
+pub mod occlusion;
+pub mod panner;
+pub mod provider;
+pub mod quality;
+pub mod quality_eval;
+pub mod render;
+pub mod representation;
+pub mod room;
+pub mod room_correction;
+pub mod scene;
+#[cfg(feature = "sofa-import")]
+pub mod sofa;
+pub mod speaker;
+pub mod spread;
+pub mod tracking;
+pub mod upmix;
+pub mod vbap;
+pub mod voice;
+pub use acoustic::{
+    diffract_around_edge, spectral_taps, wall_index, AcousticBaker, AcousticPath, AcousticRoom,
+    AcousticWorld, BakePolicy, BakedObject, BakedPath, BakedScene, DiffractionEdge, MaterialKind,
+    MaterialSpectrum, PathFlags, PathKind, Portal, Wall, ACOUSTIC_IR_LEN, ALL_WALLS,
+    DEFAULT_BAKE_CELL_M, MAX_PATHS, MAX_REFLECTION_ORDER, OCTAVE_BANDS, OCTAVE_BANDS_HZ,
+};
+pub use acoustics::{analyze_acoustics, AcousticReport};
+pub use ambisonic::{
+    channel_count, encode_plane_wave, encode_plane_wave_n, in_phase_window, max_re_window,
+    rotate_bus_frame, rotate_bus_frame_n, sh_foa, sh_n, AmbisonicDecoder, AmbisonicRenderer,
+    DecoderPolicy, HoaConfig, HoaDecoder, HoaDecoding, HoaEncoder, NearFieldCompensation,
+    PerSpeakerDelay, AMBISONIC_CHANNELS, AMBISONIC_CHANNELS_MAX, AMBISONIC_CHANNELS_ORDER_2,
+    AMBISONIC_ORDER, MAX_AMBISONIC_ORDER,
+};
+pub use automation::{
+    AutomationMode, CurveQuat, CurveScalar, CurveVec3, SpatialAudioAutomationFrame,
+    SpatialAutomation,
+};
+pub use bass::{
+    BassManager, CrossoverFilter, PsychoacousticBassProcessor, SpatialBassEngine, SubwooferDelay,
+    SubwooferPhase, MAX_BASS_CHANNELS, MAX_SUB_DELAY_SAMPLES,
+};
+pub use bed::{BedId, SpatialBed, SpatialBedStore, MAX_BEDS};
+pub use binaural::{BinauralRenderer, VIRTUAL_RING_SPEAKERS};
+pub use cue::{CueBank, CueOverlay, SpatialCue, MAX_ACTIVE_CUES};
+pub use diagnostics::{
+    build_debug_view, ObjectDebugInfo, ReflectionDebugInfo, SpatialDebugView, SpeakerDebugInfo,
+};
+pub use directivity::{CustomDirectivity, Directivity};
+pub use doppler::{Doppler, DopplerState};
+pub use field::{FieldId, SpatialField, SpatialFieldStore, MAX_FIELDS};
+pub use health::{
+    build_health, HealthFactor, HealthLevel, HrtfCoverage, SourceHealth, SpatialHealthInputs,
+    SpatialHealthSnapshot,
+};
+pub use hrtf::{
+    barycentric_sphere, decompose_corpus, decompose_single_ir, detect_onset_samples, ear_delay_sec,
+    elevation_notch_depth_db, elevation_notch_hz, excess_phase_from_ir, extract_itd,
+    head_shadow_alpha, load_hrtf_corpus_json, max_itd_sec, minimum_phase_from_ir, reconstruct_ir,
+    save_hrtf_corpus_json, triangulate_sphere, woodworth_itd_sec, Ear, ElevationNotch, HeadShadow,
+    HrirComponents, HrtfConvStrategy, HrtfCorpus, HrtfDataset, HrtfLoadError, HrtfLoadOptions,
+    HrtfMeasurement, HrtfMeshKind, HrtfNormalize, HrtfQualityMode, SphericalHrtfInterpolator,
+    SphericalTriangle, DEFAULT_HEAD_RADIUS, DEFAULT_HRTF_TAPS, DEFAULT_SPEED_OF_SOUND,
+    MAX_HRTF_TAPS,
+};
+pub use hybrid_renderer::HybridSpatialRenderer;
+pub use level::{AbsorptionState, AirAbsorption, AirRolloffModel, DistanceModel};
+pub use math::{Quat, Vec3};
+pub use metering::{SpatialMeterState, SpatialMeters};
+pub use nearfield::{
+    hoa_distance_encode_filter, NearField, NearFieldModel, NearFieldState, WavefrontCurvatureState,
+    NEAR_FIELD_SHELF_HZ,
+};
+pub use object::{
+    ObjectAudioRef, ObjectId, SpatialAudioObject, SpatialObjectStore, SpatialSourceType,
+    MAX_SPATIAL_OBJECTS,
+};
+pub use occlusion::{
+    AcousticTransmission, BroadbandOcclusion, DiffractionOcclusion, FrequencyDependentOcclusion,
+    MaterialTransmission, Occlusion, OcclusionBandCoeffs, OcclusionBandState, OcclusionState,
+};
+pub use panner::BasicPanner;
+pub use provider::{HrtfCorpusProvider, HrtfDatasetProvider, HrtfProvider};
+pub use quality::SpatialQuality;
+pub use render::{HybridBlockInputs, RenderError, RendererKind, SpatialRenderer, VbapRenderer};
+pub use room::{EarlyReflections, Room, RoomLateField};
+pub use room_correction::{
+    analyze_ir, average_frequency_responses, capture_impulse_response, compute_correction_filter,
+    fit_parametric_eq, generate_inverse_filter, generate_log_sweep, synthesize_channel_correction,
+    BiquadFitBand, ChannelCorrectionMetrics, CorrectionMode, CorrectionProfile, FilterSynthConfig,
+    RoomCorrectionFilter, RoomCorrectionProcessor, RoomCorrectionTarget, RoomIrAnalysis,
+    SpatialAverageStrategy, SweepConfig, TargetCurve, TargetCurveKind,
+};
+pub use scene::{
+    load_scene_json, save_scene_json, Listener, ListenerTransform, SceneFileError, SpatialScene,
+};
+#[cfg(feature = "sofa-import")]
+pub use sofa::{import_sofa, import_sofa_with_mode, SofaImportError, SofaImportMode};
+pub use speaker::{LayoutCalibration, Speaker, SpeakerId, SpeakerLayout};
+pub use spread::{
+    add_gain, constant_power_spread_gains, constant_spread_half_angle, normalize_gains,
+    ring_directions, ring_directions_n, SpreadMode, MAX_SPREAD_GAINS, RING_SAMPLES,
+    SPREAD_MAX_HALF_ANGLE_RAD, SPREAD_RING_COUNTS,
+};
+pub use tracking::{HeadSample, HeadTracker, ListenerPose, TrackingConfig};
+pub use upmix::{UpmixMode, UpmixTrims};
+pub use voice::{BudgetCandidate, VoiceAdmission, VoiceBudget, VoicePlan, VoicePriority};
+
+// Stage 3 Spatial / Interchange additions (§4.1–§4.7):
+pub use adm::{parse_adm_xml, to_adm_xml, AdmError, AdmSceneConverter};
+pub use buffers::{BinauralBuffer, HoaBuffer, ObjectBuffer, PhysicalBuffer};
+pub use bw64::{
+    BextChunk, Bw64ContainerType, Bw64Error, Bw64File, Bw64Metadata, ChnaChunk, ChnaTrackUid,
+};
+pub use channels::{
+    BusChannelCount, HOAChannelCount, ObjectCount, PhysicalChannelCount, SpatialFieldOrder,
+    MAX_HOA_CHANNELS, MAX_OBJECT_COUNT, MAX_PHYSICAL_CHANNELS, MAX_SPATIAL_FIELD_ORDER,
+};
+pub use quality_eval::{SpatialQualityEvaluator, SpatialQualityReport};
+pub use representation::{
+    RepresentationConversion, SpatialInputDescriptor, SpatialRepresentation,
+    SpatialRepresentationKind,
+};

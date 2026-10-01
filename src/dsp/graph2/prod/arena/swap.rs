@@ -1,0 +1,305 @@
+//! Live graph swap: stable node identity and the swappable
+//! generation container.
+//!
+//! A [`GraphGeneration`] is one complete, ownable graph configuration:
+//! the node arena, the compiled [`PlanSet`] referencing that arena, and the
+//! stable per-node identities. The audio thread executes the *active*
+//! generation; the control thread builds a fresh generation and hands it over
+//! through the publish / swap / retire handshake in `controls.rs`:
+//!
+//! 1. **Publish** (control): build a generation (allocation is fine here) and
+//!    store its pointer in `ControlBus::pending`.
+//! 2. **Swap** (audio, once per block in `control_tick`): swap `pending` into
+//!    `active` and store the previous generation in `ControlBus::retired`.
+//! 3. **Retire** (control): reclaim the returned generation (drop it) on the
+//!    control path — the audio thread never allocates or frees.
+//!
+//! At most one swap is in flight at a time (the control side reclaims a
+//! returned generation before publishing another, and coalesces a pending,
+//! not-yet-swapped generation by replacing it), which bounds live memory to
+//! 2 live generations + ≤1 in flight and makes reclamation trivially safe:
+//! a generation returned through `retired` is guaranteed unreferenced.
+
+use super::*;
+use crate::dsp::correction::CorrectionIrSet;
+use std::sync::Arc;
+
+/// One mix-bus slot's listener-facing user state. Slots 0/1 are
+/// the transition pair; slots >= 2 are independent lanes. Mirrored from the
+/// audio side at drain and replayed into fresh generations so a reconfig
+/// never snaps a lane's gain / balance / mute / detachment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotState {
+    /// Linear user gain target in [0, 1].
+    pub gain: f32,
+    /// Balance in [-1, 1] (0 = center).
+    pub balance: f32,
+    /// Pan in [-1, 1] (0 = center).
+    pub pan: f32,
+    /// Muted: the slot contributes silence.
+    pub mute: bool,
+    /// Detached: the slot contributes nothing and its chains do not advance.
+    /// Slot 0 is never detached.
+    pub active: bool,
+    /// Post-fader master-send gain in [0, 1].
+    pub send_master_gain: f32,
+    /// Post-fader aux-send gain in [0, 1].
+    pub send_aux_gain: f32,
+    /// Per-channel trim gains (linear, default 1.0), index by channel
+    /// .
+    pub trim_gains: [f32; MAX_CHANNELS],
+    /// Per-channel polarity inversion.
+    pub trim_invert: [bool; MAX_CHANNELS],
+}
+
+impl Default for SlotState {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            balance: 0.0,
+            pan: 0.0,
+            mute: false,
+            active: true,
+            send_master_gain: 1.0,
+            send_aux_gain: 0.0,
+            trim_gains: [1.0; MAX_CHANNELS],
+            trim_invert: [false; MAX_CHANNELS],
+        }
+    }
+}
+
+/// Immutable snapshot of a slot's automation track, carried across a
+/// Generation rebuild. `Copy` data; the audio-side cursor
+/// (`SlotAutomation::pos`/`cursor`) starts fresh at 0 on the new generation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotAutomationData {
+    pub target: AutomationTarget,
+    pub points: [AutomationPoint; MAX_AUTOMATION_POINTS],
+    pub count: usize,
+}
+
+/// Immutable snapshot of the listener-facing user state that a fresh
+/// generation inherits: volume / balance / speed targets, the volume-ramp
+/// duration, and per-slot mix-bus state. The audio thread mirrors these onto
+/// the control bus at every drain; the control side seeds each new generation
+/// from a snapshot so a reconfig never snaps the listener's settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserState {
+    /// Linear volume target in [0, 1].
+    pub volume: f32,
+    /// Balance in [-1, 1].
+    pub balance: f32,
+    /// Playback speed multiplier.
+    pub speed: f32,
+    /// Volume-ramp duration in milliseconds.
+    pub volume_fade_ms: f32,
+    /// Per-slot user state, indexed by mix-bus slot. Shorter than the new
+    /// generation's slot count is fine (remaining slots keep defaults);
+    /// entries beyond the generation's slots are ignored.
+    pub slots: Vec<SlotState>,
+    /// Whether `slots`/aux carry LIVE bus state (a [`ControlBus`] snapshot)
+    /// as opposed to pristine defaults. False at construction, so the
+    /// Config-applied trims/sends/aux are authoritative;
+    /// true on a reconfig, so live commands applied since the last rebuild
+    /// win over the config.
+    pub has_live_bus_state: bool,
+    /// Aux bus enabled.
+    pub aux_enabled: bool,
+    /// Aux return gain in [0, 1].
+    pub aux_return_gain: f32,
+    /// Aux insert: enabled / wet-mix, carried across a rebuild so a
+    /// live runtime toggle survives a generation swap.
+    pub aux_insert_enabled: bool,
+    pub aux_insert_wet_mix: f32,
+    /// Room/headphone correction: live correction enabled / depth, mirrored like the aux
+    /// state so a runtime toggle survives a generation swap.
+    pub correction_enabled: bool,
+    pub correction_depth: f32,
+    /// Room/headphone correction: the rendered correction IR set carried across a rebuild
+    /// (a `LoadCorrectionIr` / `MeasureRoom` result survives a swap).
+    /// Immutable after load; `None` = no IR.
+    pub correction_ir: Option<Arc<CorrectionIrSet>>,
+    /// The spatial master enable flag, mirrored like the aux
+    /// state so a live runtime toggle survives a generation swap.
+    pub spatial_enabled: bool,
+    /// The spatial master's cue bank (serde model), carried
+    /// across a rebuild so a runtime bank swap survives a generation
+    /// swap. `None` = no live bank (the config's `cues` are
+    /// authoritative).
+    pub spatial_cues: Option<Arc<Vec<config::SpatialCueConfig>>>,
+    /// The per-target active-cue indices carried across a
+    /// rebuild (a live trigger survives a generation swap). `MAX` =
+    /// idle. Cue clock t0 is NOT carried — a fresh generation restarts
+    /// the cue clock; the trigger survives as "re-fired at t = 0"
+    /// semantics.
+    pub spatial_active_cues: [Option<usize>; crate::spatial::cue::MAX_ACTIVE_CUES],
+    /// The plugin host runtime enable flag, mirrored so a live
+    /// toggle survives a generation swap.
+    pub plugin_enabled: bool,
+    /// The last live plugin parameter batch, mirrored so a
+    /// runtime param change survives a generation swap. `None` = no live
+    /// batch (config params are authoritative).
+    pub plugin_params: Option<plugin_abi::PluginParams>,
+    /// Program-gated ducking config, carried across a rebuild
+    /// so a reconfig never drops a configured duck. `None` = disabled.
+    pub duck: Option<DuckState>,
+    /// Per-slot automation tracks, indexed by mix-bus slot.
+    /// Shorter than the generation's slot count is fine (missing entries
+    /// keep no track); entries beyond the generation's slots are ignored.
+    pub slot_automation: Vec<Option<SlotAutomationData>>,
+}
+
+impl Default for UserState {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            balance: 0.0,
+            speed: 1.0,
+            volume_fade_ms: 10.0,
+            slots: Vec::new(),
+            has_live_bus_state: false,
+            aux_enabled: false,
+            aux_return_gain: 1.0,
+            aux_insert_enabled: false,
+            aux_insert_wet_mix: 0.5,
+            correction_enabled: false,
+            correction_depth: 1.0,
+            correction_ir: None,
+            spatial_enabled: false,
+            spatial_cues: None,
+            spatial_active_cues: [None; crate::spatial::cue::MAX_ACTIVE_CUES],
+            plugin_enabled: true,
+            plugin_params: None,
+            duck: None,
+            slot_automation: Vec::new(),
+        }
+    }
+}
+
+/// Stable identity of one node across generation swaps.
+///
+/// [`NodeIdx`] addresses a slot *inside one generation* (plans reference it);
+/// [`NodeId`] addresses the persistent per-node SPSC control queue, which
+/// Lives in the graph shell and survives swaps. In the canonical
+/// layout `node_id` values and `NodeId` coincide numerically, so plans and
+/// queues index the same table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct NodeId(pub usize);
+
+impl NodeId {
+    /// Queue slot for shell-level (transport / top-level) commands, which do
+    /// not target any single node.
+    pub const SHELL: NodeId = NodeId(node_id::NODE_COUNT);
+
+    /// Total number of control-queue slots: one per canonical node plus the
+    /// shell slot.
+    pub const SLOTS: usize = node_id::NODE_COUNT + 1;
+}
+
+/// One complete, swappable graph configuration.
+///
+/// Owned by exactly one party at any time: the control thread while building
+/// it and after it is returned via `retired`; the audio thread from the swap
+/// until the next swap. The audio thread is the only mutator of the *active*
+/// generation (parameter drain + processing), so `run_plan`'s disjoint
+/// `plans` / `nodes` borrows remain sound.
+///
+/// Build a fresh configuration on the control side with
+/// [`GraphGeneration::from_config`] and hand it to the audio thread via
+/// [`GraphControlHandle::publish_generation`]; the swap itself happens at the
+/// next block boundary and performs no allocation on the audio thread.
+pub struct GraphGeneration {
+    /// Node arena. The canonical 17-slot layout from, but the swap
+    /// machinery does not assume a fixed length.
+    pub(crate) nodes: Vec<GraphNode>,
+    /// Compiled plans referencing this generation's arena slots.
+    pub(crate) plans: PlanSet,
+    /// Stable identity per node, parallel to `nodes` (queue addressing).
+    pub(crate) node_ids: Vec<NodeId>,
+    /// The resource reservation this generation's memory is held under.
+    ///
+    /// Owned *by the generation*, which is the only object whose lifetime
+    /// matches the memory. The arena, the plan set and the scratch buffers all
+    /// live and die with this box, so this is the only field whose release
+    /// point coincides exactly with the allocation returning to the allocator.
+    ///
+    /// Keeping the reservation here ensures every reclamation path releases it
+    /// cleanly: `publish_generation` drops the coalesced generation, the audio thread
+    /// moves the outgoing one to `retired`, and `reclaim_retired` drops it.
+    pub(crate) reservation: Option<Arc<dyn crate::governance::GraphReservation>>,
+}
+
+impl GraphGeneration {
+    /// The default layout: canonical node order, `NodeId(i)` for
+    /// arena slot `i` (matching the `node_id` table).
+    pub(crate) fn canonical_ids(node_count: usize) -> Vec<NodeId> {
+        (0..node_count).map(NodeId).collect()
+    }
+
+    /// How many nodes this generation's arena holds.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The resource reservation this generation's memory is held under, if a
+    /// governor admitted one.
+    ///
+    /// Read by a control-path host that wants to observe — never to *hold* —
+    /// the claim. Holding it anywhere else creates the second authority this
+    /// field exists to eliminate.
+    pub fn reservation(&self) -> Option<Arc<dyn crate::governance::GraphReservation>> {
+        self.reservation.clone()
+    }
+
+    /// The registry id of this generation's reservation, if it has one.
+    pub fn reservation_id(&self) -> Option<u64> {
+        self.reservation.as_ref().map(|r| r.id())
+    }
+
+    /// The arena slots the compiled plan executes, in order.
+    ///
+    /// `multichannel = false` is the stereo plan (the chain without the
+    /// routing head); `true` is the multichannel plan (routing first). Read
+    /// from the generation that owns the plan, so a caller can never report a
+    /// chain the *other* generation is running.
+    pub fn plan_steps(&self, multichannel: bool) -> Vec<usize> {
+        let plan = if multichannel {
+            &self.plans.normal_mc
+        } else {
+            &self.plans.normal
+        };
+        plan.steps.iter().map(|s| s.node.0).collect()
+    }
+
+    /// Bytes the compiled plan set occupies.
+    pub fn plan_bytes(&self) -> usize {
+        self.plans.normal.steps.capacity() * std::mem::size_of::<PlanStep>()
+            + self.plans.normal_mc.steps.capacity() * std::mem::size_of::<PlanStep>()
+            + std::mem::size_of::<PlanSet>()
+    }
+
+    /// The arena's memory, split by what each share is for:
+    /// `(total, convolution, spatial, plugin)`.
+    ///
+    /// `total` is the whole node arena — inline storage plus every node's own
+    /// heap. The other three are the categories a resource plan has to reason
+    /// about separately, because they are what actually grows with a
+    /// convolution IR, a spatial scene or a plugin set.
+    pub fn node_memory(&self) -> (usize, usize, usize, usize) {
+        let mut total = self.nodes.capacity() * std::mem::size_of::<GraphNode>();
+        let mut convolution = 0usize;
+        let mut spatial = 0usize;
+        let mut plugin = 0usize;
+        for node in &self.nodes {
+            let bytes = crate::dsp::graph2::prod::arena::node::DspNode::persistent_bytes(node);
+            total += bytes;
+            match node {
+                GraphNode::Convolution(_) | GraphNode::Correction(_) => convolution += bytes,
+                GraphNode::Spatial(_) => spatial += bytes,
+                GraphNode::PluginHost(_) => plugin += bytes,
+                _ => {}
+            }
+        }
+        (total, convolution, spatial, plugin)
+    }
+}

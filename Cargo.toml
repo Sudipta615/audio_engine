@@ -1,0 +1,626 @@
+[package]
+name = "audio-engine"
+# Intentionally NOT workspace-versioned (UE-R013).
+#
+# `audio-engine` and its in-tree siblings (`config`, `plugin-abi`,
+# `plugin-test-echo`) are an independently versioned realtime product lineage:
+# they are published and consumed as a standalone realtime audio library, and
+# their 5.x series does not track Ultimate Engine's 1.x series. Every other
+# workspace crate inherits `[workspace.package].version`.
+#
+# The practical contract this creates: an `audio-engine` release may change the
+# realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
+# package is what an integrator should depend on. See `docs/MIGRATION.md`.
+version = "5.9.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Sudipta615/ultimate-engine"
+
+[lib]
+name = "engine"
+path = "src/lib.rs"
+
+[features]
+default = ["audio-output", "resample", "all-codecs", "sofa-import"]
+audio-output = ["cpal", "thread-priority"]
+pipewire = ["audio-output"]
+jack = ["audio-output"]
+# Dynamic plugin library loading (dlopen / LoadLibrary). The
+# static-registry path (`static:<uid>` sources) works without this
+# feature; enabling it adds the libloading-based loader.
+plugin-dylib = ["plugin-abi/host"]
+asio = ["cpal/asio"]
+# Native Steinberg ASIO backend in pure Rust (no C++ SDK). Bypasses cpal
+# entirely: COM vtable, IASIO interface, bufferSwitch callback, native DSD.
+# Windows-only; adds no dependency — just the `windows` crate already pulled
+# in for `wasapi-native`. Ignored on non-Windows targets.
+asio-native = ["audio-output"]
+# Native WASAPI exclusive-mode backend (no cpal): a real IAudioClient
+# AUDCLNT_SHAREMODE_EXCLUSIVE stream with OS-level exclusivity verification.
+# Windows-only; ignored on other platforms.
+wasapi-native = ["audio-output"]
+resample = ["rubato"]
+codec-mp3 = ["symphonia/mp3"]
+codec-flac = ["symphonia/flac"]
+codec-ogg = ["symphonia/ogg"]
+codec-wav = ["symphonia/wav"]
+codec-aac = ["symphonia/aac"]
+# ALAC is supplied by Symphonia's maintained ALAC codec feature.
+codec-alac = ["symphonia/alac"]
+# NOTE: Symphonia has NO APE *audio decoder* — its `ape` feature only parses
+# APEv2 *tags* (metadata). Audio decoding is supplied by the `ape-decoder`
+# crate (a pure-Rust, MIT/Apache-2.0 Monkey's Audio decoder), which this
+# feature also enables.
+codec-ape = ["symphonia/ape", "dep:ape-decoder"]
+# DSD (DSF/DFF) decoding, decimation, DoP, and native wire packing are
+# compiled unconditionally (the `src/decode/dsd` module is not feature-gated),
+# so this feature is intentionally a no-op kept for API compatibility.
+codec-dsd = []
+codec-pcm = ["symphonia/pcm"]
+codec-aiff = ["symphonia/aiff"]
+codec-isomp4 = ["symphonia/isomp4"]
+# Matroska audio (MKA/MKV) container: the inner codec is decoded by the
+# codec features above (FLAC/AAC/Vorbis/PCM/...), so this feature only adds
+# the container reader. Pure-Rust (Symphonia's `symphonia-format-mkv`).
+codec-mkv = ["symphonia/mkv"]
+# Pure-Rust Ogg Opus: `ogg` demuxes the container and `opus-decoder`
+# (RFC 8251, no unsafe/FFI) decodes the packets at 48 kHz.
+codec-opus = ["dep:ogg", "dep:opus-decoder"]
+# Pure-Rust TTA (True Audio) decoder — implemented natively in
+# `src/decode/tta.rs` (no FFI, no external crates).
+codec-tta = []
+# NOTE: `codec-wavpack` above enables `wavicle`; keep it ordered after the
+# TTA entry for readability of the feature list.
+# WavPack — pure Rust via `wavicle` (MIT/Apache-2.0, no FFI, 100% safe
+# Rust): lossless v5 decode of 16/24/32-bit integer and 32-bit float,
+# mono/stereo, bit-exact and verified against the reference `wvunpack`.
+# Multichannel / DSD / hybrid WavPack is rejected explicitly at open with
+# a codec-named error (honest partial support — never a silent downmix).
+# The `encode` feature is enabled only for the dev-dependency so tests can
+# generate deterministic `.wv` fixtures at test time (no binary assets).
+codec-wavpack = ["dep:wavicle"]
+codec-musepack = []
+
+# Native NetCDF-classic (CDF) SOFA / AES69 HRTF importer (`spatial::sofa::import_sofa`),
+# pure-Rust and dependency-free: parses the NetCDF-3 classic subset the SOFA C API
+# writes in SOFA_NETCDF3 / SOFA_NETCDF3_CLASSIC mode and reduces it to `HrtfCorpus`
+# for the existing `HrtfDataset` pipeline. NetCDF-4/HDF5 (`nc4`) SOFA is refused
+# with a typed error (documented HDF5 seam).
+sofa-import = []
+
+# UNUSABLE. Pulls in the `ureq` blocking HTTP client (pure Rust, no async
+# runtime) and compiles `audio_io::NetworkByteSource`, but nothing constructs
+# one: no code path routes a URI into it, and `Decoder` is not streaming end to
+# end. An `http(s)` URI is refused with an explicit, actionable error rather
+# than opened as a literal filesystem path.
+#
+# Kept, rather than deleted, because removing the feature would also remove
+# `NetworkByteSource` -- a Range-request byte source that is a reasonable
+# foundation for the streaming work. What is not kept is the claim that the
+# feature does something: `docs/GETTING_STARTED.md` now says "not usable" and
+# `decode::uri_to_local_path` refuses remote URIs with a message naming this
+# feature.
+network-streaming = ["dep:ureq"]
+
+# Write loudness metadata (EBU R128 / ReplayGain) back into file tags.
+tag-write = ["dep:lofty"]
+
+# AcoustID/Chromaprint audio fingerprinting (`decode::extract_fingerprint`).
+fingerprint = ["dep:chromaprint-next"]
+
+# Stable C FFI boundary behind `c-ffi`. Adds no dependencies — only `std::ffi`.
+# Hosts written in C/C++ (or any language with C interop) call through the
+# opaque-pointer API in `src/ffi.rs` instead of linking the Rust crate directly.
+c-ffi = []
+
+all-codecs = [
+    "codec-mp3",
+    "codec-flac",
+    "codec-ogg",
+    "codec-wav",
+    "codec-aac",
+    "codec-alac",
+    "codec-ape",
+    "codec-pcm",
+    "codec-aiff",
+    "codec-isomp4",
+    "codec-mkv",
+    "codec-opus",
+    "codec-tta",
+    "codec-wavpack",
+    "codec-musepack",
+]
+
+
+[dependencies]
+cpal = { version = "0.18", optional = true }
+rubato = { version = "5.0", optional = true }
+symphonia = { version = "0.6.1", default-features = false }
+crossbeam = "0.8"
+arc-swap = "1.9"
+log = "0.4.33"
+thiserror = "2.0"
+num-traits = "0.2"
+num-complex = "0.4"
+realfft = "3.5"
+# Complex-domain FFT for the correction chain: deconvolution,
+# cepstral minimum-phase, hybrid-phase rendering. Same crate realfft builds
+# on, so this adds no new compiled code.
+rustfft = "6.2"
+config = { path = "crates/config" }
+# The Rust-native plugin ABI + host. Default features off —
+# the `plugin-dylib` engine feature pulls in the loader.
+plugin-abi = { path = "crates/plugin-abi", default-features = false }
+thread-priority = { version = "3.1", optional = true }
+# Pure-Rust Monkey's Audio (APE) decoder, enabled by the `codec-ape` feature.
+ape-decoder = { version = "0.3.2", optional = true }
+# Pure-Rust WavPack v5 decoder (`codec-wavpack`). No FFI; the crate is
+# `#![forbid(unsafe_code)]`. See `src/decode/wavpack.rs`.
+wavicle = { version = "0.1", optional = true }
+# Pure-Rust Ogg demuxer and RFC 8251 Opus decoder, enabled by the
+# `codec-opus` feature.
+ogg = { version = "0.9", optional = true }
+opus-decoder = { version = "0.1.1", optional = true }
+# Blocking HTTP client for network audio streaming (`network-streaming` feature).
+# Pure Rust, no async runtime — fits the synchronous `AudioByteSource` trait.
+ureq = { version = "2.12", optional = true }
+etcetera = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+env_logger = "0.11"
+termcolor = "1.4"
+# Loudness/ReplayGain tag write-back (`tag-write` feature): pure-Rust
+# metadata library for reading & writing ID3v2, Vorbis, MP4, and APEv2 tags.
+lofty = { version = "0.22", optional = true }
+# AcoustID/Chromaprint audio fingerprinting (`fingerprint` feature): pure-Rust,
+# bit-identical drop-in for the reference Chromaprint, used for track
+# identification via the AcoustID service.
+chromaprint-next = { version = "0.1", optional = true }
+# (WavPack previously used a runtime-loaded `libwavpack` via `libloading`;
+# removed — see `codec-wavpack` above. No native codec backend now needs
+# `libloading`.)
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Must stay on the same line as cpal's ALSA requirement (both bind the same
+# `alsa` native library): cpal 0.18 requires alsa >= 0.11.
+alsa = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreAudio HAL bindings for hardware endpoint volume
+# (AudioObjectGetPropertyData / AudioObjectSetPropertyData) AND the native
+# hog-mode output backend (`src/output/coreaudio_output`). objc2-core-audio
+# ships pre-generated bindings (no build-time bindgen), unlike the older
+# coreaudio-sys crate. `objc2-core-audio-types` supplies AudioBufferList /
+# AudioStreamBasicDescription / AudioTimeStamp for the render IO proc.
+objc2-core-audio = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "AudioHardware",
+    "objc2-core-audio-types",
+] }
+# CoreAudio HAL data types (AudioStreamBasicDescription / AudioBufferList /
+# AudioTimeStamp / AudioValueRange / LinearPCM format flags) used directly by
+# the hog-mode backend's render IO proc and format negotiation. Same crate the
+# objc2-core-audio bindings re-export internally; feature-unification keeps
+# them on the same 0.3.2 build.
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
+] }
+# CFString → Rust String conversion for device UIDs / names read from the
+# HAL (`kAudioDevicePropertyDeviceUID` / `DeviceNameCFString` are CFString
+# properties). Feature-unifies with objc2-core-audio's own dependency.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFString",
+] }
+
+[target.'cfg(windows)'.dependencies]
+# Used only by the native WASAPI backend (`wasapi-native` feature). The API
+# below targets windows 0.59; if the pin is bumped, re-verify the COM call
+# signatures in src/output/wasapi_output.rs.
+# windows-core is a direct dependency so the `#[implement(...)]` COM
+# macro (re-exported as `windows::core::implement`) can resolve the
+# `::windows_core::` paths it generates.
+windows-core = "0.59"
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    # ASIO driver enumeration (asio-native backend).
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    # Target-device selection: IMMDeviceCollection enumeration + friendly
+    # names (PKEY_Device_FriendlyName via IPropertyStore).
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+approx = "0.5.1"
+# Pure-Rust Opus encoder (BSD-3-Clause), used ONLY by tests to generate
+# deterministic Ogg Opus fixtures at test time (no committed binary assets).
+rusty-opus = "0.9.1"
+# wavicle's `encode` feature, used ONLY by tests to generate deterministic
+# `.wv` fixtures at test time (no committed binary assets).
+wavicle = { version = "0.1", features = ["encode"] }
+# The reference plugin (in-process, via the static registry).
+plugin-abi = { path = "crates/plugin-abi", default-features = false }
+plugin-test-echo = { path = "crates/plugin-test-echo", default-features = false }
+
+[[bin]]
+name = "audio-engine-cli"
+path = "src/bin/audio_engine_cli.rs"
+
+[[bin]]
+name = "replaygain-scanner"
+path = "src/bin/replaygain_scanner.rs"
+# Loudness tag write-back is the scanner's whole point, so require the
+# feature when the binary is built.
+required-features = ["tag-write"]
+
+[[bin]]
+name = "release-qualification"
+path = "src/bin/release_qualification.rs"
+
+[[bench]]
+name = "dsp_bench"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
+
+[[bench]]
+name = "graph_plan_bench"
+harness = false
+
+[[bench]]
+name = "spatial_bench"
+harness = false
+
+[[bench]]
+name = "performance_budget"
+harness = false
+
+[[test]]
+name = "producer_tick_allocations"
+path = "tests/fidelity/producer_tick_allocations.rs"
+
+[[test]]
+name = "quality_harness"
+path = "tests/fidelity/quality_harness.rs"
+
+[[test]]
+name = "eq_frequency_response"
+path = "tests/fidelity/eq_frequency_response.rs"
+
+[[test]]
+name = "limiter_correctness"
+path = "tests/fidelity/limiter_correctness.rs"
+
+[[test]]
+name = "limiter_measurement"
+path = "tests/fidelity/limiter_measurement.rs"
+
+[[test]]
+name = "dither_measurement"
+path = "tests/fidelity/dither_measurement.rs"
+
+[[test]]
+name = "resampler_quality"
+path = "tests/fidelity/resampler_quality.rs"
+
+[[test]]
+name = "resampler_measurement"
+path = "tests/fidelity/resampler_measurement.rs"
+
+[[test]]
+name = "loudness_ebu_r128"
+path = "tests/fidelity/loudness_ebu_r128.rs"
+
+[[test]]
+name = "eq_64band"
+path = "tests/fidelity/eq_64band.rs"
+
+[[test]]
+name = "graphic_eq"
+path = "tests/fidelity/graphic_eq.rs"
+
+[[test]]
+name = "autoeq"
+path = "tests/fidelity/autoeq.rs"
+
+[[test]]
+name = "output_profiles"
+path = "tests/fidelity/output_profiles.rs"
+
+[[test]]
+name = "ring_buffer_stress"
+path = "tests/fidelity/ring_buffer_stress.rs"
+
+[[test]]
+name = "crossfade_gapless"
+path = "tests/fidelity/crossfade_gapless.rs"
+
+[[test]]
+name = "gapless_seek"
+path = "tests/fidelity/gapless_seek.rs"
+
+[[test]]
+name = "timestretch_fidelity"
+path = "tests/fidelity/timestretch_fidelity.rs"
+
+[[test]]
+name = "timestretch_quality"
+path = "tests/fidelity/timestretch_quality.rs"
+
+[[test]]
+name = "golden_reference_vectors"
+path = "tests/fidelity/golden_reference_vectors.rs"
+
+[[test]]
+name = "realtime_allocation"
+path = "tests/fidelity/realtime_allocation.rs"
+
+[[test]]
+name = "multiband_reconstruction"
+path = "tests/fidelity/multiband_reconstruction.rs"
+
+[[test]]
+name = "measurement_reference"
+path = "tests/fidelity/measurement_reference.rs"
+
+[[test]]
+name = "decoder_robustness"
+path = "tests/fidelity/decoder_robustness.rs"
+
+[[test]]
+name = "property_mutation"
+path = "tests/fidelity/property_mutation.rs"
+
+[[test]]
+name = "transition_tails"
+path = "tests/fidelity/transition_tails.rs"
+
+[[test]]
+name = "golden_corpus_expansion"
+path = "tests/fidelity/golden_corpus_expansion.rs"
+
+[[test]]
+name = "multichannel_graph"
+path = "tests/fidelity/multichannel_graph.rs"
+
+[[test]]
+name = "spatial_panner"
+path = "tests/fidelity/spatial_panner.rs"
+
+[[test]]
+name = "spatial_vbap"
+path = "tests/fidelity/spatial_vbap.rs"
+
+[[test]]
+name = "spatial_object_behavior"
+path = "tests/fidelity/spatial_object_behavior.rs"
+
+[[test]]
+name = "spatial_hybrid"
+path = "tests/fidelity/spatial_hybrid.rs"
+
+[[test]]
+name = "spatial_ambisonic"
+path = "tests/fidelity/spatial_ambisonic.rs"
+
+[[test]]
+name = "spatial_room"
+path = "tests/fidelity/spatial_room.rs"
+
+[[test]]
+name = "spatial_binaural"
+path = "tests/fidelity/spatial_binaural.rs"
+
+[[test]]
+name = "spatial_tracking"
+path = "tests/fidelity/spatial_tracking.rs"
+
+[[test]]
+name = "spatial_hoa"
+path = "tests/fidelity/spatial_hoa.rs"
+
+[[test]]
+name = "spatial_node"
+path = "tests/fidelity/spatial_node.rs"
+
+[[test]]
+name = "spatial_hrtf_ir"
+path = "tests/fidelity/spatial_hrtf_ir.rs"
+
+[[test]]
+name = "spatial_scene"
+path = "tests/fidelity/spatial_scene.rs"
+
+[[test]]
+name = "spatial_events"
+path = "tests/fidelity/spatial_events.rs"
+
+[[test]]
+name = "graph_pipeline_equivalence"
+path = "tests/fidelity/graph_pipeline_equivalence.rs"
+
+[[test]]
+name = "graph2_rt_offline_equivalence"
+path = "tests/fidelity/graph2_rt_offline_equivalence.rs"
+
+[[test]]
+name = "ess_measurement"
+path = "tests/fidelity/ess_measurement.rs"
+
+[[test]]
+name = "minimal_phase"
+path = "tests/fidelity/minimal_phase.rs"
+
+[[test]]
+name = "correction_inverse"
+path = "tests/fidelity/correction_inverse.rs"
+
+[[test]]
+name = "room_correction_pipeline"
+path = "tests/fidelity/room_correction_pipeline.rs"
+
+[[test]]
+name = "acoustic_world"
+path = "tests/fidelity/acoustic_world.rs"
+
+[[test]]
+name = "acoustic_bake"
+path = "tests/fidelity/acoustic_bake.rs"
+
+[[test]]
+name = "acoustic_agreement"
+path = "tests/fidelity/acoustic_agreement.rs"
+
+[[test]]
+name = "graph_topology"
+path = "tests/fidelity/graph_topology.rs"
+
+[[test]]
+name = "timeline_scheduler"
+path = "tests/fidelity/timeline_scheduler.rs"
+
+[[test]]
+name = "aelog_replay"
+path = "tests/fidelity/aelog_replay.rs"
+
+[[test]]
+name = "latency_alignment"
+path = "tests/fidelity/latency_alignment.rs"
+
+[[test]]
+name = "acoustic_graph"
+path = "tests/fidelity/acoustic_graph.rs"
+
+[[test]]
+name = "aelog_scene"
+path = "tests/fidelity/aelog_scene.rs"
+
+[[test]]
+name = "aelog_inputs"
+path = "tests/fidelity/aelog_inputs.rs"
+
+[[test]]
+name = "aelog_automation"
+path = "tests/fidelity/aelog_automation.rs"
+
+[[test]]
+name = "aelog_cache"
+path = "tests/fidelity/aelog_cache.rs"
+
+[[test]]
+name = "convolver_taps"
+path = "tests/fidelity/convolver_taps.rs"
+
+[[test]]
+name = "plugin_host"
+path = "tests/fidelity/plugin_host.rs"
+
+[[test]]
+name = "gapless_queue"
+path = "tests/gapless_queue.rs"
+
+[[test]]
+name = "track_cache"
+path = "tests/track_cache.rs"
+
+[[test]]
+name = "meters"
+path = "tests/fidelity/meters.rs"
+
+[[test]]
+name = "offline_render"
+path = "tests/offline_render.rs"
+
+[[test]]
+name = "independent_references"
+path = "tests/fidelity/independent_references.rs"
+
+[[test]]
+name = "property_expanded"
+path = "tests/fidelity/property_expanded.rs"
+
+[[test]]
+name = "production_diagnostics_fidelity"
+path = "tests/fidelity/production_diagnostics_fidelity.rs"
+
+[[test]]
+name = "spatial_interchange_fidelity"
+path = "tests/fidelity/spatial_interchange_fidelity.rs"
+
+[[test]]
+name = "stage4_professional_io_fidelity"
+path = "tests/fidelity/stage4_professional_io_fidelity.rs"
+
+[[test]]
+name = "realtime_qualification"
+path = "tests/fidelity/realtime_qualification.rs"
+
+[[test]]
+name = "deterministic_reference_vectors"
+path = "tests/fidelity/deterministic_reference_vectors.rs"
+
+[[test]]
+name = "property_coverage"
+path = "tests/fidelity/property_coverage.rs"
+
+[[test]]
+name = "professional_integration"
+path = "tests/fidelity/professional_integration.rs"
+
+[[test]]
+name = "performance_matrix"
+path = "tests/fidelity/performance_matrix.rs"
+
+[[test]]
+name = "simd_qualification"
+path = "tests/fidelity/simd_qualification.rs"
+
+[[test]]
+name = "long_duration_stress"
+path = "tests/fidelity/long_duration_stress.rs"
+
+[[test]]
+name = "nan_inf_fault_injection"
+path = "tests/fidelity/nan_inf_fault_injection.rs"
+
+[[test]]
+name = "denormal_stress"
+path = "tests/fidelity/denormal_stress.rs"
+
+[[test]]
+name = "acoustic_measurement_verification"
+path = "tests/fidelity/acoustic_measurement_verification.rs"
+
+[[test]]
+name = "room_correction_validation"
+path = "tests/fidelity/room_correction_validation.rs"
+
+[[test]]
+name = "cross_feature_matrix"
+path = "tests/fidelity/cross_feature_matrix.rs"
+
+[[test]]
+name = "long_duration_realtime_qualification"
+path = "tests/fidelity/long_duration_realtime_qualification.rs"
+
+[[test]]
+name = "song_evaluation"
+path = "tests/song_evaluation.rs"
+
+
+
+

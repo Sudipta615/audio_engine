@@ -1,0 +1,686 @@
+//! Block signal processing via compiled execution plans: stereo f32 / f64 and
+//! multichannel entry points.
+//!
+//! The stage order is NOT hardcoded here — it lives in the compiled
+//! [`PlanSet`] (see [`plan`]). These entry points only handle block splitting,
+//! precision promotion, the transport-bypass contracts, and plane
+//! orchestration, then hand the planes to the plan runner.
+
+use super::plan::{PlanId, StepScope};
+use super::*;
+
+impl DspGraph {
+    /// Execute a compiled plan on a given graph generation.
+    #[inline]
+    fn run_plan_generation(
+        generation: &mut swap::GraphGeneration,
+        id: PlanId,
+        planes: &mut [&mut [f32]],
+        policy: crate::dsp::safety::NonFinitePolicy,
+    ) {
+        let plan = generation.plans.plan(id);
+        for step in &plan.steps {
+            let node = &mut generation.nodes[step.node.0];
+            match step.scope {
+                StepScope::AllChannels => {
+                    node.process_block_f32(planes);
+                    if policy != crate::dsp::safety::NonFinitePolicy::Ignore {
+                        crate::dsp::safety::contain_non_finite_planes(
+                            planes,
+                            policy,
+                            Some(step.node.0 as u32),
+                            None,
+                            0,
+                            |_| {},
+                        );
+                    }
+                }
+                StepScope::FrontPair => {
+                    let (l, rest) = planes.split_at_mut(1);
+                    let (r, _) = rest.split_at_mut(1);
+                    let mut pair = [&mut l[0][..], &mut r[0][..]];
+                    node.process_block_f32(&mut pair);
+                    if policy != crate::dsp::safety::NonFinitePolicy::Ignore {
+                        crate::dsp::safety::contain_non_finite_planes(
+                            &mut pair,
+                            policy,
+                            Some(step.node.0 as u32),
+                            None,
+                            0,
+                            |_| {},
+                        );
+                    }
+                }
+            }
+            if step.node.0 == node_id::AUX {
+                if let GraphNode::Aux(aux) = &generation.nodes[node_id::AUX] {
+                    if aux.written {
+                        if let GraphNode::Mix(mix) = &mut generation.nodes[node_id::MIX] {
+                            mix.meter_master_f32(planes, planes[0].len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute a compiled plan over a planar block in f32 on the active generation.
+    #[inline]
+    fn run_plan(&mut self, id: PlanId, planes: &mut [&mut [f32]]) {
+        Self::run_plan_generation(&mut self.active, id, planes, self.non_finite_policy);
+    }
+
+    /// f64 variant of [`Self::run_plan`] (Quality mode).
+    #[inline]
+    fn run_plan_f64(&mut self, id: PlanId, planes: &mut [&mut [f64]]) {
+        let plan = self.active.plans.plan(id);
+        for step in &plan.steps {
+            let node = &mut self.active.nodes[step.node.0];
+            match step.scope {
+                StepScope::AllChannels => node.process_block_f64(planes),
+                StepScope::FrontPair => {
+                    let (l, rest) = planes.split_at_mut(1);
+                    let (r, _) = rest.split_at_mut(1);
+                    let mut pair = [&mut l[0][..], &mut r[0][..]];
+                    node.process_block_f64(&mut pair);
+                }
+            }
+            // See [`Self::run_plan`] — same post-aux master-meter
+            // recompute for the f64 chain.
+            if step.node.0 == node_id::AUX {
+                if let GraphNode::Aux(aux) = &self.active.nodes[node_id::AUX] {
+                    if aux.written {
+                        if let GraphNode::Mix(mix) = &mut self.active.nodes[node_id::MIX] {
+                            mix.meter_master_f64(planes, planes[0].len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Signal Processing Entry Points ─────────────────────────────────────
+
+    /// Process a block of stereo frames in-place, dispatching on precision
+    /// mode once per block. Semantics are identical to the pre-plan chain:
+    /// pre-mix (preamp + loudness), then post-mix
+    /// (eq → dynamics → convolution → balance → crossfeed → stereo →
+    /// timestretch → volume → seek fade).
+    pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
+        // Apply queued control commands and any pending generation
+        // swap once per CALLER block, before any splitting or bypass checks
+        // (bypass governs signal processing, not control application).
+        self.control_tick();
+
+        let n = left.len().min(right.len());
+        if self.transition_fader.is_active()
+            && self.retiring.is_some()
+            && n > 0
+            && n <= MAX_AUDIO_BLOCK_FRAMES
+        {
+            // Snapshot dry inputs into preallocated scratch buffers for the old generation.
+            self.scratch.scratch_trans_l[..n].copy_from_slice(&left[..n]);
+            self.scratch.scratch_trans_r[..n].copy_from_slice(&right[..n]);
+
+            // 1. Process active (new) generation on left and right in place.
+            self.process_block_inner(left, right);
+
+            // 2. Copy the new generation's processed audio into scratch_trans_new
+            //    so both old and new planes reside in disjoint pre-allocated buffers.
+            //    This is necessary to avoid the aliasing borrow conflict in step 4:
+            //    crossfade_block needs an immutable `new_planes` and a mutable
+            //    `dst_planes` pointing at separate memory.
+            self.scratch.scratch_trans_new_l[..n].copy_from_slice(&left[..n]);
+            self.scratch.scratch_trans_new_r[..n].copy_from_slice(&right[..n]);
+
+            // 3. Process retiring (old) generation on scratch_trans in place.
+            if let Some(old_gen) = self.retiring.as_mut() {
+                let mut old_planes = [
+                    &mut self.scratch.scratch_trans_l[..n],
+                    &mut self.scratch.scratch_trans_r[..n],
+                ];
+                Self::run_plan_generation(
+                    old_gen,
+                    PlanId::Normal,
+                    &mut old_planes,
+                    self.non_finite_policy,
+                );
+            }
+
+            // 4. Blend old (scratch_trans) and new (scratch_trans_new) into left/right.
+            //    `blend_stereo_into` reads from two disjoint scratch slices and writes
+            //    into `left`/`right` — three separate memory regions, no aliasing.
+            self.transition_fader.blend_stereo_into(
+                &self.scratch.scratch_trans_l[..n],
+                &self.scratch.scratch_trans_r[..n],
+                &self.scratch.scratch_trans_new_l[..n],
+                &self.scratch.scratch_trans_new_r[..n],
+                &mut left[..n],
+                &mut right[..n],
+            );
+
+            if !self.transition_fader.is_active() {
+                if let Some(old_gen) = self.retiring.take() {
+                    self.retire_generation_to_bus(old_gen);
+                }
+            }
+        } else {
+            if let Some(old_gen) = self.retiring.take() {
+                self.retire_generation_to_bus(old_gen);
+            }
+            self.process_block_inner(left, right);
+        }
+    }
+
+    /// Process a stereo block with a second mix-bus input.
+    /// `input0` is the primary (outgoing) stream, processed in place through
+    /// the full chain; `input1` is the secondary (incoming) stream, summed
+    /// by the mix bus under its transition envelope. Bit-exact against the
+    /// pipeline's crossfade path (see `tests/fidelity/
+    /// graph_pipeline_equivalence.rs`).
+    ///
+    /// The secondary stream may be shorter than the primary; the missing
+    /// tail is treated as silence. Transport bypass (bit-perfect / DoP)
+    /// returns before any stage, exactly like [`Self::process_block`].
+    pub fn process_block_inputs(
+        &mut self,
+        input0: (&mut [f32], &mut [f32]),
+        input1: (&mut [f32], &mut [f32]),
+    ) {
+        let mut secondaries = [input1];
+        self.process_block_streams(input0, &mut secondaries);
+    }
+
+    /// Process a stereo block with one primary stream and any number of
+    /// Lane streams. Identical to [`Self::process_block_streams`]
+    /// except lane `k` feeds mix-bus slot `k + 2`, leaving slot 1 (the pair's
+    /// incoming member) untouched — the lane feed for the single-stream path,
+    /// where no crossfade is in progress. `process_block_inputs` still covers
+    /// the crossfade path (lanes ride after the incoming stream there).
+    pub fn process_block_lanes(
+        &mut self,
+        primary: (&mut [f32], &mut [f32]),
+        lanes: &mut [(&mut [f32], &mut [f32])],
+    ) {
+        self.control_tick();
+        let lane_count = lanes
+            .len()
+            .min(super::nodes::MAX_MIX_SLOTS.saturating_sub(2));
+        let lanes = &mut lanes[..lane_count];
+        let n = primary.0.len().min(primary.1.len());
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                for (k, lane) in lanes.iter_mut().enumerate() {
+                    self.feed_secondary_slot(k + 2, (lane.0, lane.1), start, end);
+                }
+                self.process_block_inner(&mut primary.0[start..end], &mut primary.1[start..end]);
+                start = end;
+            }
+            return;
+        }
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            self.feed_secondary_slot(k + 2, (lane.0, lane.1), 0, n);
+        }
+        self.process_block_inner(primary.0, primary.1);
+    }
+
+    /// Process a stereo block during a crossfade with active lanes : the incoming stream feeds slot 1, lane `k` feeds slot `k + 2`
+    /// (the slot-addressed lane placement). Kept as a dedicated entry so the
+    /// engine never has to assemble the incoming + lanes into one contiguous
+    /// array on the hot path (the old MAX_LANES+1 assembly panicked on the
+    /// MAX_LANES-element scratch).
+    pub fn process_block_crossfade_with_lanes(
+        &mut self,
+        primary: (&mut [f32], &mut [f32]),
+        incoming: (&mut [f32], &mut [f32]),
+        lanes: &mut [(&mut [f32], &mut [f32])],
+    ) {
+        self.control_tick();
+        let n = primary.0.len().min(primary.1.len());
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                self.feed_secondary_slot(1, (incoming.0, incoming.1), start, end);
+                for (k, lane) in lanes.iter_mut().enumerate() {
+                    self.feed_secondary_slot(k + 2, (lane.0, lane.1), start, end);
+                }
+                self.process_block_inner(&mut primary.0[start..end], &mut primary.1[start..end]);
+                start = end;
+            }
+            return;
+        }
+        self.feed_secondary_slot(1, (incoming.0, incoming.1), 0, n);
+        for (k, lane) in lanes.iter_mut().enumerate() {
+            self.feed_secondary_slot(k + 2, (lane.0, lane.1), 0, n);
+        }
+        self.process_block_inner(primary.0, primary.1);
+    }
+
+    /// Process a stereo block with one primary stream and any number of
+    /// Secondary mix-bus streams (stream slots). `primary` is
+    /// processed in place through the full chain; secondary `k` feeds mix-bus
+    /// slot `k + 1` (slots ≥ 2 are independent streams summed after the
+    /// transition envelope). The secondary streams may be shorter than the
+    /// primary; the missing tail is treated as silence. Transport bypass
+    /// returns before any stage, exactly like [`Self::process_block`].
+    pub fn process_block_streams(
+        &mut self,
+        primary: (&mut [f32], &mut [f32]),
+        secondaries: &mut [(&mut [f32], &mut [f32])],
+    ) {
+        self.control_tick();
+        let secondary_count = secondaries.len().min(super::nodes::MAX_MIX_SLOTS - 1);
+        let secondaries = &mut secondaries[..secondary_count];
+        let n = primary.0.len().min(primary.1.len());
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                for (k, sec) in secondaries.iter_mut().enumerate() {
+                    self.feed_secondary_slot(k + 1, (sec.0, sec.1), start, end);
+                }
+                self.process_block_inner(&mut primary.0[start..end], &mut primary.1[start..end]);
+                start = end;
+            }
+            return;
+        }
+        for (k, sec) in secondaries.iter_mut().enumerate() {
+            self.feed_secondary_slot(k + 1, (sec.0, sec.1), 0, n);
+        }
+        self.process_block_inner(primary.0, primary.1);
+    }
+
+    /// Copy a chunk of a secondary stream into the mix bus's `slot` planes
+    /// (audio-side, no allocation — the planes are preallocated). Fills the
+    /// slot's channel-major planes from a stereo source (front L/R), marking
+    /// the slot 2-channel. Use [`Self::feed_secondary_slot_mc`] for N-channel.
+    fn feed_secondary_slot(
+        &mut self,
+        slot: usize,
+        input: (&[f32], &[f32]),
+        start: usize,
+        end: usize,
+    ) {
+        let k = end - start;
+        let mut underallocated = false;
+        {
+            let mix = self.mix_mut();
+            if mix.inputs.len() <= slot {
+                return;
+            }
+        }
+        // The planes are preallocated to `MAX_AUDIO_BLOCK_FRAMES` by the plan
+        // builder, so a shortfall is a construction bug, not a runtime
+        // condition. It is checked and counted rather than `expect`ed: a
+        // panic on the audio thread is a dropout, and a control-plane bug
+        // should cost one block, not the stream. `debug_assert` keeps it loud
+        // in test builds, where it is a failing test rather than an
+        // inaudible gap.
+        {
+            let mix = self.mix_mut();
+            debug_assert!(
+                mix.inputs[slot].planes[0].len() >= k
+                    && mix.inputs[slot].planes[1].len() >= k,
+                "secondary input plane under-allocated: needs {k} frames"
+            );
+            if mix.inputs[slot].planes[0].len() < k
+                || mix.inputs[slot].planes[1].len() < k
+            {
+                underallocated = true;
+            }
+        }
+        if underallocated {
+            self.count_dropped_block();
+            return;
+        }
+        let mix = self.mix_mut();
+        let Some(left) = mix.inputs[slot].planes[0].get_mut(..k) else {
+            return;
+        };
+        left.copy_from_slice(&input.0[start..end]);
+        let Some(right) = mix.inputs[slot].planes[1].get_mut(..k) else {
+            return;
+        };
+        right.copy_from_slice(&input.1[start..end]);
+        mix.inputs[slot].channels = 2;
+    }
+
+    /// Record a block the graph refused to process because a preallocated
+    /// buffer was too small.
+    ///
+    /// The audio thread may not log or allocate, so the honest options are a
+    /// counter the control thread reads back or nothing at all. Silently
+    /// dropping audio is how a plan-construction bug becomes a support ticket
+    /// nobody can reproduce, so it is counted.
+    #[inline]
+    fn count_dropped_block(&mut self) {
+        self.dropped_blocks = self.dropped_blocks.saturating_add(1);
+    }
+
+    /// Blocks this graph refused to process for want of scratch.
+    ///
+    /// Non-zero means a plan was built that the scratch arena cannot serve.
+    /// The control thread should treat any value above zero as a bug report,
+    /// not as a normal condition.
+    pub fn dropped_blocks(&self) -> u32 {
+        self.dropped_blocks
+    }
+
+    /// Feed a secondary slot from an N-channel interleaved source . `frames * channels` samples are de-interleaved channel-major into
+    /// the slot's preallocated planes and the slot's channel count is set, so
+    /// the channel-wise MC sum includes all of them. Audio-side, no
+    /// allocation.
+    fn feed_secondary_slot_mc(
+        &mut self,
+        slot: usize,
+        interleaved: &[f32],
+        channels: usize,
+        start: usize,
+        end: usize,
+    ) {
+        let k = end - start;
+        let mix = self.mix_mut();
+        if mix.inputs.len() <= slot {
+            return;
+        }
+        let ch = channels.min(mix.inputs[slot].planes.len());
+        mix.inputs[slot].channels = ch;
+        let available = interleaved.len() / channels;
+        for (plane_idx, plane) in mix.inputs[slot].planes.iter_mut().take(ch).enumerate() {
+            let got = plane.len().min(k).min(available);
+            for dst in 0..got {
+                plane[dst] = interleaved[(start + dst) * channels + plane_idx.min(channels - 1)];
+            }
+        }
+    }
+
+    /// Process an interleaved `channels > 2`-channel multichannel block with
+    /// a primary stream and any number of N-channel secondary mix-bus streams
+    /// . The primary is processed in place through the full MC
+    /// plan; each secondary is fed channel-major into its slot and summed
+    /// channel-wise at the mix step. `secondaries` is `(interleaved,
+    /// channels)` per slot — a secondary may carry fewer channels than the
+    /// primary (surround slots feeding a 5.1 bus). Missing tails are silence.
+    /// Transport bypass returns before any stage. Control tick runs once per
+    /// caller block.
+    pub fn process_block_multichannel_streams(
+        &mut self,
+        primary: &mut [f32],
+        primary_channels: usize,
+        secondaries: &mut [(&mut [f32], usize)],
+    ) {
+        self.control_tick();
+        let n = primary.len() / primary_channels.max(1);
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                for (k, &mut (ref sec, sec_ch)) in secondaries.iter_mut().enumerate() {
+                    self.feed_secondary_slot_mc(k + 1, sec, sec_ch, start, end);
+                }
+                self.process_block_multichannel_inner(
+                    &mut primary[start * primary_channels..end * primary_channels],
+                    primary_channels,
+                );
+                start = end;
+            }
+            return;
+        }
+        for (k, &mut (ref sec, sec_ch)) in secondaries.iter_mut().enumerate() {
+            self.feed_secondary_slot_mc(k + 1, sec, sec_ch, 0, n);
+        }
+        self.process_block_multichannel_inner(primary, primary_channels);
+    }
+
+    /// Unticked inner path — shared by the public entry and the ≤2-channel
+    /// multichannel delegation so the control tick runs exactly once per
+    /// caller block.
+    fn process_block_inner(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let n = left.len().min(right.len());
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                self.process_block_inner(&mut left[start..end], &mut right[start..end]);
+                start = end;
+            }
+            return;
+        }
+        if n == 0 || self.dop_bypass || self.bit_perfect {
+            // DoP bitstream and bit-perfect transport are hard bypass
+            // contracts: no stage (not even software volume) touches the
+            // samples.
+            return;
+        }
+
+        match self.precision_mode {
+            PrecisionMode::Performance => {
+                let mut planes = [left as &mut [f32], right as &mut [f32]];
+                self.run_plan(PlanId::Normal, &mut planes);
+            }
+            PrecisionMode::Quality => {
+                // Promote the block to f64, run the f64 chain, demote back.
+                // The scratch Vecs are moved out of `self` (O(1)) so the plan
+                // runner can borrow `self` mutably without aliasing them; the
+                // allocation is retained when they are put back.
+                let mut l64 = std::mem::take(&mut self.scratch.scratch_f64_l);
+                let mut r64 = std::mem::take(&mut self.scratch.scratch_f64_r);
+                for i in 0..n {
+                    l64[i] = left[i] as f64;
+                    r64[i] = right[i] as f64;
+                }
+                {
+                    let mut planes = [&mut l64[..n] as &mut [f64], &mut r64[..n] as &mut [f64]];
+                    self.run_plan_f64(PlanId::Normal, &mut planes);
+                }
+                for i in 0..n {
+                    left[i] = l64[i] as f32;
+                    right[i] = r64[i] as f32;
+                }
+                self.scratch.scratch_f64_l = l64;
+                self.scratch.scratch_f64_r = r64;
+            }
+        }
+        // The post-aux master-meter recompute ran inside `run_plan` (see
+        // there) — this call moves the per-slot / aux meters onto the
+        // control bus.
+        self.publish_mix_meters();
+    }
+
+    /// Copy the mix bus's per-slot meters (computed during the plan run) onto
+    /// the control bus atomics so telemetry can read them from any thread
+    /// . Audio-side, allocation-free, relaxed stores.
+    fn publish_mix_meters(&mut self) {
+        let inputs = &self.active.nodes[node_id::MIX];
+        if let GraphNode::Mix(mix) = inputs {
+            for (i, input) in mix.inputs.iter().enumerate() {
+                self.bus
+                    .publish_slot_meters(i, input.meters.peak_db, input.meters.rms_db);
+            }
+        }
+        // /: publish the aux bus meters (computed by the
+        // aux node after the return, once per block) so telemetry can read
+        // the aux level from any thread. The aux bus is its own plan node.
+        if let GraphNode::Aux(aux) = &self.active.nodes[node_id::AUX] {
+            self.bus
+                .publish_aux_meters(aux.meters.peak_db, aux.meters.rms_db);
+            // Independent per-send metering (each slot's own aux
+            // peak), read via `ControlHandle::aux_send_peak`.
+            self.bus.publish_aux_send_peaks(&aux.send_peak_db);
+        }
+    }
+
+    /// Process a block of stereo frames in f64 precision in place.
+    pub fn process_block_f64(&mut self, left: &mut [f64], right: &mut [f64]) {
+        self.control_tick();
+        self.process_block_f64_inner(left, right);
+    }
+
+    fn process_block_f64_inner(&mut self, left: &mut [f64], right: &mut [f64]) {
+        let n = left.len().min(right.len());
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                self.process_block_f64_inner(&mut left[start..end], &mut right[start..end]);
+                start = end;
+            }
+            return;
+        }
+        if n == 0 || self.dop_bypass || self.bit_perfect {
+            return;
+        }
+        let mut planes = [left as &mut [f64], right as &mut [f64]];
+        self.run_plan_f64(PlanId::Normal, &mut planes);
+        // Publish the per-slot / aux meters after the plan run, mirroring the
+        // f32 entry point (`process_block_inner`) so the public f64 path
+        // reports live metering too.
+        self.publish_mix_meters();
+    }
+
+    /// Process an interleaved block of `channels`-channel frames in place.
+    ///
+    /// - `channels <= 2`: identical to [`Self::process_block`] on the front
+    ///   L/R pair (a mono source is duplicated to both channels), preserving
+    ///   the stereo path's Quality-mode f64 promotion.
+    /// - `channels > 2`: the multichannel plan runs `routing` (channel trim)
+    ///   on every channel, then the stereo filter stages on the front L/R
+    ///   pair only, then volume and seek-fade on every channel. Runs in f32
+    ///   regardless of `PrecisionMode`, mirroring the pipeline's documented
+    ///   f32 boundary for the >2-channel path.
+    pub fn process_block_multichannel(&mut self, interleaved: &mut [f32], channels: usize) {
+        if channels == 0 || channels > MAX_CHANNELS {
+            return;
+        }
+        self.control_tick();
+        self.process_block_multichannel_inner(interleaved, channels);
+    }
+
+    fn process_block_multichannel_inner(&mut self, interleaved: &mut [f32], channels: usize) {
+        let n = interleaved.len() / channels;
+        if n == 0 {
+            return;
+        }
+        if n > MAX_AUDIO_BLOCK_FRAMES {
+            let mut start = 0;
+            while start < n {
+                let end = (start + MAX_AUDIO_BLOCK_FRAMES).min(n);
+                self.process_block_multichannel_inner(
+                    &mut interleaved[start * channels..end * channels],
+                    channels,
+                );
+                start = end;
+            }
+            return;
+        }
+        if self.dop_bypass || self.bit_perfect {
+            // Bit-perfect and DoP transport bypass every sample transform,
+            // including multichannel trim and software volume.
+            return;
+        }
+
+        // Take the reusable de-interleave planes out of `self` so the plan
+        // runner can borrow `self` mutably without aliasing the scratch.
+        let mut planes = std::mem::take(&mut self.scratch.scratch_mc);
+
+        if channels <= 2 {
+            for (i, chunk) in interleaved[..n * channels]
+                .chunks_exact(channels)
+                .enumerate()
+            {
+                planes[0][i] = chunk[0];
+                planes[1][i] = if channels == 2 { chunk[1] } else { chunk[0] };
+            }
+            {
+                let (front, rest) = planes.split_at_mut(1);
+                self.process_block_inner(&mut front[0][..n], &mut rest[0][..n]);
+            }
+            for (i, chunk) in interleaved[..n * channels]
+                .chunks_exact_mut(channels)
+                .enumerate()
+            {
+                chunk[0] = planes[0][i];
+                if channels == 2 {
+                    chunk[1] = planes[1][i];
+                }
+            }
+            self.scratch.scratch_mc = planes;
+            return;
+        }
+
+        // De-interleave: channel `ch` sits at indices
+        // `ch, ch + channels, ch + 2*channels, …` in the interleaved block.
+        for (ch, plane) in planes.iter_mut().enumerate().take(channels) {
+            for (i, s) in interleaved
+                .iter()
+                .skip(ch)
+                .step_by(channels)
+                .take(n)
+                .enumerate()
+            {
+                plane[i] = *s;
+            }
+        }
+
+        // Build stack-allocated plane views (no heap traffic on the hot
+        // path) and run the multichannel plan over the channel subset.
+        // `planes` is sized `MAX_CHANNELS` by construction (GraphScratch),
+        // so the sequential reborrows below cannot fail, and each plane is
+        // `MAX_AUDIO_BLOCK_FRAMES` long — at least `n`, which the block
+        // splitting above guarantees. Views are truncated to `n` frames so
+        // stateful stages advance their state over exactly the frames of
+        // this block (the same `[..n]` discipline the stereo path and the
+        // pipeline's `process_planes` use), never over the full scratch
+        // length.
+        debug_assert!(n <= MAX_AUDIO_BLOCK_FRAMES);
+        // `planes` is `MAX_CHANNELS` wide by construction. Checked rather
+        // than assumed, because the alternative — a panic or a silently empty
+        // view — turns a plan-construction bug into either a dropout or
+        // silence, neither of which the control thread could ever report.
+        if planes.len() < MAX_CHANNELS || n > MAX_AUDIO_BLOCK_FRAMES {
+            self.scratch.scratch_mc = planes;
+            self.count_dropped_block();
+            return;
+        }
+        let mut plane_views = plane_views(&mut planes, n);
+        // The post-aux master-meter recompute ran inside `run_plan` (the
+        // `NormalMc` plan includes the AUX step; see there).
+        self.run_plan(PlanId::NormalMc, &mut plane_views[..channels]);
+
+        // Re-interleave
+        for ch in 0..channels {
+            for i in 0..n {
+                interleaved[i * channels + ch] = planes[ch][i];
+            }
+        }
+        self.scratch.scratch_mc = planes;
+        self.publish_mix_meters();
+    }
+}
+
+/// Truncate the first `MAX_CHANNELS` scratch planes to `n` frames and hand
+/// back a fixed-size view array.
+///
+/// The caller has already established `planes.len() >= MAX_CHANNELS` (it is
+/// `MAX_CHANNELS` by construction — see `GraphScratch`), so every slot is
+/// filled. The `None` arm is written as a no-op rather than a panic on
+/// purpose: `tests/realtime_contract_test.rs` forbids panic paths on the
+/// audio thread, and a plan-construction bug should cost one block rather
+/// than the stream.
+fn plane_views(planes: &mut [Vec<f32>], n: usize) -> [&mut [f32]; MAX_CHANNELS] {
+    let mut views: [&mut [f32]; MAX_CHANNELS] = std::array::from_fn(|_| &mut [][..0]);
+    let mut rest = planes.iter_mut();
+    for view in views.iter_mut() {
+        match rest.next() {
+            Some(plane) => {
+                let end = n.min(plane.len());
+                *view = &mut plane[..end];
+            }
+            None => break,
+        }
+    }
+    views
+}

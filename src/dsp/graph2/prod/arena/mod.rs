@@ -1,0 +1,252 @@
+//! The production node arena — the single `DspGraph` implementation the
+//! Engine runs as a crate-private internal of [`crate::dsp::graph2::prod`].
+//!
+//! This module provides the node-based DSP architecture through the
+//! [`DspNode`] trait: [`DspGraph`] composes nodes that each describe their
+//! capabilities, process planar audio blocks in f32 or f64, and can be
+//! rearranged or selectively activated. The frozen
+//! [`crate::dsp::pipeline::DspPipeline`] remains as the reference
+//! implementation and the bit-exact oracle for the equivalence suite.
+//!
+//! The graph executes **compiled execution plans**:
+//! all nodes live in a fixed [`GraphNode`] arena (indexed by [`node_id`])
+//! and [`plan::PlanSet`] orders them into per-mode step lists. Since
+//! The **single plan source** is the Graph2 lowering
+//! (`graph2::prod::lowering`) — the hand-authored `PlanSet::compile()` is
+//! gone. The hot path iterates a plan and dispatches through the enum —
+//! stage order is data, not code, which is the prerequisite for live
+//! Reconfiguration.
+//!
+//! The static [`DSP_STAGE_CAPABILITIES`] table in the pipeline module is the
+//! single source of truth for stage metadata; node capability implementations
+//! here mirror those entries.
+//!
+//! ## Layout
+//!
+//! The [`DspGraph`] impl is split by concern, mirroring
+//! [`crate::dsp::pipeline`] (struct + wiring in `mod.rs`, behavior in
+//! concern-scoped files):
+//!
+//! - `construction.rs` — [`DspGraph::from_config`],
+//!   [`DspGraph::reconfigure`], and the generation builder (builds the
+//!   arena + plans)
+//! - `plan.rs` — the compiled [`PlanSet`] / [`ExecutionPlan`] / [`PlanStep`]
+//!   representation
+//! - `swap.rs` — stable [`NodeId`] identity and the swappable
+//!   [`swap::GraphGeneration`] container
+//! - `access.rs` — typed node accessors over the arena (replaces the former
+//!   named fields: `graph.volume()` instead of `graph.volume`)
+//! - `controls.rs` — the queued control surface: per-node SPSC command
+//!   queues, the publish/swap/retire handshake, and the block-boundary drain
+//! - `lifecycle.rs` — sample-rate updates, resets, mode toggles, and the
+//!   small getters/setters
+//! - `process.rs` — block entry points (stereo f32/f64, multichannel) that
+//!   split blocks, promote precision, and hand planes to the plan runner
+//! - `limiter.rs` — the output-domain final safety limiter
+//! - `report.rs` — `graph_nodes` and `total_latency_ms` introspection
+
+pub mod context;
+pub mod node;
+pub mod nodes;
+#[cfg(test)]
+pub mod tests;
+
+mod access;
+mod construction;
+mod controls;
+mod lifecycle;
+mod limiter;
+pub(crate) mod plan;
+mod process;
+mod report;
+mod swap;
+
+use std::sync::Arc;
+
+use crate::buffer::{MAX_AUDIO_BLOCK_FRAMES, MAX_CHANNELS};
+use crate::decode::ChannelLayout;
+use crate::dsp::pipeline::{DspNodeInfo, PrecisionMode, DSP_STAGE_CAPABILITIES};
+use config::{EngineConfig, LoudnessMode as ConfigLoudnessMode, PerformanceMode};
+
+pub use context::GraphScratch;
+pub use controls::GraphControlHandle;
+pub use node::DspNode;
+pub use nodes::*;
+
+pub(crate) use controls::{ControlBus, NodeCmd};
+pub use swap::GraphGeneration;
+pub(super) use swap::{NodeId, SlotAutomationData, UserState};
+
+// The plan types + the plans-parameterized generation builder are
+// crate-visible for the `graph2::prod` lowering seam (the single plan
+// source is the Graph2 topology lowering).
+pub(crate) use plan::{PlanSet, PlanStep, StepScope};
+
+// ── Node arena ───────────────────────────────────────────────────────────────
+
+/// Stable index into the graph's node arena. Plans reference stages by index
+/// instead of by name, so reordering or replacing a node only needs to
+/// rebuild the plan, never the executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NodeIdx(pub usize);
+
+/// Canonical `NodeId` values (the arena slot table): the per-node control
+/// queues are addressed by [`swap::NodeId`], and in the default layout these
+/// values coincide with the arena slot order, which MUST match the
+/// construction order in [`DspGraph::from_config`]. The shell slot is
+/// [`swap::NodeId::SHELL`].
+mod node_id {
+    /// The mix bus: N per-input pre-mix chains (preamp + loudness + gain +
+    /// balance + mute) summed into the master chain. Replaces the former
+    /// `OUT_PREAMP` / `OUT_LOUDNESS` / `IN_PREAMP` / `IN_LOUDNESS` slots
+    /// .
+    pub const MIX: usize = 0;
+    pub const EQ: usize = 1;
+    pub const DYNAMICS: usize = 2;
+    pub const CONVOLUTION: usize = 3;
+    pub const BALANCE: usize = 4;
+    pub const CROSSFEED: usize = 5;
+    pub const STEREO: usize = 6;
+    pub const TIMESTRETCH: usize = 7;
+    pub const VOLUME: usize = 8;
+    pub const SEEK_FADE: usize = 9;
+    pub const ROUTING: usize = 10;
+    pub const RESAMPLER: usize = 11;
+    pub const LIMITER: usize = 12;
+    pub const DITHER: usize = 13;
+    /// The aux bus as its own plan node, consuming the mix node's
+    /// send taps and returning into the master. Runs right after the mix
+    /// step in the plan (see [`plan::PlanSet::compile`]).
+    pub const AUX: usize = 14;
+    /// Room/headphone correction: the room/headphone correction node (per-channel
+    /// partitioned convolution bank), placed post-aux / pre-EQ.
+    pub const CORRECTION: usize = 15;
+    /// The spatial master output stage (renders the front pair
+    /// through the binaural head model with the room), placed at the very
+    /// end of the post-mix chain.
+    pub const SPATIAL: usize = 16;
+    /// The plugin host insert — Rust-native effect plugins
+    /// (post-volume, pre-limiter). Disabled / empty = bit-exact.
+    pub const PLUGIN: usize = 17;
+    /// Number of canonical node slots (also the first non-node `NodeId`).
+    pub const NODE_COUNT: usize = 18;
+}
+
+/// The number of canonical node slots in a generation.
+///
+/// A reservation sized *before* the graph is built needs the arena's shape, and
+/// the shape is the whole point: a graph generation always holds
+/// [`node_id::NODE_COUNT`] nodes regardless of which stages a plan enabled, so
+/// this is a property of the architecture rather than of any request.
+pub(crate) fn node_count() -> usize {
+    node_id::NODE_COUNT
+}
+
+/// Uniform node storage for the arena. The enum enables monomorphized (match)
+/// dispatch on the hot path and keeps every node inline in one contiguous
+/// allocation — no `Box<dyn DspNode>` indirection. The arena order is fixed
+/// by construction and matches the [`node_id`] slot table.
+///
+/// The enum is deliberately large (the largest node, e.g. the limiter or
+/// timestretcher, is ~13 KB, and the arena stores one slot per node kind);
+/// boxing would reintroduce per-node indirection and allocation, so the lint
+/// is allowed — same as `PlaybackStream` in the engine.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum GraphNode {
+    Mix(MixBusNode),
+    Eq(EqNode),
+    Dynamics(DynamicsNode),
+    Convolution(ConvolutionNode),
+    Balance(BalanceNode),
+    Crossfeed(CrossfeedNode),
+    Stereo(StereoNode),
+    TimeStretch(TimeStretchNode),
+    Volume(GainNode),
+    SeekFade(SeekFadeNode),
+    Routing(RoutingNode),
+    Resampler(ResamplerNode),
+    Limiter(LimiterNode),
+    Dither(DitherNode),
+    Aux(AuxBusNode),
+    Correction(CorrectionNode),
+    Spatial(SpatialNode),
+    PluginHost(PluginHostNode),
+}
+
+const VOLUME_RAMP_DURATION_MS: f32 = 10.0;
+const PREAMP_RAMP_DURATION_MS: f32 = VOLUME_RAMP_DURATION_MS;
+
+/// The central DSP Graph executing the statically compiled signal processing chain.
+///
+/// Implements the target conceptual model:
+/// ```text
+/// DspGraph
+///   ├── Gain (Preamp / SeekFade / Volume)
+///   ├── Loudness (LoudnessNormalizer)
+///   ├── EQ (ParametricEq / Mid-Side)
+///   ├── Dynamics (MultibandCompressor)
+///   ├── FIR/Convolution (ConvolutionEngine)
+///   ├── Routing (ChannelTrimmer / Bass Management / Matrix)
+///   ├── Crossfeed (Crossfeed)
+///   ├── Stereo (StereoEnhancer)
+///   ├── Time/Pitch (TimeStretcher)
+///   ├── Volume (GainProcessor)
+///   ├── Resampler (AudioResampler adapter)
+///   ├── Limiter (LookaheadLimiter)
+///   ├── Dither/Conversion (Dither adapter)
+/// └── Spatial (SpatialNode —: spatial master output)
+/// ```
+///
+/// Features:
+/// - Explicit node descriptor metadata via [`DspNode::capability`]
+/// - Automated latency & tail tracking
+/// - Zero dynamic allocations on the real-time audio thread
+/// - Transparent bit-perfect & DoP bypass execution plans
+///
+/// The struct only declares the graph's fields and wiring; its behavior lives
+/// in the concern-scoped impl files listed in the module docs.
+pub struct DspGraph {
+    // ── Active generation (audio thread owns this) ──
+    /// The currently-executed graph configuration: node arena + compiled
+    /// plans + stable node identities. Swapped atomically at block boundaries
+    /// via the publish/swap/retire handshake (see [`controls`]).
+    active: Box<swap::GraphGeneration>,
+
+    /// The cross-thread control plane: per-node SPSC queues, the swap
+    /// atomics, and sticky user state. The only part of the graph shared
+    /// between the control and audio threads.
+    bus: Arc<controls::ControlBus>,
+
+    // ── Routing & Multichannel ──
+    pub multichannel_layout: ChannelLayout,
+
+    // ── Graph State & Control ──
+    sample_rate: f32,
+    speed: f32,
+    volume_fade_ms: f32,
+    precision_mode: PrecisionMode,
+    performance_mode: PerformanceMode,
+    bit_perfect: bool,
+    dop_bypass: bool,
+
+    // ── Pre-allocated Scratch Arena ──
+    scratch: GraphScratch,
+
+    // ── Seamless Generation Transition Blending ──
+    transition_fader: crate::dsp::graph2::transitions::TransitionCrossfader,
+    retiring: Option<Box<swap::GraphGeneration>>,
+
+    // ── Real-time Float Safety & Containment ──
+    pub non_finite_policy: crate::dsp::safety::NonFinitePolicy,
+
+    /// Blocks this graph refused to process because a preallocated scratch
+    /// buffer was smaller than the block asked for.
+    ///
+    /// The audio thread may not log, so this is the only way such a refusal
+    /// can become visible; the control thread reads it through
+    /// [`DspGraph::dropped_blocks`]. Written from the audio thread, read from
+    /// the control thread only for reporting — a torn read would cost a
+    /// counter, not audio, but a single writer with a `Relaxed`-ordered
+    /// consumer keeps it honest on every target.
+    dropped_blocks: u32,
+}

@@ -1,0 +1,269 @@
+pub mod aux_node;
+pub mod convolution_node;
+pub mod correction_node;
+pub mod crossfeed_node;
+pub mod dither_node;
+pub mod dynamics_node;
+pub mod eq_node;
+pub mod gain_node;
+pub mod limiter_node;
+pub mod loudness_node;
+pub mod mix;
+pub mod plugin_host_node;
+pub mod plugin_sandbox;
+pub mod resampler_node;
+pub mod routing_node;
+pub mod spatial_node;
+pub mod stereo_node;
+pub mod timestretch_node;
+
+pub use aux_node::AuxBusNode;
+pub use convolution_node::ConvolutionNode;
+pub use correction_node::{CorrectionNode, CorrectionNodeInfo};
+pub use crossfeed_node::CrossfeedNode;
+pub use dither_node::DitherNode;
+pub use dynamics_node::DynamicsNode;
+pub use eq_node::EqNode;
+pub use gain_node::{BalanceNode, GainNode, SeekFadeNode};
+pub use limiter_node::LimiterNode;
+pub use loudness_node::LoudnessNode;
+pub use mix::{
+    AutomationPoint, AutomationTarget, DuckState, MixBusNode, MixInput, MixInputCmd,
+    MixTransitionCmd, PanLaw, MAX_AUTOMATION_POINTS, MAX_DUCK_TARGETS, MAX_MIX_SLOTS,
+};
+pub use plugin_host_node::{PluginHostNode, MAX_PLUGIN_SLOTS};
+#[allow(unused_imports)]
+pub use plugin_sandbox::{
+    run_plugin_worker_stdio, PluginProcessSandbox, PluginSandboxNode, SandboxedPluginInstance,
+    MAX_SANDBOX_CHANNELS,
+};
+pub use resampler_node::ResamplerNode;
+pub use routing_node::RoutingNode;
+pub use spatial_node::SpatialNode;
+pub use stereo_node::StereoNode;
+pub use timestretch_node::TimeStretchNode;
+
+use super::GraphNode;
+use crate::dsp::{graph2::prod::arena::node::DspNode, pipeline::DspStageCapability};
+
+impl DspNode for GraphNode {
+    fn capability(&self) -> DspStageCapability {
+        match self {
+            GraphNode::Mix(n) => n.capability(),
+            GraphNode::Eq(n) => n.capability(),
+            GraphNode::Dynamics(n) => n.capability(),
+            GraphNode::Convolution(n) => n.capability(),
+            GraphNode::Balance(n) => n.capability(),
+            GraphNode::Crossfeed(n) => n.capability(),
+            GraphNode::Stereo(n) => n.capability(),
+            GraphNode::TimeStretch(n) => n.capability(),
+            GraphNode::Volume(n) => n.capability(),
+            GraphNode::SeekFade(n) => n.capability(),
+            GraphNode::Routing(n) => n.capability(),
+            GraphNode::Resampler(n) => n.capability(),
+            GraphNode::Limiter(n) => n.capability(),
+            GraphNode::Dither(n) => n.capability(),
+            GraphNode::Aux(n) => n.capability(),
+            GraphNode::Correction(n) => n.capability(),
+            GraphNode::Spatial(n) => n.capability(),
+            GraphNode::PluginHost(n) => n.capability(),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        match self {
+            GraphNode::Mix(n) => n.is_active(),
+            GraphNode::Eq(n) => n.is_active(),
+            GraphNode::Dynamics(n) => n.is_active(),
+            GraphNode::Convolution(n) => n.is_active(),
+            GraphNode::Balance(n) => n.is_active(),
+            GraphNode::Crossfeed(n) => n.is_active(),
+            GraphNode::Stereo(n) => n.is_active(),
+            GraphNode::TimeStretch(n) => n.is_active(),
+            GraphNode::Volume(n) => n.is_active(),
+            GraphNode::SeekFade(n) => n.is_active(),
+            GraphNode::Routing(n) => n.is_active(),
+            GraphNode::Resampler(n) => n.is_active(),
+            GraphNode::Limiter(n) => n.is_active(),
+            GraphNode::Dither(n) => n.is_active(),
+            GraphNode::Aux(n) => n.is_active(),
+            GraphNode::Correction(n) => n.is_active(),
+            GraphNode::Spatial(n) => n.is_active(),
+            GraphNode::PluginHost(n) => n.is_active(),
+        }
+    }
+
+    fn latency_samples(&self) -> usize {
+        match self {
+            GraphNode::Mix(n) => n.latency_samples(),
+            GraphNode::Eq(n) => n.latency_samples(),
+            GraphNode::Dynamics(n) => n.latency_samples(),
+            GraphNode::Convolution(n) => n.latency_samples(),
+            GraphNode::Balance(n) => n.latency_samples(),
+            GraphNode::Crossfeed(n) => n.latency_samples(),
+            GraphNode::Stereo(n) => n.latency_samples(),
+            GraphNode::TimeStretch(n) => n.latency_samples(),
+            GraphNode::Volume(n) => n.latency_samples(),
+            GraphNode::SeekFade(n) => n.latency_samples(),
+            GraphNode::Routing(n) => n.latency_samples(),
+            GraphNode::Resampler(n) => n.latency_samples(),
+            GraphNode::Limiter(n) => n.latency_samples(),
+            GraphNode::Dither(n) => n.latency_samples(),
+            GraphNode::Aux(n) => n.latency_samples(),
+            GraphNode::Correction(n) => n.latency_samples(),
+            GraphNode::Spatial(n) => n.latency_samples(),
+            GraphNode::PluginHost(n) => n.latency_samples(),
+        }
+    }
+
+    fn tail_samples(&self) -> usize {
+        match self {
+            GraphNode::Mix(n) => n.tail_samples(),
+            GraphNode::Eq(n) => n.tail_samples(),
+            GraphNode::Dynamics(n) => n.tail_samples(),
+            GraphNode::Convolution(n) => n.tail_samples(),
+            GraphNode::Balance(n) => n.tail_samples(),
+            GraphNode::Crossfeed(n) => n.tail_samples(),
+            GraphNode::Stereo(n) => n.tail_samples(),
+            GraphNode::TimeStretch(n) => n.tail_samples(),
+            GraphNode::Volume(n) => n.tail_samples(),
+            GraphNode::SeekFade(n) => n.tail_samples(),
+            GraphNode::Routing(n) => n.tail_samples(),
+            GraphNode::Resampler(n) => n.tail_samples(),
+            GraphNode::Limiter(n) => n.tail_samples(),
+            GraphNode::Dither(n) => n.tail_samples(),
+            GraphNode::Aux(n) => n.tail_samples(),
+            GraphNode::Correction(n) => n.tail_samples(),
+            GraphNode::Spatial(n) => n.tail_samples(),
+            GraphNode::PluginHost(n) => n.tail_samples(),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            GraphNode::Mix(n) => n.reset(),
+            GraphNode::Eq(n) => n.reset(),
+            GraphNode::Dynamics(n) => n.reset(),
+            GraphNode::Convolution(n) => n.reset(),
+            GraphNode::Balance(n) => n.reset(),
+            GraphNode::Crossfeed(n) => n.reset(),
+            GraphNode::Stereo(n) => n.reset(),
+            GraphNode::TimeStretch(n) => n.reset(),
+            GraphNode::Volume(n) => n.reset(),
+            GraphNode::SeekFade(n) => n.reset(),
+            GraphNode::Routing(n) => n.reset(),
+            GraphNode::Resampler(n) => n.reset(),
+            GraphNode::Limiter(n) => n.reset(),
+            GraphNode::Dither(n) => n.reset(),
+            GraphNode::Aux(n) => n.reset(),
+            GraphNode::Correction(n) => n.reset(),
+            GraphNode::Spatial(n) => n.reset(),
+            GraphNode::PluginHost(n) => n.reset(),
+        }
+    }
+
+    fn prepare(&mut self, sample_rate: f32, max_channels: usize) {
+        match self {
+            GraphNode::Mix(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Eq(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Dynamics(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Convolution(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Balance(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Crossfeed(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Stereo(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::TimeStretch(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Volume(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::SeekFade(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Routing(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Resampler(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Limiter(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Dither(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Aux(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Correction(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::Spatial(n) => n.prepare(sample_rate, max_channels),
+            GraphNode::PluginHost(n) => n.prepare(sample_rate, max_channels),
+        }
+    }
+
+    fn process_block_f32(&mut self, planes: &mut [&mut [f32]]) {
+        match self {
+            GraphNode::Mix(n) => n.process_block_f32(planes),
+            GraphNode::Eq(n) => n.process_block_f32(planes),
+            GraphNode::Dynamics(n) => n.process_block_f32(planes),
+            GraphNode::Convolution(n) => n.process_block_f32(planes),
+            GraphNode::Balance(n) => n.process_block_f32(planes),
+            GraphNode::Crossfeed(n) => n.process_block_f32(planes),
+            GraphNode::Stereo(n) => n.process_block_f32(planes),
+            GraphNode::TimeStretch(n) => n.process_block_f32(planes),
+            GraphNode::Volume(n) => n.process_block_f32(planes),
+            GraphNode::SeekFade(n) => n.process_block_f32(planes),
+            GraphNode::Routing(n) => n.process_block_f32(planes),
+            GraphNode::Resampler(n) => n.process_block_f32(planes),
+            GraphNode::Limiter(n) => n.process_block_f32(planes),
+            GraphNode::Dither(n) => n.process_block_f32(planes),
+            GraphNode::Aux(n) => n.process_block_f32(planes),
+            GraphNode::Correction(n) => n.process_block_f32(planes),
+            GraphNode::Spatial(n) => n.process_block_f32(planes),
+            GraphNode::PluginHost(n) => n.process_block_f32(planes),
+        }
+    }
+
+    fn process_block_f64(&mut self, planes: &mut [&mut [f64]]) {
+        match self {
+            GraphNode::Mix(n) => n.process_block_f64(planes),
+            GraphNode::Eq(n) => n.process_block_f64(planes),
+            GraphNode::Dynamics(n) => n.process_block_f64(planes),
+            GraphNode::Convolution(n) => n.process_block_f64(planes),
+            GraphNode::Balance(n) => n.process_block_f64(planes),
+            GraphNode::Crossfeed(n) => n.process_block_f64(planes),
+            GraphNode::Stereo(n) => n.process_block_f64(planes),
+            GraphNode::TimeStretch(n) => n.process_block_f64(planes),
+            GraphNode::Volume(n) => n.process_block_f64(planes),
+            GraphNode::SeekFade(n) => n.process_block_f64(planes),
+            GraphNode::Routing(n) => n.process_block_f64(planes),
+            GraphNode::Resampler(n) => n.process_block_f64(planes),
+            GraphNode::Limiter(n) => n.process_block_f64(planes),
+            GraphNode::Dither(n) => n.process_block_f64(planes),
+            GraphNode::Aux(n) => n.process_block_f64(planes),
+            GraphNode::Correction(n) => n.process_block_f64(planes),
+            GraphNode::Spatial(n) => n.process_block_f64(planes),
+            GraphNode::PluginHost(n) => n.process_block_f64(planes),
+        }
+    }
+
+    /// Forward the node's own accounting to the arena.
+    ///
+    /// Dispatches persistent byte reporting to the underlying node.
+    /// The four nodes that own convolution banks, IR sets, spatial scenes
+    /// and plugin instances each implement `persistent_bytes` to report
+    /// what they actually hold on heap.
+    ///
+    /// The consequence was not a small inaccuracy. `convolution_bytes`,
+    /// `spatial_bytes` and `plugin_bytes` in `node_memory()` were hard-zero
+    /// regardless of what the graph contained, and those are exactly the
+    /// numbers a resource reservation is sized from. An unforwarded
+    /// `persistent_bytes` is a *measurement* that reads as truth, which is worse
+    /// than not measuring: the reservation looked satisfied and was wrong.
+    fn persistent_bytes(&self) -> usize {
+        match self {
+            GraphNode::Mix(n) => n.persistent_bytes(),
+            GraphNode::Eq(n) => n.persistent_bytes(),
+            GraphNode::Dynamics(n) => n.persistent_bytes(),
+            GraphNode::Convolution(n) => n.persistent_bytes(),
+            GraphNode::Balance(n) => n.persistent_bytes(),
+            GraphNode::Crossfeed(n) => n.persistent_bytes(),
+            GraphNode::Stereo(n) => n.persistent_bytes(),
+            GraphNode::TimeStretch(n) => n.persistent_bytes(),
+            GraphNode::Volume(n) => n.persistent_bytes(),
+            GraphNode::SeekFade(n) => n.persistent_bytes(),
+            GraphNode::Routing(n) => n.persistent_bytes(),
+            GraphNode::Resampler(n) => n.persistent_bytes(),
+            GraphNode::Limiter(n) => n.persistent_bytes(),
+            GraphNode::Dither(n) => n.persistent_bytes(),
+            GraphNode::Aux(n) => n.persistent_bytes(),
+            GraphNode::Correction(n) => n.persistent_bytes(),
+            GraphNode::Spatial(n) => n.persistent_bytes(),
+            GraphNode::PluginHost(n) => n.persistent_bytes(),
+        }
+    }
+}
