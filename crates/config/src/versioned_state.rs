@@ -305,7 +305,7 @@ pub struct OutputProfileState {
 /// every time one of those changed, and a stale file would restore values the
 /// user never set. The narrower the payload, the more likely it is to load
 /// cleanly from a file written by any nearby version.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DspState {
     /// Saved equalizer presets, in the order the user arranged them.
     ///
@@ -331,17 +331,6 @@ pub struct DspState {
     pub output_backend: AudioBackend,
 }
 
-impl Default for DspState {
-    fn default() -> Self {
-        Self {
-            eq_presets: Vec::new(),
-            limiter: LimiterConfig::default(),
-            output_device: None,
-            output_backend: AudioBackend::default(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,7 +353,7 @@ mod tests {
                 soft_clip: true,
             },
             output_device: Some("Built-in".to_string()),
-            output_backend: AudioBackend::Alsa,
+            output_backend: AudioBackend::ExclusiveAlsa,
         };
 
         let json = VersionedEnvelope::new(state.clone(), 1)

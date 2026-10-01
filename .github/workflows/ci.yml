@@ -91,6 +91,126 @@ jobs:
       - name: clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  # ── Feature combinations ───────────────────────────────────────────────────
+  #
+  # The `clippy` and `test` jobs only ever build `default` and `all-features`.
+  # That hid two real build breaks:
+  #
+  #   * `src/lib.rs` gated `pub mod engine` on `audio-output` while
+  #     `commands`, `source`, `diagnostics` and the prelude all referenced
+  #     `crate::engine::*` unconditionally, so every minimal-feature build
+  #     failed with a dozen unrelated "cannot find module `engine`" errors;
+  #   * a stray `#[cfg(not(feature = "codec-opus"))] false` made the
+  #     `Codec::Opus` capability tuple 13 elements instead of 12, so *any*
+  #     build without `codec-opus` failed to compile.
+  #
+  # Both are fixed, but a matrix is what keeps a third one from appearing.
+  features:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `audio-output` alone must work: it implies `resample` because
+      # `output::endpoint` drives a rubato slip resampler for drift correction.
+      - name: check (audio-output only)
+        run: cargo check --workspace --no-default-features --features audio-output
+
+      # `audio-output` without any codec.
+      - name: check (audio-output, no codecs)
+        run: cargo check --workspace --no-default-features --features audio-output,all-codecs
+
+      # Each optional backend family composes through `audio-output`.
+      - name: check (tag-write + c-ffi + plugin-dylib)
+        run: cargo check --workspace --no-default-features --features audio-output,tag-write,c-ffi,plugin-dylib
+
+      - name: check (network-streaming + fingerprint + sofa-import)
+        run: cargo check --workspace --no-default-features --features audio-output,network-streaming,fingerprint,sofa-import
+
+      # `--no-default-features` alone must FAIL FAST with the explanatory
+      # `compile_error!` in `lib.rs`, not with a cascade of unresolved-import
+      # errors from backend internals.
+      - name: check (no default features fails with the documented message)
+        run: |
+          if cargo check --workspace --no-default-features 2>&1 | tee /tmp/out | grep -q "the \`audio-output\` feature is required"; then
+            echo "OK: the required-feature guard fired with its explanatory message"
+          else
+            echo "FAIL: --no-default-features did not produce the documented compile_error!"
+            cat /tmp/out
+            exit 1
+          fi
+
+  # ── Supply chain ───────────────────────────────────────────────────────────
+  #
+  # There was no dependency-policy or advisory check in CI, and `Cargo.lock`
+  # carries 27 crates at two versions each.
+  supply-chain:
+    name: supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo deny (advisories, licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: cargo audit (RustSec advisories)
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      # Dependency versions are floating (`"5.0"`, not `"=5.0.0"`), so a
+      # resolution change is invisible in the diff. This makes one fail loudly.
+      - name: lockfile is up to date
+        run: |
+          cargo update --locked --workspace
+          if ! git diff --quiet -- Cargo.lock crates/opus-decoder/Cargo.lock; then
+            echo "FAIL: Cargo.lock changed; dependency versions are floating, so a"
+            echo "resolution change needs to be reviewed and committed deliberately."
+            git diff --stat -- Cargo.lock
+            exit 1
+          fi
+
+  # ── MSRV ───────────────────────────────────────────────────────────────────
+  #
+  # `crates/opus-decoder` requires edition 2024 (Rust 1.85). The root manifest
+  # declared no `rust-version`, so an older toolchain failed with an opaque
+  # edition error rather than a stated minimum.
+  msrv:
+    name: minimum supported rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain (MSRV)
+        run: |
+          rustup toolchain install 1.85 --profile minimal
+          rustup default 1.85
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: check (MSRV)
+        run: cargo check --workspace --locked
+
   # ── Test ───────────────────────────────────────────────────────────────────
   test:
     name: test (${{ matrix.os }}, ${{ matrix.features }})
@@ -228,3 +348,54 @@ jobs:
       # caught by the doctest run inside the `test` job.
       - name: cargo doc
         run: cargo doc --workspace --no-deps
+
+  # ── Fuzz ───────────────────────────────────────────────────────────────────
+  #
+  # There was no fuzz job, so `cargo fuzz` was only ever run by hand. The two
+  # targets that existed also had a shape problem this fixes:
+  #
+  #   * `fuzz_codecs` stopped at `Decoder::open`, so every frame-decode path
+  #     (TTA Rice/filter, DSD block reading and decimation, WavPack
+  #     `load_block`, APE `decode_frame`, Opus packet decode) was unfuzzed —
+  #     they all sit downstream of `decode_next`. It now drives decode, bounded
+  #     by a block count and a wall-clock budget.
+  #   * its temp filename was PID-only, so parallel `-jobs` workers collided
+  #     in the shared `/tmp`.
+  #   * playlist parsing (M3U / PLS / XSPF) — a hand-rolled parser on
+  #     explicitly untrusted input — had NO target at all. It now does.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_codecs, fuzz_parsers, fuzz_playlists]
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo-fuzz needs nightly for its sanitizer/arbitrary plumbing.
+      - name: Install nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+
+      # A short bounded run: enough to smoke the target on every PR without
+      # turning CI into a fuzzing farm. Longer campaigns belong on a scheduled
+      # job, not a per-push one.
+      - name: cargo fuzz (60s smoke run)
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=2560
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+          retention-days: 7

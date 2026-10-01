@@ -1,20 +1,55 @@
 [package]
 name = "audio-engine"
-# Intentionally NOT workspace-versioned (UE-R013).
+# Independently versioned (UE-R013), and deliberately NOT
+# `[workspace.package]`-inherited.
 #
 # `audio-engine` and its in-tree siblings (`config`, `plugin-abi`,
 # `plugin-test-echo`) are an independently versioned realtime product lineage:
 # they are published and consumed as a standalone realtime audio library, and
-# their versioning does not track Ultimate Engine's 1.x series. Every other
-# workspace crate inherits `[workspace.package].version`.
+# their versioning does not track Ultimate Engine's 1.x series. They are still
+# workspace MEMBERS (see `[workspace]` below) so `--workspace` covers all of
+# them, but each states its own version and moves in lockstep by policy.
 #
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
-# package is what an integrator should depend on. See `docs/MIGRATION.md`.
-version = "0.5.0"
+# package is what an integrator should depend on.
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
+
+# `config`, `plugin-abi`, `plugin-test-echo` and `opus-decoder` are WORKSPACE
+# MEMBERS, not merely path dependencies.
+#
+# They were path dependencies without a `[workspace]` table, which made every
+# `--workspace` invocation in CI (clippy, test, both feature sets) resolve to
+# the root package alone. That had three consequences:
+#
+#   * 56 `#[test]` functions across the four crates were never compiled or run;
+#   * `cargo test -p config` failed with "not a member of the workspace", so
+#     there was no way to run them at all without a `--manifest-path` override;
+#   * a broken test in `config` (it referenced `AudioBackend::Alsa`, which does
+#     not exist — the variant is `ExclusiveAlsa`) stayed invisible.
+#
+# The versions stay independently declared rather than inherited from
+# `[workspace.package]`: this is a realtime product lineage whose versioning
+# does not track Ultimate Engine's 1.x series, so `audio-engine` and its
+# siblings each carry their own version and move in lockstep by policy (see
+# AGENTS.md "Versioning") rather than by Cargo inheritance. `opus-decoder` is
+# deliberately on its own 0.1.x line.
+[workspace]
+members = [
+    "crates/config",
+    "crates/plugin-abi",
+    "crates/plugin-test-echo",
+    "crates/opus-decoder",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.6.0"
+edition = "2021"
+license = "Apache-2.0"
 
 [lib]
 name = "engine"
@@ -22,7 +57,10 @@ path = "src/lib.rs"
 
 [features]
 default = ["audio-output", "resample", "all-codecs", "sofa-import"]
-audio-output = ["cpal", "thread-priority"]
+# `output::endpoint` drives a `rubato` slip resampler for clock-drift
+# correction and the engine requires `output::endpoint`, so `audio-output`
+# implies `resample`.
+audio-output = ["cpal", "thread-priority", "resample"]
 pipewire = ["audio-output"]
 jack = ["audio-output"]
 # Dynamic plugin library loading (dlopen / LoadLibrary). The
@@ -105,9 +143,10 @@ sofa-import = []
 # Kept, rather than deleted, because removing the feature would also remove
 # `NetworkByteSource` -- a Range-request byte source that is a reasonable
 # foundation for the streaming work. What is not kept is the claim that the
-# feature does something: `docs/GETTING_STARTED.md` now says "not usable" and
-# `decode::uri_to_local_path` refuses remote URIs with a message naming this
-# feature.
+# feature does something: `decode::uri_to_local_path` refuses remote URIs with
+# a message naming this feature, and the network-source path is documented as
+# incomplete in `README.md`. (This comment used to point at
+# `docs/GETTING_STARTED.md`, which does not exist.)
 network-streaming = ["dep:ureq"]
 
 # Write loudness metadata (EBU R128 / ReplayGain) back into file tags.
@@ -173,9 +212,12 @@ ogg = { version = "0.9", optional = true }
 # left with overflow" at `celt/vq.rs:118` (`mask |= 1 << i` with `mask: u8` and
 # `i` up to `b`), which the fixture corpus hit immediately on any Ogg Opus
 # input. The in-tree fork at `crates/opus-decoder` carries the fix
-# (`mask: u32` plus an `i < 32` bound), so the fork is what gets built. It is
-# kept as an optional dependency rather than a workspace member so that
-# `--workspace` and `--all-features` do not change its build profile.
+# (`mask: u32` plus an `i < 32` bound), so the fork is what gets built.
+#
+# It IS a workspace member (see `[workspace]`), so `cargo test --workspace`
+# now builds and runs its 33 unit tests, which were previously dormant. It
+# needs edition 2024, hence the workspace `resolver = "2"` and a toolchain of
+# 1.85 or newer.
 opus-decoder = { path = "crates/opus-decoder", version = "0.1.1", optional = true }
 # Blocking HTTP client for network audio streaming (`network-streaming` feature).
 # Pure Rust, no async runtime — fits the synchronous `AudioByteSource` trait.
@@ -694,3 +736,36 @@ path = "tests/fidelity/lra_allocation.rs"
 
 
 
+
+[profile.release]
+# Release builds previously inherited Cargo's defaults, with no `[profile]`
+# table at all. Two things follow from that which this audit argues against.
+#
+# `overflow-checks = false` (the default) turned integer overflow in the
+# parsers into silent wrapping, which is how a crafted 32-byte WavPack header
+# reached a ~4 GiB allocation (`ck_size + 8` wrapping past the length check)
+# and how a DFF sub-chunk header underflowed a u64. Both are now guarded at
+# the source, but leaving checks off means the NEXT one of that class is a
+# silent memory-safety bug rather than a loud failure. Integer overflow
+# checks cost real time only on integer-heavy code; the audio path is f32/f64
+# arithmetic and does not pay for them.
+overflow-checks = true
+
+# Thin LTO. The graph's production executor relies on cross-crate inlining
+# across the `plugin-abi`, `config` and `dsp` boundaries (the zero-allocation
+# plan runner in particular); the default `lto = false` left those calls out of
+# line.
+#
+# `codegen-units` is deliberately left at its default of 16 rather than set to
+# 1. Forcing 1 roughly triples the wall time of `cargo test --release` on this
+# tree (208k lines, 90+ test binaries) for a measurable-but-small gain over thin
+# LTO alone, which is a bad trade for a build people run locally.
+lto = "thin"
+
+# `panic = "abort"` is deliberately NOT set: the plugin host relies on
+# `catch_unwind` to contain a panicking plugin, and that only works with
+# unwinding (see `PluginVTable`'s `C-unwind` note).
+
+[profile.bench]
+# Benchmarks should measure the same code shape users run.
+lto = "thin"

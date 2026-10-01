@@ -27,6 +27,10 @@ lets non-Rust hosts drive the whole surface.
 │                               #   dlopen loader, static registry)
 ├── crates/plugin-test-echo/    # `plugin-test-echo` crate — the reference
 │                               #   delay+gain plugin (cdylib + rlib)
+├── crates/opus-decoder/        # vendored RFC 8251 Opus decoder (a fork of the
+│                               #   crates.io 0.1.1; see Cargo.toml for why).
+│                               #   Edition 2024, so the workspace needs
+│                               #   resolver 2 and Rust >= 1.85.
 ├── src/                        # `engine` crate
 │   ├── lib.rs                  # crate root + prelude re-exports
 │   ├── commands.rs             # `EngineCommand` — the full host-control surface
@@ -98,6 +102,30 @@ lets non-Rust hosts drive the whole surface.
 Four crates ship versions that **must stay in lockstep** (see Versioning):
 `engine` (workspace root), `config` (`crates/config`), `plugin-abi`
 (`crates/plugin-abi`), and `plugin-test-echo` (`crates/plugin-test-echo`).
+All four are **workspace members** — `crates/opus-decoder` is a fifth member
+but deliberately sits on its own 0.1.x line.
+
+They are members but do NOT inherit `[workspace.package].version`: they are an
+independently versioned realtime product lineage whose versions do not track
+Ultimate Engine's 1.x series, so each states its own version and moves in
+lockstep by policy. That distinction is load-bearing — when these crates were
+path dependencies with no `[workspace]` table, every `--workspace` command in
+CI silently resolved to the root package alone and 56 tests across them never
+ran.
+
+## Feature flags
+
+`audio-output` is **required**, despite appearing under `[features]`. The
+output layer (`output::output`, `output::capabilities`, and every per-OS
+backend) reaches `cpal` unconditionally. `src/lib.rs` carries a
+`compile_error!` for a build without it, so the failure names the feature
+instead of surfacing a dozen unresolved-import errors from backend internals.
+`audio-output` also implies `resample`, because `output::endpoint` drives a
+`rubato` slip resampler for clock-drift correction.
+
+Because a required feature cannot be exercised by CI's `default` /
+`all-features` matrix alone, the `features` CI job checks the individual
+combinations explicitly. Add to it when a new feature is introduced.
 
 ## Versioning — Semantic Versioning (`x.y.z`)
 

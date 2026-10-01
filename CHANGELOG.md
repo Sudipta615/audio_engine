@@ -5,6 +5,95 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-10-01
+
+Phase 4 of the audit: the structural findings. Most of these are not runtime
+bugs but reasons why the earlier phases' fixes — and the ones still to come —
+could go unnoticed.
+
+### Fixed
+
+- **The four sibling crates are now workspace members.** There was no
+  `[workspace]` table in the root manifest, so `config`, `plugin-abi`,
+  `plugin-test-echo` and `opus-decoder` were path *dependencies*. Every
+  `--workspace` command in CI (`cargo clippy --workspace`,
+  `cargo test --workspace`, both feature sets) therefore resolved to the root
+  package alone. Consequences: **56 `#[test]` functions across those crates
+  were never compiled or run**; `cargo test -p config` failed with "not a
+  member of the workspace", so there was no supported way to run them; and a
+  broken test in `config` (it referenced `AudioBackend::Alsa`, which does not
+  exist — the variant is `ExclusiveAlsa`) went unnoticed. All 56 now compile
+  and pass, and CI covers them.
+- **`--no-default-features` builds.** `src/lib.rs` gated `pub mod engine` on
+  `audio-output` while `commands`, `source`, `diagnostics` and the prelude
+  re-exports referenced `crate::engine::*` unconditionally, so a minimal-feature
+  build failed with a dozen unrelated "cannot find module `engine`" errors.
+  `engine` is no longer gated. `audio-output` turns out to be genuinely
+  required — the output layer reaches `cpal` unconditionally — so rather than
+  thread `cfg` through the whole output layer, `lib.rs` now carries a
+  `compile_error!` that names the feature and says what to pass. `audio-output`
+  also implies `resample`, because `output::endpoint` drives a `rubato` slip
+  resampler and previously failed to link with `audio-output` alone.
+- **Any build without `codec-opus` compiled to a hard error.** A stray
+  `#[cfg(not(feature = "codec-opus"))] false` made the `Codec::Opus`
+  capability tuple 13 elements instead of 12. Because `all-codecs` includes
+  `codec-opus`, both CI feature sets had it enabled and never compiled that
+  arm; the error was `E0308` at `decode/codecs.rs:207` for anyone selecting
+  codecs individually.
+- **`.gitignore` covered only the root `target/`.** The leading slash made it
+  match just the root package, so each sibling crate's build output was
+  untracked-but-unignored: `git add -A` offered **745 artifact files** for
+  staging. The pattern is now unanchored and matches at any depth (8 files,
+  all real source).
+- **The `config` crate's test build was broken.** `versioned_state.rs` used
+  `AudioBackend::Alsa`, which does not exist. Invisible until the crate became
+  a workspace member.
+- **Fuzzing reaches the frame decoders and playlists.** `fuzz_codecs` called
+  `Decoder::open` and stopped, so every downstream frame-decode path (TTA
+  Rice/filter, DSD block reading and decimation, WavPack `load_block`, APE
+  `decode_frame`, Opus packet decode) was unfuzzed. It now drives `decode_next`
+  under a block-count and wall-clock budget. Its temp filename was PID-only,
+  so parallel `-jobs` workers collided in the shared `/tmp`; it now includes a
+  per-thread nonce. Playlist parsing (M3U / PLS / XSPF) — a hand-rolled parser
+  on explicitly untrusted input, with its own path joining, `..`-normalising
+  and `file://` decoding — **had no target at all** and now does.
+- **Dangling documentation references.** The `network-streaming` feature
+  comment pointed at `docs/GETTING_STARTED.md`, which does not exist; the
+  `opus-decoder` comment claimed the crate was excluded from the workspace to
+  keep `--workspace` and `--all-features` from changing its build profile,
+  which is no longer true and now explains the edition-2024 requirement
+  instead. The README claimed 58 test suites where 91 `[[test]]` entries
+  exist. `AGENTS.md` omitted `crates/opus-decoder` from the module map and did
+  not state that `audio-output` is required.
+
+### Added
+
+- `[profile.release]` with `overflow-checks = true` and thin LTO. Release
+  previously inherited Cargo's defaults with no profile table at all. Overflow
+  checks are the important part: silent integer wrapping in the parsers is how
+  a crafted WavPack header reached a ~4 GiB allocation and how a DFF sub-chunk
+  header underflowed a u64. `panic` is deliberately left as `unwind` because
+  the plugin host relies on `catch_unwind`. Thin LTO gives the production plan
+  runner its cross-crate inlining; `codegen-units` is left at the default 16
+  because forcing 1 roughly triples `cargo test --release` wall time on this
+  tree for a marginal gain over thin LTO alone.
+- CI `features` job: individual feature-combination checks (`audio-output`
+  alone, no codecs, optional backend/API features) plus an assertion that
+  `--no-default-features` fails with the documented `compile_error!` rather
+  than a cascade.
+- CI `supply-chain` job: `cargo deny` (advisories, licenses, bans, sources),
+  `cargo audit`, and a check that `Cargo.lock` has not drifted — dependency
+  versions are floating, so a resolution change was previously invisible in a
+  diff.
+- CI `msrv` job: pins Rust 1.85, the floor set by `crates/opus-decoder`'s
+  edition 2024. The root manifest declared no `rust-version`, so an older
+  toolchain failed with an opaque edition error.
+- CI `fuzz` job: a 60-second smoke run of each target on every PR, uploading
+  artifacts on failure. There was no fuzz job before, so `cargo fuzz` ran only
+  by hand.
+- `fuzz_playlists` target, and `src/playlist::io` made public so the fuzzer
+  can reach the parser.
+
 ## [0.5.0] — 2026-10-01
 
 Phase 3 of the audit: the medium-severity findings. Parser bounds, latency

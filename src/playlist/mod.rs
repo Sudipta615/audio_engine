@@ -32,7 +32,7 @@
 //! would make it own both "what the queue does" and "how playlists are spelled
 //! on disk".
 
-mod io;
+pub mod io;
 
 // The `src` helper in `tests` is only used by that module; `io`'s test module
 // imports this one with a glob, which would otherwise pull it in unused and

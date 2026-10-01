@@ -2,7 +2,7 @@
 
 # Shadow Desktop — Independent Core Audio Engine
 
-[![Crate Version](https://img.shields.io/badge/version-0.5.0-blue.svg?style=flat-square)](Cargo.toml)
+[![Crate Version](https://img.shields.io/badge/version-0.6.0-blue.svg?style=flat-square)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![Rust Edition](https://img.shields.io/badge/rustc-1.85%2B%20%7C%202021-orange.svg?style=flat-square)](Cargo.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-output-backends--os-integration)
@@ -358,7 +358,7 @@ let audiophile_config = EngineConfig::from_preset(EnginePreset::Fidelity);
 
 ## 🧪 Testing & Quality Gates
 
-The engine repository enforces rigorous fidelity and quality assurance across **58 dedicated test suites comprising over 1,000 unit, integration, and fidelity tests**:
+The engine repository enforces rigorous fidelity and quality assurance across **91 dedicated test suites comprising over 1,000 unit, integration, and fidelity tests**:
 
 ```bash
 # Run all workspace unit and integration tests

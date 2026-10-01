@@ -245,8 +245,6 @@ pub fn capability(codec: Codec) -> CodecCapability {
             true,
             #[cfg(not(feature = "codec-opus"))]
             false,
-            #[cfg(not(feature = "codec-opus"))]
-            false,
             // chapters (container chapters not exposed)
             false,
             // ebu_r128 (OpusTags R128 tags)

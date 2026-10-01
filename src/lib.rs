@@ -1,3 +1,28 @@
+/// `audio-output` is a REQUIRED feature, despite being listed under
+/// `[features]`.
+///
+/// It is not genuinely optional: `output::output` (the `Output` trait and its
+/// factory), `output::capabilities`, and every per-OS backend reach `cpal`
+/// unconditionally, so the crate cannot be built without it. The alternative
+/// would be to thread `#[cfg(feature = "audio-output")]` through the whole
+/// output layer, which would mean either stubbing `Output` into a
+/// backend-less no-op or duplicating every call site — both far more
+/// expensive than the one optional backend this crate ships.
+///
+/// The feature is kept in `[features]` because it is the single switch for
+/// "build the cpal backend", and because `wasapi-native`, `pipewire`, `jack`
+/// and `asio-native` all compose through it.
+///
+/// Without this guard a `--no-default-features` build produced a dozen
+/// unrelated `unresolved import cpal` errors pointing at backend internals
+/// rather than at the feature that actually had to be on.
+#[cfg(not(feature = "audio-output"))]
+compile_error!(
+    "the `audio-output` feature is required: the engine's output layer is built \
+     on cpal and cannot be compiled without it. Drop `--no-default-features` or \
+     pass `--features audio-output`."
+);
+
 pub mod audio_io;
 pub mod buffer;
 pub mod commands;
@@ -5,7 +30,11 @@ pub mod decode;
 pub mod diagnostics;
 pub mod dsp;
 pub mod dsp_utils;
-#[cfg(feature = "audio-output")]
+// NOT gated on `audio-output`. The engine state machine is the crate's core
+// and compiles without a backend; gating the whole module made
+// `--no-default-features` fail with ten unrelated "cannot find module
+// `engine`" errors from `commands`, `source`, `diagnostics` and the prelude
+// re-exports, all of which reference `crate::engine::*` unconditionally.
 pub mod engine;
 pub mod eval;
 pub mod events;
@@ -14,7 +43,6 @@ pub mod ffi;
 pub mod fx;
 pub mod governance;
 pub mod network_audio;
-#[cfg(feature = "audio-output")]
 pub mod output;
 pub mod paths;
 pub mod playback_info;

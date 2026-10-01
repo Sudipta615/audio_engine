@@ -21,6 +21,7 @@ use crate::dsp::graph2::prod::{DspNode, SpatialNode};
 use crate::dsp::limiter::LookaheadLimiter;
 use crate::dsp::loudness::LoudnessMeter;
 use crate::dsp::pipeline::DspPipeline;
+#[cfg(feature = "resample")]
 use crate::dsp::resampler::AudioResamplerF64;
 use crate::spatial::provider::{HrtfDatasetProvider, HrtfProvider};
 use crate::spatial::{HrtfDataset, Vec3};
@@ -251,6 +252,7 @@ pub fn def_resampler(engine_version: String) -> ReferenceVector {
     )
 }
 
+#[cfg(feature = "resample")]
 pub fn resampler(reg: &ReferenceVectorRegistry) -> ComponentReport {
     let v = reg.get("resampler").unwrap();
     let fs_in = 48_000.0f64;

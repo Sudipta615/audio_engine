@@ -117,7 +117,9 @@ impl PluginHost {
         // copied out by value.
         let abi = unsafe {
             library
-                .get::<unsafe extern "C" fn() -> *const PluginAbiV1>(PLUGIN_ABI_SYMBOL.as_bytes())
+                .get::<unsafe extern "C-unwind" fn() -> *const PluginAbiV1>(
+                    PLUGIN_ABI_SYMBOL.as_bytes(),
+                )
                 .map_err(|_| {
                     PluginAbiError::SymbolMissing(format!(
                         "{PLUGIN_ABI_SYMBOL} in {}",
@@ -540,7 +542,7 @@ mod tests {
     fn registry_roundtrip() {
         // A null-vtable host cannot be built; use a stub vtable with
         // only the descriptor entry point (enough for registration).
-        unsafe extern "C" fn desc(d: *mut PluginDescriptor, v: u32) -> i32 {
+        unsafe extern "C-unwind" fn desc(d: *mut PluginDescriptor, v: u32) -> i32 {
             if v != 1 {
                 return AbiStatus::VersionMismatch as i32;
             }
@@ -588,7 +590,7 @@ mod tests {
     /// into every sample, so a test can tell "the plugin ran" from "the
     /// plugin was skipped".
     fn stub_instance() -> PluginInstance {
-        unsafe extern "C" fn desc(d: *mut PluginDescriptor, v: u32) -> i32 {
+        unsafe extern "C-unwind" fn desc(d: *mut PluginDescriptor, v: u32) -> i32 {
             if v != 1 {
                 return AbiStatus::VersionMismatch as i32;
             }
@@ -607,12 +609,15 @@ mod tests {
             }
             AbiStatus::Ok as i32
         }
-        unsafe extern "C" fn inst(_v: u32, _sr: f32) -> *mut std::ffi::c_void {
+        unsafe extern "C-unwind" fn inst(_v: u32, _sr: f32) -> *mut std::ffi::c_void {
             // A non-null opaque instance pointer; the stub never derefs it.
-            0x1 as *mut std::ffi::c_void
+            std::ptr::dangling_mut::<std::ffi::c_void>()
         }
         // Marks every sample with 1.0 so "ran" is unambiguous.
-        unsafe extern "C" fn mark(_i: *mut std::ffi::c_void, b: *const AudioBlockMut) -> i32 {
+        unsafe extern "C-unwind" fn mark(
+            _i: *mut std::ffi::c_void,
+            b: *const AudioBlockMut,
+        ) -> i32 {
             let block = unsafe { &*b };
             for p in 0..block.channels as usize {
                 let plane = unsafe {

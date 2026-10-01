@@ -559,6 +559,7 @@ pub fn run_quality() -> EvaluationReport {
     report.components.push(suites::dsp_pipeline(&registry));
     report.components.push(suites::parametric_eq(&registry));
     report.components.push(suites::limiter(&registry));
+    #[cfg(feature = "resample")]
     report.components.push(suites::resampler(&registry));
     report.components.push(suites::binaural(&registry));
     report.components.push(suites::loudness(&registry));

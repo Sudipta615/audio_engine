@@ -1,5 +1,11 @@
 # Rust build artifacts
-/target/
+#
+# `/target/` alone matches only the ROOT package's target directory. Before the
+# crates were made workspace members, each sibling crate had its own target
+# directory which this pattern did not cover, so `git add -A` offered 745
+# build-artifact files for staging. `target/` (no leading slash) matches at any
+# depth and covers the root plus every workspace member.
+target/
 Cargo.lock.bak
 **/*.rs.bk
 
