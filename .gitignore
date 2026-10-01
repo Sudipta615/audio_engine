@@ -1,0 +1,45 @@
+# Rust build artifacts
+/target/
+Cargo.lock.bak
+**/*.rs.bk
+
+# Cargo Fuzz
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Profiling and coverage
+*.profraw
+*.profdata
+
+# Audio test dumps & temporary files
+*.wav.tmp
+*.pcm.tmp
+*.raw.tmp

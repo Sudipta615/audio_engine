@@ -152,6 +152,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
+name = "audio-engine"
+version = "5.9.0"
+dependencies = [
+ "alsa",
+ "ape-decoder",
+ "approx",
+ "arc-swap",
+ "chromaprint-next",
+ "config",
+ "cpal",
+ "criterion",
+ "crossbeam",
+ "env_logger",
+ "etcetera",
+ "lofty",
+ "log",
+ "num-complex",
+ "num-traits",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "ogg",
+ "opus-decoder",
+ "plugin-abi",
+ "plugin-test-echo",
+ "realfft",
+ "rubato",
+ "rustfft",
+ "rusty-opus",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "termcolor",
+ "thiserror 2.0.20",
+ "thread-priority",
+ "ureq",
+ "wavicle",
+ "windows 0.59.0",
+ "windows-core 0.59.0",
+]
+
+[[package]]
 name = "audioadapter"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,7 +241,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -449,32 +491,6 @@ dependencies = [
 
 [[package]]
 name = "criterion"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
-dependencies = [
- "anes",
- "cast",
- "ciborium",
- "clap",
- "criterion-plot 0.5.0",
- "is-terminal",
- "itertools 0.10.5",
- "num-traits",
- "once_cell",
- "oorandom",
- "plotters",
- "rayon",
- "regex",
- "serde",
- "serde_derive",
- "serde_json",
- "tinytemplate",
- "walkdir",
-]
-
-[[package]]
-name = "criterion"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "950046b2aa2492f9a536f5f4f9a3de7b9e2476e575e05bd6c333371add4d98f3"
@@ -484,8 +500,8 @@ dependencies = [
  "cast",
  "ciborium",
  "clap",
- "criterion-plot 0.8.2",
- "itertools 0.13.0",
+ "criterion-plot",
+ "itertools",
  "num-traits",
  "oorandom",
  "page_size",
@@ -500,22 +516,12 @@ dependencies = [
 
 [[package]]
 name = "criterion-plot"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
-dependencies = [
- "cast",
- "itertools 0.10.5",
-]
-
-[[package]]
-name = "criterion-plot"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
- "itertools 0.13.0",
+ "itertools",
 ]
 
 [[package]]
@@ -671,48 +677,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
-name = "engine"
-version = "5.8.2"
-dependencies = [
- "alsa",
- "ape-decoder",
- "approx",
- "arc-swap",
- "chromaprint-next",
- "config",
- "cpal",
- "criterion 0.8.2",
- "crossbeam",
- "env_logger",
- "etcetera",
- "lofty",
- "log",
- "num-complex",
- "num-traits",
- "objc2-core-audio",
- "objc2-core-audio-types",
- "objc2-core-foundation",
- "ogg",
- "opus-decoder",
- "plugin-abi",
- "plugin-test-echo",
- "realfft",
- "rubato",
- "rustfft",
- "rusty-opus",
- "serde",
- "serde_json",
- "symphonia",
- "termcolor",
- "thiserror 2.0.20",
- "thread-priority",
- "ureq",
- "wavicle",
- "windows 0.59.0",
- "windows-core 0.59.0",
-]
-
-[[package]]
 name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -851,12 +815,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
-name = "hermit-abi"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
-
-[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -971,30 +929,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "is-terminal"
-version = "0.4.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
-dependencies = [
- "hermit-abi",
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
-name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -1442,8 +1380,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 [[package]]
 name = "opus-decoder"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
 dependencies = [
- "criterion 0.5.1",
  "thiserror 2.0.20",
 ]
 
@@ -1514,7 +1453,6 @@ name = "plugin-abi"
 version = "5.8.2"
 dependencies = [
  "libloading",
- "serde",
 ]
 
 [[package]]
@@ -1522,7 +1460,6 @@ name = "plugin-test-echo"
 version = "5.8.2"
 dependencies = [
  "plugin-abi",
- "serde",
 ]
 
 [[package]]
