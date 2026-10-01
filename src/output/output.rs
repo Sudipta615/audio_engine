@@ -191,6 +191,16 @@ pub trait Output: OutputVolume + Send {
     /// access mode, exclusivity verification, fallback state).
     fn output_info(&self) -> OutputInfo;
 
+    /// The output channel count.
+    ///
+    /// Provided separately from [`Self::output_info`] because `OutputInfo`
+    /// owns two `String`s, so calling it purely to read a channel count
+    /// allocated twice. The decode loop asks for the width on every pass, so
+    /// that cost sat on the hot path.
+    fn channels(&self) -> u16 {
+        self.output_info().channels
+    }
+
     /// Capability snapshot of the current device. Native backends fill in a
     /// *verified* access state from real negotiation results.
     fn capabilities(&self) -> OutputCapabilities;

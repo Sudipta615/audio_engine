@@ -357,7 +357,7 @@ impl AudioEngine {
         let out_ch = self
             .audio_output
             .as_ref()
-            .map(|o| o.output_info().channels as usize)
+            .map(|o| o.channels() as usize)
             .unwrap_or(2)
             .max(1);
         let output_layout = ChannelLayout::from_count(out_ch);

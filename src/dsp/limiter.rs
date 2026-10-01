@@ -586,6 +586,9 @@ impl LookaheadLimiter {
         let mut sample_peak = 0.0f32;
         let mut fir_peak = 0.0f32;
         let mut clean_in = [0.0f64; crate::buffer::MAX_CHANNELS];
+        // Per-channel peak for this sample, computed once and reused by the
+        // unlinked gain path below.
+        let mut channel_peaks = [0.0f32; crate::buffer::MAX_CHANNELS];
 
         for i in 0..ch {
             // `is_finite`, not `is_nan`. An infinite sample latches
@@ -608,10 +611,17 @@ impl LookaheadLimiter {
             };
             clean_in[i] = s;
             sample_peak = sample_peak.max(s.abs() as f32);
-            if self.true_peak_mode == TruePeakMode::Fir4x {
-                let p = self.fir_meters[i].process_sample(s) as f32;
-                fir_peak = fir_peak.max(p);
-            }
+            // Keep each channel's peak. The unlinked (per-channel) gain path
+            // below reuses these instead of re-running the FIR, which would
+            // advance the polyphase buffer a second time for the same sample.
+            channel_peaks[i] = match self.true_peak_mode {
+                TruePeakMode::SamplePeak => s.abs() as f32,
+                TruePeakMode::Fir4x => {
+                    let p = self.fir_meters[i].process_sample(s) as f32;
+                    fir_peak = fir_peak.max(p);
+                    p
+                }
+            };
         }
 
         let input_peak = match self.true_peak_mode {
@@ -706,7 +716,18 @@ impl LookaheadLimiter {
             // this is the whole gain; between 0 and 1 the two are blended, so
             // the control is continuous rather than a switch that pops.
             for (i, gain) in per_channel_gain.iter_mut().take(ch).enumerate() {
-                let ch_peak = self.channel_peak(i, &clean_in, cur_idx);
+                // Reuse the peak already computed in step 3. Calling
+                // `channel_peak` here would advance `fir_meters[i]` a SECOND
+                // time for this sample (step 3 already did, for the linked
+                // gain), pushing every sample into the polyphase buffer twice:
+                // the interpolated peak was wrong, and the effective detector
+                // group delay was halved, so the unlinked detector ran ~25
+                // samples ahead against the 50-sample allowance.
+                let ch_peak = match self.true_peak_mode {
+                    TruePeakMode::SamplePeak => clean_in[i].abs() as f32,
+                    TruePeakMode::Fir4x => channel_peaks[i],
+                };
+                self.push_link_deque(i, ch_peak, cur_idx);
                 let window_max = self.link_deques[i]
                     .front()
                     .map(|&(_, v)| v)
@@ -1051,18 +1072,19 @@ impl LookaheadLimiter {
         sample.signum() * saturated
     }
 
-    /// Push `peak` for channel `ch` into its own sliding-window detector and
-    /// return that channel's current peak.
+    /// Push an ALREADY-COMPUTED `peak` for channel `ch` into its own
+    /// sliding-window detector and return it.
     ///
     /// Structurally identical to the linked detector above, but per channel —
     /// which is the whole difference between a linked and an unlinked limiter.
     /// Only called while `stereo_link < 1.0`, so the linked path is untouched.
-    fn channel_peak(&mut self, ch: usize, clean_in: &[f64], cur_idx: usize) -> f32 {
-        let peak = match self.true_peak_mode {
-            TruePeakMode::SamplePeak => clean_in[ch].abs() as f32,
-            TruePeakMode::Fir4x => self.fir_meters[ch].process_sample(clean_in[ch]) as f32,
-        };
-
+    ///
+    /// Takes the peak as an argument rather than deriving it from the sample:
+    /// deriving it here meant calling `fir_meters[ch].process_sample` a second
+    /// time for a sample the linked path had already fed to the polyphase
+    /// buffer, which both doubled-counted the sample and halved the effective
+    /// detector group delay.
+    fn push_link_deque(&mut self, ch: usize, peak: f32, cur_idx: usize) -> f32 {
         let deque = &mut self.link_deques[ch];
         while let Some(&(_, val)) = deque.back() {
             if val <= peak {

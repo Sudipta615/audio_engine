@@ -149,6 +149,27 @@ impl<T: rubato::Sample + Float + Default + Send + Sync + 'static> AudioResampler
         source_rate: f32,
         output_rate: f32,
     ) -> Result<Self, ResamplerError> {
+        // `is_finite`, not `<= 0.0`. Every NaN comparison is false, so a NaN rate
+        // sailed past a `<= 0.0` guard: `NaN.round() as usize` saturates to 0,
+        // `.max(1)` turned that into 1, and the result was a 1 Hz → 48 kHz
+        // converter whose `allocate_buffers` sized scratch as
+        // `input_frames * ratio` ≈ 98M frames — about 0.8 GB. The sibling
+        // setters `set_source_rate`/`set_output_rate` already checked
+        // `is_finite`; only the constructor was exposed.
+        if !source_rate.is_finite() || !output_rate.is_finite() {
+            return Err(ResamplerError::InvalidRates {
+                source_rate: if source_rate.is_finite() {
+                    source_rate.round().max(0.0) as usize
+                } else {
+                    0
+                },
+                output_rate: if output_rate.is_finite() {
+                    output_rate.round().max(0.0) as usize
+                } else {
+                    0
+                },
+            });
+        }
         let src = (source_rate.round() as usize).max(1);
         let out = (output_rate.round() as usize).max(1);
         if source_rate <= 0.0 || output_rate <= 0.0 {

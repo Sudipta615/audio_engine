@@ -137,6 +137,29 @@ impl DsdReader {
                 "DSF block size per channel is zero".to_string(),
             ));
         }
+        // Upper-bound the block size. This field is attacker-controlled and was
+        // not bounded at all.
+        //
+        // The upper bound is the decimator's scratch capacity: `decimate_channels`
+        // needs `block_size * 8` samples and its scratch holds 65536, so a block
+        // above 8192 made the whole file decode to SILENCE — the node returned
+        // early after `frames_consumed` had already advanced, and the caller saw
+        // zero frames from a file it had accepted. Rejecting it here turns a
+        // silent mute into a real error.
+        //
+        // There is deliberately NO lower bound beyond non-zero. A small block
+        // makes decoding less efficient (one frame per `decode_next` at 16, say),
+        // but the engine's decode loop is already bounded by `max_frames`, so
+        // that is a constant factor on a linear scan rather than an unbounded
+        // loop — and DSF files with small blocks are legal, so rejecting them
+        // would break valid input for no security gain.
+        const MAX_DSF_BLOCK: u32 = 8192;
+        if block_size_per_channel > MAX_DSF_BLOCK {
+            return Err(DsdError::InvalidHeader(format!(
+                "DSF block size per channel {block_size_per_channel} exceeds the \
+                 {MAX_DSF_BLOCK} byte limit the decimator can process"
+            )));
+        }
 
         let lsbf = match bits_per_sample {
             1 => true,
@@ -434,11 +457,16 @@ fn parse_dff_prop(
     let mut channels = None;
 
     while remaining > 0 {
-        // Sub-chunk headers are ID + 8-byte size. The 'FS' ID is only 2 bytes
-        // (a DSDIFF quirk); 'CHNL'/'CMPR' use the standard 4-byte IDs, so the
-        // smallest header is 2 + 8 bytes.
-        if remaining < 10 {
-            // Tolerate a stray trailing byte (odd-sized chunk padding).
+        // A sub-chunk header is ID + 8-byte size. 'FS' is only a 2-byte ID (a DSDIFF
+        // quirk); 'CHNL'/'CMPR' and anything unknown use the standard 4-byte ID.
+        // So the LARGEST possible header is 4 + 8 = 12 bytes — the guard must
+        // be against that, not against the smallest. The previous `remaining <
+        // 10` check let `remaining` in {10, 11} reach the subtraction below,
+        // where `remaining -= id_len + 8` underflowed a u64 (panic in debug; a
+        // ~1.8e19 value in release that then defeats the `sub_size > remaining`
+        // bound and keeps consuming reader bytes until EOF).
+        if remaining < 12 {
+            // Tolerate a stray trailing byte or two (odd-sized chunk padding).
             skip_bytes(reader, remaining)?;
             break;
         }
@@ -456,7 +484,12 @@ fn parse_dff_prop(
         let mut buf8 = [0u8; 8];
         reader.read_exact(&mut buf8)?;
         let sub_size = u64::from_be_bytes(buf8);
-        remaining -= id_len + 8;
+        // `remaining >= 12` and `id_len <= 4` above, so this cannot underflow.
+        // `checked_sub` states that invariant at the point of use rather than
+        // relying on the caller having got the bound right.
+        remaining = remaining.checked_sub(id_len + 8).ok_or_else(|| {
+            DsdError::InvalidHeader("DFF PROP sub-chunk header overruns its PROP chunk".to_string())
+        })?;
         if sub_size > remaining {
             return Err(DsdError::InvalidHeader(
                 "DFF PROP sub-chunk overruns its PROP chunk".to_string(),

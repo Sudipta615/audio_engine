@@ -5,6 +5,91 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-10-01
+
+Phase 3 of the audit: the medium-severity findings. Parser bounds, latency
+reporting, resource lifetime, and two documentation claims that did not match
+the code.
+
+### Fixed
+
+- **DFF `PROP` sub-chunk underflow.** The guard rejected `remaining < 10`, but a
+  4-byte sub-chunk ID needs a 12-byte header, so `remaining` of 10 or 11
+  underflowed the `u64` — a panic in debug and a ~1.8e19 value in release
+  that then defeated the `sub_size > remaining` bound and consumed reader bytes
+  until EOF. The guard is now against the largest possible header, and the
+  subtraction uses `checked_sub`.
+- **WavPack release-mode out-of-bounds.** Two `debug_assert`s were the only
+  checks on the channel count and slice bounds, so they were no-ops in release.
+  A block declaring fewer channels than the first indexed past the buffer.
+  Both are now real checks that return `DecodeError`.
+- **Opus malformed-packet CPU DoS.** A panicking packet was caught and skipped,
+  but a panic leaves the decoder state torn so the same packet shape panics
+  again, and the loop's only progress is "read the next packet" — a file whose
+  packets all panic cost one unwind each until EOF. Consecutive caught panics
+  are now bounded (mirroring symphonia's `MAX_CONSECUTIVE_SKIPS`) and the
+  decoder is reset after each one.
+- **DSF block size is bounded.** The field was only checked for zero. A value
+  above the decimator's scratch capacity made the whole file decode to silence
+  while being reported as successfully opened; it is now rejected. No lower
+  bound is imposed, since small blocks are legal and the decode loop is
+  already bounded.
+- **Limiter no longer double-advances its true-peak detector.** With
+  `stereo_link < 1.0` each sample entered the polyphase buffer twice — once for
+  the linked gain and again inside `channel_peak` — so the interpolated peak
+  was wrong and the effective detector group delay was halved. The per-channel
+  peak is now computed once and reused.
+- **Loudness short-term mean divides by the count it summed.** Entries that
+  are non-finite or non-positive were skipped when summing but counted in the
+  denominator, biasing short-term loudness low for up to 3 seconds of silence.
+- **`AudioResampler::new` rejects a non-finite rate.** Every NaN comparison is
+  false, so a NaN rate passed a `<= 0.0` guard; `NaN as usize` saturates to 0,
+  `.max(1)` made it 1, and the result was a 1 Hz converter sizing ~0.8 GB of
+  scratch. The sibling rate setters already checked `is_finite`.
+- **The drift controller is given the ring's real frame capacity.** It
+  received the `capacity_frames` constructor argument, but the buffer
+  allocates `capacity_frames * MAX_CHANNELS` samples, so the true stereo
+  capacity is 8× larger. The controller regulated a setpoint of 4096 against a
+  real midpoint of 32768 — ~85 ms of buffering instead of ~683 ms — and
+  `is_locked()` then demanded ±3.4 ms accuracy, ~20× tighter than intended.
+- **`RtExecutor` reclaims its plans.** `pending` and `retired` are raw
+  `Box<RtPlan>` pointers with no `Drop`, so dropping the executor with an
+  unadopted or unreclaimed plan leaked it; `into_plan` leaked them too.
+  `Drop` now reclaims both slots, and `into_plan` transfers `active` without
+  running it.
+- **Generation retire no longer overwrites.** `RtExecutor::adopt_pending`
+  used `store` on the retired slot, so an unreclaimed predecessor was silently
+  dropped. It now uses `swap` and counts the displacement.
+- **`dropped_blocks` is an `AtomicU32`.** It was a plain `u32` whose comment
+  claimed a `Relaxed`-ordered consumer — a plain `u32` has no ordering at all,
+  so the control-thread read was a data race.
+- **The decode loop reads the output channel count without cloning.**
+  `Output::output_info()` returns `OutputInfo` by value and it owns two
+  `String`s, so reading `.channels` allocated twice per decode pass. A new
+  `Output::channels()` returns the width directly.
+
+### Changed
+
+- **The SIMD bit-exactness claim is corrected.** `dsp_utils` and
+  `dsp/simd/dispatch` documented the vector paths as "bit-for-bit identical to
+  the scalar path" and cited a `bit_exact_simd_matches_scalar` test that does
+  not exist in the tree. The claim only holds *within* a tier: the AVX2 and
+  NEON paths use fused multiply-add, which rounds once where SSE2 and the
+  scalar path round twice, and `dot_product` reorders its summation. The docs
+  now state this precisely and note that dispatch has no callers outside
+  `src/dsp/simd`, so nothing on the audio path routes through the FMA tiers yet.
+- **Biquad frequency clamping no longer panics at an absurd sample rate.**
+  `clamp(1.0, sr * 0.499)` panics when `min > max`, reachable for any rate
+  below ~2.004 Hz. The bound is clamped first.
+- **`graph2/latency.rs` uses one sample-rate fallback.** Two entry points
+  defaulted to `1.0` while the rest used 48 kHz, so `analyze(graph, 0.0)`
+  reported a 240-tap limiter as 240,000 ms while `node_latency_at` on the same
+  node used 48 kHz. All now share `effective_sample_rate()`, and a non-finite
+  rate falls back too. The `ProdStage` match is documented for what it can and
+  cannot derive: a Prod node carries only `NodeParams::Prod { slot }`, so the
+  topology has no latency for `Correction`, `Crossfeed` or `Timestretch`, and
+  the authoritative total is the live graph's.
+
 ## [0.4.0] — 2026-10-01
 
 Phase 2 of the audit: the high-severity findings. Primarily correctness and

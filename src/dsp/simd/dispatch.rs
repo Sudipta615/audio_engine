@@ -2,7 +2,21 @@
 //!
 //! Priority order:
 //! `AVX-512` → `AVX2/FMA` → `SSE2` → `Scalar`, and `NEON` on ARM architectures.
-//! Fallback to scalar is always available, guaranteed deterministic and bit-exact.
+//! Fallback to scalar is always available and deterministic.
+//!
+//! # Not bit-exact across tiers
+//!
+//! Dispatch selects a different *implementation* per CPU, and the tiers do not
+//! round identically: `AVX2/FMA` and `NEON` use fused multiply-add
+//! (`_mm256_fmadd_ps` / `vmlaq_f32`), which applies one rounding where `SSE2`
+//! and the scalar path apply two, and `dot_product` reorders its summation.
+//! Two machines can therefore produce results differing in the last ulp for
+//! the same input.
+//!
+//! This was previously documented as "deterministic and bit-exact", which is
+//! only true *within* a tier. Each tier's own kernel is bit-exact against the
+//! scalar reference for its own instruction set; the cross-tier claim did not
+//! hold. See `crate::dsp_utils` for the full note.
 
 use super::levels::SimdLevel;
 

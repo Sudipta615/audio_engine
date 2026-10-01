@@ -397,6 +397,9 @@ impl OpusSource {
         self.interleaved.clear();
         let channels = self.info.channels;
         let mut eof = false;
+        // Consecutive caught decoder panics, reset by any successful decode.
+        // See the decode site for why this bound exists.
+        let mut consecutive_panics: u32 = 0;
 
         while self.interleaved.len() / channels < max_frames {
             // ── 1. Emit a finalized, still-buffered page ──────────────────
@@ -437,15 +440,38 @@ impl OpusSource {
                 }
             }
 
-            // ── 3. Decode ─────────────────────────────────────────────────
-            let decode_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ── 3. Decode ─────────────────────────────────
+            // Contain a panicking packet rather than taking the process down with it.
+            // But containment alone is not enough: a panic leaves the decoder's state
+            // torn, so the SAME packet shape panics again on the next attempt, and the
+            // loop's only forward progress is "read the next packet". A crafted file
+            // whose every packet panics therefore costs one unwind per packet (~10-100 µs)
+            // until EOF — 10^6 packets is 1-100 s of pure unwinding, a CPU DoS from a
+            // file the user merely opened. Bound consecutive caught panics and give up on
+            // the stream, mirroring `MAX_CONSECUTIVE_SKIPS` in symphonia_decoder/decode.rs.
+            const MAX_CONSECUTIVE_PANICS: u32 = 32;
+            let frames = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.decoder.decode_float(&data, &mut self.scratch, false)
-            }));
-            let frames = match decode_res {
-                Ok(Ok(f)) => f,
+            })) {
+                Ok(Ok(f)) => {
+                    // A decode that did not panic refills the budget, so the
+                    // bound applies to CONSECUTIVE panics rather than to the
+                    // whole file.
+                    consecutive_panics = 0;
+                    f
+                }
                 Ok(Err(e)) => return Err(DecodeError::Decode(format!("Opus decode: {e}"))),
                 Err(_) => {
-                    log::warn!("Opus decoder panicked on malformed packet; skipping packet");
+                    consecutive_panics += 1;
+                    if consecutive_panics > MAX_CONSECUTIVE_PANICS {
+                        return Err(DecodeError::Decode(format!(
+                            "Opus decoder panicked on {MAX_CONSECUTIVE_PANICS} consecutive \
+                             packets; the stream is undecodable"
+                        )));
+                    }
+                    // Reset the decoder so the next packet starts from a clean
+                    // state rather than compounding the tear.
+                    self.decoder.reset();
                     continue;
                 }
             };

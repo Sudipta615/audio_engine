@@ -699,14 +699,25 @@ impl LoudnessMeter {
         }
         let ring_len = self.short_term_ring.len();
         let mut sum = 0.0f64;
+        // Count the entries actually SUMMED, not the entries stored. An entry
+        // can be non-finite or non-positive: `lufs_from_power` yields -inf for
+        // digital silence, and `-inf * 10` is not reliably a negative float, so
+        // a silent segment lands below zero. The loop skipped those when
+        // summing but divided by `filled`, which counts them — biasing
+        // short-term loudness low for up to 3 seconds.
+        let mut counted = 0usize;
         for i in 0..filled {
             let idx = (self.short_term_idx + ring_len - 1 - i) % ring_len;
             let v = self.short_term_ring[idx];
             if v.is_finite() && v > 0.0 {
                 sum += v as f64;
+                counted += 1;
             }
         }
-        (sum / filled as f64) as f32
+        if counted == 0 {
+            return 0.0;
+        }
+        (sum / counted as f64) as f32
     }
 
     /// Mean of all values in `self.short_term_ring` (30 × 100ms = 3s short-term).

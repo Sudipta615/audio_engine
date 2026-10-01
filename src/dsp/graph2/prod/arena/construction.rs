@@ -664,7 +664,7 @@ impl DspGraph {
             ),
             retiring: None,
             non_finite_policy: crate::dsp::safety::NonFinitePolicy::Clamp,
-            dropped_blocks: 0,
+            dropped_blocks: std::sync::atomic::AtomicU32::new(0),
         }
     }
 

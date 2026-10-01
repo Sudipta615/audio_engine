@@ -1,12 +1,35 @@
 /// Element-wise `dst[i] += src[i] * g` over `n` frames (f32).
 ///
-/// SIMD-accelerated on x86_64 (SSE2 `mulps`/`addps`) and aarch64 (NEON)
-/// with a scalar fallback elsewhere. The operation is **element-wise**: each
-/// output element is the identical IEEE `f32_mul` followed by `f32_add` of
-/// the scalar form — no FMA contraction (SSE2/NEON baseline has none) and no
-/// reduction reordering — so the vectorized path is bit-for-bit identical to
-/// the scalar path. This is the contract the graph-vs-pipeline equivalence
-/// suite and the `bit_exact_simd_matches_scalar` test enforce.
+/// SIMD-accelerated on x86_64 and aarch64 with a scalar fallback elsewhere.
+///
+/// # Bit-exactness — what is and is not guaranteed
+///
+/// The operation is **element-wise**: each output is an IEEE `f32_mul`
+/// followed by an `f32_add` of the scalar form, with no reduction reordering
+/// and no summation-order dependence. That holds on every path.
+///
+/// The *rounding* of those two operations is not identical across CPU tiers,
+/// though, and the previous version of this comment claimed otherwise:
+///
+/// * The SSE2 and scalar paths issue separate `mul` then `add`.
+/// * The AVX2 path (`dsp/simd/x86/avx2.rs`) uses `_mm256_fmadd_ps`, and the
+///   NEON path (`dsp/simd/arm/neon.rs`) uses `vmlaq_f32`. FMA performs the
+///   multiply and add with a single rounding, so its result differs from the
+///   separate-op sequence in the last ulp.
+/// * `dsp::simd::dispatch` also reorders the summation in `dot_product`,
+///   which changes results for the same reason.
+///
+/// So the engine is element-wise and deterministic, but a given track rendered
+/// on an FMA-capable CPU can differ in the last ulp from one rendered on a CPU
+/// without FMA — which matters for the "bit-perfect" claim in the README. No
+/// test pins this: the `bit_exact_simd_matches_scalar` test this comment used
+/// to cite does not exist anywhere in the tree.
+///
+/// In practice `dsp::simd`'s dispatch entry points have no callers outside
+/// `src/dsp/simd` itself, so nothing on the audio path routes through the
+/// FMA tiers yet. Wiring one in requires resolving the bit-exactness question
+/// first — either restrict dispatch to non-FMA instructions, or drop the
+/// cross-machine bit-exactness claim.
 #[inline]
 pub fn accumulate_scaled(dst: &mut [f32], src: &[f32], g: f32, n: usize) {
     let n = n.min(dst.len()).min(src.len());

@@ -2,7 +2,7 @@
 
 # Shadow Desktop — Independent Core Audio Engine
 
-[![Crate Version](https://img.shields.io/badge/version-0.4.0-blue.svg?style=flat-square)](Cargo.toml)
+[![Crate Version](https://img.shields.io/badge/version-0.5.0-blue.svg?style=flat-square)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![Rust Edition](https://img.shields.io/badge/rustc-1.85%2B%20%7C%202021-orange.svg?style=flat-square)](Cargo.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-output-backends--os-integration)

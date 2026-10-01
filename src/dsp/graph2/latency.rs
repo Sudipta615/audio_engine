@@ -47,12 +47,28 @@ use super::Graph2;
 /// [`NodeKind::Delay`] reports its samples; [`NodeKind::Convolution`]
 /// reports its kernel length and [`NodeKind::HRTF`] the longer of its two
 /// per-ear IRs.
-pub fn node_latency_at(node: &NodeDef, sample_rate: f32) -> u64 {
-    let sr = if sample_rate > 0.0 {
+/// The sample rate assumed when a caller supplies a non-positive or non-finite
+/// one.
+///
+/// Every sample→millisecond conversion in this module must use the same
+/// fallback. They previously did not: two entry points defaulted to `1.0` while
+/// the rest used `48_000.0`, so the same graph analyzed to different totals
+/// depending on which function was called — `analyze(graph, 0.0)` reported a
+/// 240-tap limiter as 240,000 ms.
+const DEFAULT_SAMPLE_RATE: f32 = 48_000.0;
+
+/// Normalize a caller-supplied sample rate, falling back to
+/// [`DEFAULT_SAMPLE_RATE`] for a non-positive or non-finite value.
+fn effective_sample_rate(sample_rate: f32) -> f32 {
+    if sample_rate > 0.0 && sample_rate.is_finite() {
         sample_rate
     } else {
-        48_000.0
-    };
+        DEFAULT_SAMPLE_RATE
+    }
+}
+
+pub fn node_latency_at(node: &NodeDef, sample_rate: f32) -> u64 {
+    let sr = effective_sample_rate(sample_rate);
     match &node.params {
         NodeParams::Delay { samples } => *samples as u64,
         NodeParams::Convolution { kernel } => kernel.len() as u64,
@@ -73,10 +89,43 @@ pub fn node_latency_at(node: &NodeDef, sample_rate: f32) -> u64 {
                     0
                 }
             }
-            NodeKind::Prod(ProdStage::Limiter) => ((5.0 / 1000.0) * sr).round() as u64,
+            NodeKind::Prod(ProdStage::Limiter) => {
+                // Previously hardcoded to 5 ms. The limiter's true delay is
+                // its configured lookahead PLUS the true-peak detector's group
+                // delay, both known only to a constructed limiter; the graph's
+                // live report (`prod/arena/report.rs`) uses the real accessors.
+                // A Prod node carries only `NodeParams::Prod { slot }`, so the
+                // topology has nothing to read here — keep the 5 ms estimate
+                // but make the number's meaning explicit rather than letting it
+                // pass as exact.
+                const ESTIMATED_LIMITER_LOOKAHEAD_MS: f32 = 5.0;
+                ((ESTIMATED_LIMITER_LOOKAHEAD_MS / 1000.0) * sr).round() as u64
+            }
             NodeKind::Prod(ProdStage::Convolution) => {
                 crate::dsp::convolution::DEFAULT_PARTITION_SIZE as u64
             }
+            NodeKind::Prod(ProdStage::Resampler) => match node.params {
+                NodeParams::Resampler { quality, .. } => quality as u64,
+                _ => 0,
+            },
+            // Every other `ProdStage` — `Correction`, `Crossfeed`,
+            // `Timestretch`, and the zero-latency-by-construction stages
+            // (`MixBus`, `Eq`, `Dynamics`, `Volume`, `Routing`, `Dither`, …)
+            // — falls through to 0 here.
+            //
+            // That is a real limitation, not an oversight: a Prod node carries
+            // only `NodeParams::Prod { slot }`, so the TOPOLOGY carries no
+            // latency for these stages. Their delay lives in the constructed
+            // arena node (`CorrectionNode::latency_samples`,
+            // `CrossfeedNode::latency_ms`, …), which `prod/arena/report.rs`
+            // reads for the authoritative number.
+            //
+            // It is spelled out here because the previous wildcard arm
+            // presented itself as a complete match, when in fact the reported
+            // latency depended on which stages happened to be enumerated. Call
+            // `compensate()` only against a graph whose Prod nodes have been
+            // given explicit `NodeParams::Delay`/`Resampler` values, or take
+            // the total from the live graph report.
             _ => 0,
         },
     }
@@ -186,7 +235,7 @@ pub fn analyze(graph: &Graph2, sample_rate: f32) -> Result<LatencyReport, Graph2
             .unwrap_or(0)
     };
 
-    let sr = if sample_rate > 0.0 { sample_rate } else { 1.0 };
+    let sr = effective_sample_rate(sample_rate);
     Ok(LatencyReport {
         upstream: up,
         taps,
@@ -197,11 +246,7 @@ pub fn analyze(graph: &Graph2, sample_rate: f32) -> Result<LatencyReport, Graph2
 
 /// The intrinsic ring-down tail (samples) a node adds to its outgoing signal at the given sample rate (Item 29).
 pub fn node_tail_at(node: &NodeDef, sample_rate: f32) -> u64 {
-    let sr = if sample_rate > 0.0 {
-        sample_rate
-    } else {
-        48_000.0
-    };
+    let sr = effective_sample_rate(sample_rate);
     match &node.params {
         NodeParams::Delay { samples } => *samples as u64,
         NodeParams::Convolution { kernel } => kernel.len() as u64,
@@ -313,7 +358,7 @@ pub fn analyze_tail(graph: &Graph2, sample_rate: f32) -> Result<TailReport, Grap
             .unwrap_or(0)
     };
 
-    let sr = if sample_rate > 0.0 { sample_rate } else { 1.0 };
+    let sr = effective_sample_rate(sample_rate);
     Ok(TailReport {
         upstream: up,
         tails,
@@ -523,11 +568,7 @@ impl NodeLatencyBreakdown {
 /// Compute granular latency breakdown for a given node at `sample_rate`.
 pub fn node_latency_breakdown(node: &NodeDef, sample_rate: f32) -> NodeLatencyBreakdown {
     let mut bd = NodeLatencyBreakdown::default();
-    let sr = if sample_rate > 0.0 {
-        sample_rate
-    } else {
-        48_000.0
-    };
+    let sr = effective_sample_rate(sample_rate);
 
     match &node.params {
         NodeParams::Delay { samples } => bd.intrinsic_samples = *samples as u64,

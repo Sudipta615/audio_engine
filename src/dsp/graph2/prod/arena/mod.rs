@@ -244,9 +244,15 @@ pub struct DspGraph {
     ///
     /// The audio thread may not log, so this is the only way such a refusal
     /// can become visible; the control thread reads it through
-    /// [`DspGraph::dropped_blocks`]. Written from the audio thread, read from
-    /// the control thread only for reporting — a torn read would cost a
-    /// counter, not audio, but a single writer with a `Relaxed`-ordered
-    /// consumer keeps it honest on every target.
-    dropped_blocks: u32,
+    /// [`DspGraph::dropped_blocks`].
+    ///
+    /// An `AtomicU32` with `Relaxed` ordering on both sides, NOT a plain `u32`.
+    /// The field comment here used to say "a torn read would cost a counter,
+    /// not audio, but a single writer with a `Relaxed`-ordered consumer keeps
+    /// it honest on every target" — a plain `u32` has no ordering at all, so a
+    /// concurrent control-thread read is a data race (undefined behaviour),
+    /// not a torn counter. The comment described an implementation that did not
+    /// exist. Relaxed is correct here: the value is a diagnostic tally with no
+    /// associated data, so no ordering beyond atomicity is needed.
+    dropped_blocks: std::sync::atomic::AtomicU32,
 }

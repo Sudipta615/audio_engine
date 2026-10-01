@@ -354,7 +354,8 @@ impl DspGraph {
     /// nobody can reproduce, so it is counted.
     #[inline]
     fn count_dropped_block(&mut self) {
-        self.dropped_blocks = self.dropped_blocks.saturating_add(1);
+        self.dropped_blocks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Blocks this graph refused to process for want of scratch.
@@ -364,6 +365,7 @@ impl DspGraph {
     /// not as a normal condition.
     pub fn dropped_blocks(&self) -> u32 {
         self.dropped_blocks
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Feed a secondary slot from an N-channel interleaved source . `frames * channels` samples are de-interleaved channel-major into

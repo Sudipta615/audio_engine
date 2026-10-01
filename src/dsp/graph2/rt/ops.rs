@@ -76,6 +76,9 @@ pub struct RtExecutor {
     /// the control thread's next `publish` or an explicit
     /// `reclaim_retired`.
     retired: AtomicPtr<RtPlan>,
+    /// Retire hand-backs displaced by an unreclaimed predecessor. The audio
+    /// thread must not free, so these are counted; `Drop` reclaims the slot.
+    retired_overflow: AtomicU64,
     /// Monotonic count of adopted plans.
     swaps: AtomicU64,
     /// Times a `NodeKind::Prod` node was found in a plan handed to this
@@ -103,6 +106,7 @@ impl RtExecutor {
             sink_already_written: false,
             pending: AtomicPtr::new(std::ptr::null_mut()),
             retired: AtomicPtr::new(std::ptr::null_mut()),
+            retired_overflow: AtomicU64::new(0),
             swaps: AtomicU64::new(0),
             prod_nodes_in_rt_plan: AtomicU64::new(0),
         }
@@ -145,7 +149,26 @@ impl RtExecutor {
 
     /// Extract the active plan (control side).
     pub fn into_plan(self) -> RtPlan {
-        *self.active
+        let this = std::mem::ManuallyDrop::new(self);
+        // Take the plan out by pointer so `Drop` does not run: the caller owns
+        // it now, and `Drop` would only try to reclaim `pending`/`retired`
+        // (which is still correct), not touch `active`.
+        //
+        // SAFETY: `this` is not dropped, so nothing else reads `this.active`
+        // after the move, and the Box ownership transfers to the return value.
+        let active = unsafe { std::ptr::read(&this.active) };
+        // SAFETY: reclaim the two raw-pointer slots the same way `Drop` would.
+        unsafe {
+            let pending = this.pending.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !pending.is_null() {
+                drop(Box::from_raw(pending));
+            }
+            let retired = this.retired.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !retired.is_null() {
+                drop(Box::from_raw(retired));
+            }
+        }
+        *active
     }
 
     /// Audio thread: adopt a published plan, if any. The retired plan is
@@ -158,7 +181,15 @@ impl RtExecutor {
         }
         let new_plan = unsafe { Box::from_raw(p) };
         let prev = std::mem::replace(&mut self.active, new_plan);
-        self.retired.store(Box::into_raw(prev), Ordering::Release);
+        // `swap`, not `store`: if a previous retire has not been reclaimed yet,
+        // `store` would overwrite that pointer and leak a whole `RtPlan`.
+        let displaced = self.retired.swap(Box::into_raw(prev), Ordering::AcqRel);
+        if !displaced.is_null() {
+            // The audio thread must never free. Surface it instead: this is the
+            // audio thread, so only a counter is possible, and `Drop` (below)
+            // drains the slot.
+            self.retired_overflow.fetch_add(1, Ordering::Relaxed);
+        }
         self.swaps.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -780,5 +811,33 @@ impl RtExecutor {
         }
         *scratch_out = out;
         *scratch_in = src_copy;
+    }
+}
+
+impl Drop for RtExecutor {
+    /// Reclaim the `pending` and `retired` slots.
+    ///
+    /// Both hold raw `Box<RtPlan>` pointers that nothing else owns, so without
+    /// this the executor leaked a full plan whenever it was dropped holding a
+    /// published-but-unadopted plan or an unreclaimed retired one — and
+    /// `into_plan` leaked them too, since it moves `active` out and then drops
+    /// the struct.
+    ///
+    /// This is sound on whichever thread drops the executor: by definition that
+    /// is not the audio thread (the audio thread borrows the executor for the
+    /// duration of a block). Any plan published concurrently would still be
+    /// owned by its publisher's own bookkeeping, and the `swap(null)` here only
+    /// claims what this executor put in those slots.
+    fn drop(&mut self) {
+        let pending = self.pending.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !pending.is_null() {
+            // SAFETY: non-null, and this executor owned the pointer until now.
+            unsafe { drop(Box::from_raw(pending)) };
+        }
+        let retired = self.retired.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !retired.is_null() {
+            // SAFETY: as above.
+            unsafe { drop(Box::from_raw(retired)) };
+        }
     }
 }

@@ -128,6 +128,16 @@ impl EndpointRing {
         &self.id
     }
 
+    /// The ring's real capacity in stereo frames.
+    ///
+    /// This is NOT the `capacity_frames` argument to [`Self::new`]: the buffer
+    /// allocates `capacity_frames * MAX_CHANNELS` samples, and a stereo frame is
+    /// 2 of those. Use this for anything that reasons about fill level or
+    /// buffering latency.
+    pub fn frame_capacity(&self) -> usize {
+        self.buffer.capacity_frames(2)
+    }
+
     pub fn reset(&self) {
         self.buffer.reset();
     }
@@ -281,6 +291,22 @@ impl EndpointWorker {
         // in one push, plus the slip's buffered input (~515). 4096 covers
         // every quality tier; growth is logged defensively (never expected).
         let staging_cap = 4096usize;
+        // The drift controller's setpoint is a FRAME count, so it must be given
+        // the ring's real frame capacity — not the `capacity_frames` argument
+        // that was passed to `EndpointRing::new`.
+        //
+        // `FixedFrameBuffer::new(capacity_frames)` allocates
+        // `capacity_frames * MAX_CHANNELS` SAMPLES, and a stereo frame is 2 of
+        // those, so the ring actually holds `capacity_frames * MAX_CHANNELS / 2`
+        // frames. With `capacity_frames = 8192` that is 65536 frames, not 8192 —
+        // the controller was regulating a setpoint of 4096 against a real
+        // midpoint of 32768, holding the endpoint at ~85 ms of buffering instead
+        // of the ~683 ms the ring is sized for, and `is_locked()` then demanded
+        // +/-163 frames (3.4 ms) of accuracy, ~20x tighter than intended, so it
+        // hunted between the +/-500 ppm clamps on ordinary latency jitter.
+        //
+        // Read before `ring` is moved into the struct below.
+        let ring_frames = ring.frame_capacity();
         Ok(Self {
             config,
             ring,
@@ -288,7 +314,7 @@ impl EndpointWorker {
             running: Arc::new(AtomicBool::new(true)),
             resampler,
             slip,
-            drift: DriftController::new(drift_correction, capacity_frames),
+            drift: DriftController::new(drift_correction, ring_frames),
             slip_in_l: vec![0.0; staging_cap],
             slip_in_r: vec![0.0; staging_cap],
             slip_in_len: 0,

@@ -218,10 +218,18 @@ impl WavpackDecoder {
 
         let samples = wavicle::decode_stream(&self.block_bytes)
             .map_err(|e| map_wavicle_error(format!("WavPack block {block_idx}: {e}"), &e))?;
-        debug_assert_eq!(
-            samples.channels, self.facts.channels,
-            "block channel count must match the stream facts"
-        );
+        // A real check, not a `debug_assert`. `channels` is fixed from the FIRST
+        // block's facts, but `cached_samples` is whatever the CURRENT block
+        // decoded to. A later block declaring fewer channels than the first
+        // passed validation in release builds (where `debug_assert` is a no-op)
+        // and then indexed past the end of the buffer below.
+        if samples.channels != self.facts.channels {
+            return Err(DecodeError::Decode(format!(
+                "WavPack block {block_idx} decodes {} channels but the stream \
+                 facts declare {}",
+                samples.channels, self.facts.channels
+            )));
+        }
         // The decoded block holds exactly `block_samples` frames per channel
         // (decode_stream errors otherwise), so the slice is a whole block.
         self.cached_samples = samples.samples;
@@ -269,7 +277,19 @@ impl WavpackDecoder {
                 .min(max_frames - have_frames);
             let start = (self.block_consumed as usize) * channels;
             let end = start + take * channels;
-            debug_assert!(end <= self.cached_samples.len());
+            // Bounds-check in release too. `cached_samples` is whatever the current block
+            // decoded to, and `entry.frames` comes from that block's own header,
+            // so a mismatch here is reachable from a malformed stream rather
+            // than merely a programming error.
+            if end > self.cached_samples.len() {
+                return Err(DecodeError::Decode(format!(
+                    "WavPack block {} yielded {} samples but frames {} of \
+                     {channels} channels need {end}",
+                    entry.start,
+                    self.cached_samples.len(),
+                    take,
+                )));
+            }
             for &s in &self.cached_samples[start..end] {
                 out.push(self.sample_to_f32(s));
             }
