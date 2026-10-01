@@ -5,13 +5,13 @@ name = "audio-engine"
 # `audio-engine` and its in-tree siblings (`config`, `plugin-abi`,
 # `plugin-test-echo`) are an independently versioned realtime product lineage:
 # they are published and consumed as a standalone realtime audio library, and
-# their 5.x series does not track Ultimate Engine's 1.x series. Every other
+# their versioning does not track Ultimate Engine's 1.x series. Every other
 # workspace crate inherits `[workspace.package].version`.
 #
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on. See `docs/MIGRATION.md`.
-version = "5.9.0"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"

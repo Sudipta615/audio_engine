@@ -153,7 +153,7 @@ checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
 name = "audio-engine"
-version = "5.9.0"
+version = "0.1.0"
 dependencies = [
  "alsa",
  "ape-decoder",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "5.8.2"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1450,14 +1450,14 @@ dependencies = [
 
 [[package]]
 name = "plugin-abi"
-version = "5.8.2"
+version = "0.1.0"
 dependencies = [
  "libloading",
 ]
 
 [[package]]
 name = "plugin-test-echo"
-version = "5.8.2"
+version = "0.1.0"
 dependencies = [
  "plugin-abi",
 ]
