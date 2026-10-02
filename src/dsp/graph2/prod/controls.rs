@@ -10,7 +10,7 @@
 //! [`super::Graph2Engine::with_graph`].
 
 use super::Graph2Engine;
-use crate::dsp::equalizer::EqBandParams;
+use crate::dsp::equalizer::{DynamicEqBandParams, EqBandParams};
 use crate::dsp::graph2::prod::arena::nodes::{
     AutomationPoint, AutomationTarget, DuckState, PanLaw,
 };
@@ -106,6 +106,12 @@ impl Graph2Engine {
     /// Set one EQ band. Mirrors `DspGraph::set_eq_band`.
     pub fn set_eq_band(&self, index: usize, params: EqBandParams) {
         self.inner.set_eq_band(index, params);
+    }
+
+    /// Set one dynamic-EQ band's full parameter set.
+    /// Mirrors `DspGraph::set_dynamic_eq_band`.
+    pub fn set_dynamic_eq_band(&self, index: usize, params: DynamicEqBandParams) {
+        self.inner.set_dynamic_eq_band(index, params);
     }
 
     /// Set crossfeed custom params. Mirrors

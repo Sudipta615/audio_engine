@@ -1,5 +1,5 @@
-//! Lifecycle command handlers — Open, PrepareNext, RecoverStream,
-//! AutoRecoverStream, LoudnessScanComplete.
+//! Lifecycle command handlers — Reconfigure, LoadPreset, Open, PrepareNext,
+//! RecoverStream, AutoRecoverStream, LoudnessScanComplete.
 
 use log::{error, info, warn};
 
@@ -7,6 +7,54 @@ use super::AudioEngine;
 use crate::buffer::PlaybackState;
 
 impl AudioEngine {
+    /// Apply a complete [`EngineConfig`](config::EngineConfig) as one
+    /// transactional reconfiguration.
+    ///
+    /// Validates first and **refuses** a config with errors, matching the
+    /// constructor's contract — a config that could not build an engine at
+    /// startup cannot be allowed to half-apply at runtime, which would leave
+    /// the engine in a state no configuration describes.
+    pub(super) fn handle_reconfigure(&mut self, config: config::EngineConfig) {
+        let validation = config.validate();
+        if let Some(err) = validation
+            .issues
+            .iter()
+            .find(|i| i.severity == config::ConfigSeverity::Error)
+        {
+            error!("Reconfigure refused [{}]: {}", err.kind.code(), err.message);
+            return;
+        }
+        for issue in &validation.issues {
+            warn!("Reconfigure [{}]: {}", issue.kind.code(), issue.message);
+        }
+        match self.reconfigure(config) {
+            Ok(()) => info!("Engine reconfigured from supplied config"),
+            Err(e) => error!("Reconfigure failed: {}", e),
+        }
+    }
+
+    /// Merge a named [`EnginePreset`](config::EnginePreset) over the live
+    /// config.
+    ///
+    /// The merge is deliberately **not** a wholesale replacement. A preset is
+    /// a policy bundle; it says nothing about which DAC you are driving, how
+    /// many mix slots you have, or which impulse response is loaded. Replacing
+    /// the whole config with the preset's would silently reset all three, so
+    /// instead only the fields the preset meaningfully sets are taken and the
+    /// rest of the live config survives.
+    pub(super) fn handle_load_preset(&mut self, preset: config::EnginePreset) {
+        let preset_config = config::EngineConfig::from_preset(preset);
+        let merged = merge_preset(&self.config, preset_config);
+        self.handle_reconfigure(merged);
+        info!(
+            "Preset {:?} applied over the live config (device '{}', {} endpoints and {} mix slots preserved)",
+            preset,
+            self.config.output_device.as_deref().unwrap_or("<auto>"),
+            self.config.endpoints.len(),
+            self.config.mix_slots,
+        );
+    }
+
     /// Scan `path` for loudness and write the result back into the file's
     /// tags. Emits `LoudnessScanComplete` on success/failure.
     ///
@@ -215,4 +263,74 @@ impl AudioEngine {
             result: result_for_event,
         });
     }
+}
+
+// ── Preset merging ───────────────────────────────────────────────────
+
+/// Merge a preset over the live config.
+///
+/// **Rule: a preset governs processing *policy* and nothing else.** It decides
+/// which DSP stages run and with what numeric processing settings. It does not
+/// own:
+///
+/// * **user-authored content** — EQ bands, saved EQ presets, compressor band
+///   parameters, the impulse response path,
+/// * **identity** — the output device, the endpoint list,
+/// * **topology** — mix-slot count, per-slot trims/sends, the aux bus,
+/// * **scene** — the spatial scene and its autosave path,
+/// * **plugins**.
+///
+/// `EnginePreset::from_preset` returns a complete `EngineConfig`, so the
+/// distinction has to be made here. Replacing the config wholesale would be
+/// indistinguishable from a factory reset: loading `Fidelity` would discard
+/// the user's AutoEQ curve and their loaded speaker IR. Instead the policy
+/// fields are taken whole (so switching `Fidelity` → `Consumer` genuinely
+/// restores the baseline policy, which a diff-based rule could not express),
+/// and the content nested inside them is carried over from the live config.
+///
+/// Requires `EngineConfig: PartialEq`, which it derives.
+pub(crate) fn merge_preset(
+    live: &config::EngineConfig,
+    preset: config::EngineConfig,
+) -> config::EngineConfig {
+    let mut out = live.clone();
+
+    // ── Policy fields: taken wholesale ────────────────────────────────
+    out.performance_mode = preset.performance_mode;
+    out.output_backend = preset.output_backend;
+    out.fallback_policy = preset.fallback_policy;
+    out.volume_mode = preset.volume_mode;
+    out.precision_mode = preset.precision_mode;
+    out.dither_enabled = preset.dither_enabled;
+    out.resampler_quality = preset.resampler_quality;
+    out.transition_mode = preset.transition_mode;
+
+    out.loudness = preset.loudness;
+    out.limiter = preset.limiter;
+    out.crossfeed = preset.crossfeed;
+    out.stereo_enhancer = preset.stereo_enhancer;
+
+    // Stage config that carries user content: take the preset's policy
+    // wholesale — including `enabled`, which *is* the decision the preset
+    // exists to make — and keep only the user's bands.
+    let live_bands = live.eq.bands.clone();
+    let live_eq_presets = live.eq.presets.clone();
+    out.eq = preset.eq;
+    out.eq.bands = live_bands;
+    out.eq.presets = live_eq_presets;
+
+    // Same shape: the preset governs whether compression happens, the user
+    // governs how each band compresses.
+    let live_comp = &live.multiband_compressor;
+    out.multiband_compressor = preset.multiband_compressor;
+    out.multiband_compressor.low_band = live_comp.low_band.clone();
+    out.multiband_compressor.mid_band = live_comp.mid_band.clone();
+    out.multiband_compressor.high_band = live_comp.high_band.clone();
+
+    // The preset governs the insert's blend; the IR is a loaded resource.
+    let live_ir = live.convolution.ir_path.clone();
+    out.convolution = preset.convolution;
+    out.convolution.ir_path = live_ir;
+
+    out
 }

@@ -8,4 +8,5 @@ mod helpers;
 mod lanes;
 mod playback;
 mod recovery;
+mod settings;
 mod spatial_persistence;

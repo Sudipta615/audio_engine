@@ -16,6 +16,12 @@ use super::rate_policy::SampleRatePolicy;
 use super::spatial_render::{SpatialMeterConfig, SpatialQuality, SpatialVoiceConfig};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Container-level `serde(default)`: every field is optional, so a config
+/// file is a **patch** over `EngineConfig::default()` rather than a
+/// replacement. Without it, omitting `output_backend` is a parse error
+/// rather than "use the default" — which makes a config file that sets one
+/// field unusable.
+#[serde(default)]
 pub struct EngineConfig {
     pub output_backend: AudioBackend,
     pub output_device: Option<String>,
@@ -263,6 +269,7 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuxBusConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -300,6 +307,7 @@ fn default_mix_slots() -> usize {
 /// pair through the engine's spatial layer (binaural head model + room).
 /// Disabled by default, so existing configurations render bit-identically.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialConfig {
     /// Master enable. Disabled = the graph's spatial step is skipped
     /// (bit-exact passthrough).
@@ -370,6 +378,7 @@ impl Default for SpatialConfig {
 /// Room model for the spatial master: geometry, wall absorption,
 /// reflection order, and the late field (spec §49).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialRoomConfig {
     #[serde(default)]
     pub enabled: bool,

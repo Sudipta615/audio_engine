@@ -71,18 +71,57 @@ impl DspGraph {
     }
 
     /// f64 variant of [`Self::run_plan`] (Quality mode).
+    ///
+    /// Applies the **same** non-finite containment as the f32 path, after the
+    /// same stages. That symmetry used to be missing, and it was a real gap
+    /// rather than an optimisation: `NonFinitePolicy` defaults to
+    /// [`Clamp`](crate::dsp::safety::NonFinitePolicy::Clamp), so the f32 chain
+    /// contained every `NaN`/`Inf` it produced, while the Quality chain let
+    /// them propagate untouched to the output. Switching precision mode — a
+    /// *quality* setting, not a safety switch — silently dropped the
+    /// guarantee.
+    ///
+    /// It was also visible as a performance oddity worth explaining rather
+    /// than "fixing": the f32 chain measured ~2.2x *slower* than the f64 one
+    /// on a mostly-bypassed configuration, because f32 was doing strictly
+    /// more work. The f32 path keeps its cost; the f64 path now matches its
+    /// safety behaviour, so both are the same speed and both are equally
+    /// guarded.
     #[inline]
     fn run_plan_f64(&mut self, id: PlanId, planes: &mut [&mut [f64]]) {
+        let policy = self.non_finite_policy;
         let plan = self.active.plans.plan(id);
         for step in &plan.steps {
             let node = &mut self.active.nodes[step.node.0];
             match step.scope {
-                StepScope::AllChannels => node.process_block_f64(planes),
+                StepScope::AllChannels => {
+                    node.process_block_f64(planes);
+                    if policy != crate::dsp::safety::NonFinitePolicy::Ignore {
+                        crate::dsp::safety::contain_non_finite_planes_f64(
+                            planes,
+                            policy,
+                            Some(step.node.0 as u32),
+                            None,
+                            0,
+                            |_| {},
+                        );
+                    }
+                }
                 StepScope::FrontPair => {
                     let (l, rest) = planes.split_at_mut(1);
                     let (r, _) = rest.split_at_mut(1);
                     let mut pair = [&mut l[0][..], &mut r[0][..]];
                     node.process_block_f64(&mut pair);
+                    if policy != crate::dsp::safety::NonFinitePolicy::Ignore {
+                        crate::dsp::safety::contain_non_finite_planes_f64(
+                            &mut pair,
+                            policy,
+                            Some(step.node.0 as u32),
+                            None,
+                            0,
+                            |_| {},
+                        );
+                    }
                 }
             }
             // See [`Self::run_plan`] — same post-aux master-meter

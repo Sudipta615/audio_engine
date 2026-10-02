@@ -376,6 +376,12 @@ impl GraphGeneration {
             eq.eq.set_preamp_db(config.eq.preamp_db);
             eq.eq.set_post_gain_db(config.eq.post_gain_db);
             eq.eq.set_headroom_db(config.eq.headroom_db);
+            eq.eq.set_auto_headroom(config.eq.auto_headroom);
+            // The dynamic-EQ corrective layer sits in front of the static
+            // bands (see `EqNode`'s docs for why that order). An empty band
+            // list disables it, so every pre-existing config — which has no
+            // `dynamic_eq` key at all — keeps the static-only path bit-exact.
+            eq.apply_dynamic_config(&config.eq.dynamic_eq, sample_rate);
         }
 
         {
@@ -384,16 +390,10 @@ impl GraphGeneration {
                 if i >= eq.eq.num_bands() {
                     break;
                 }
-                let filter_type = match band_cfg.filter_type {
-                    config::FilterType::Peaking => crate::dsp::equalizer::EqFilterType::Peaking,
-                    config::FilterType::LowShelf => crate::dsp::equalizer::EqFilterType::LowShelf,
-                    config::FilterType::HighShelf => crate::dsp::equalizer::EqFilterType::HighShelf,
-                    config::FilterType::LowPass => crate::dsp::equalizer::EqFilterType::LowPass,
-                    config::FilterType::HighPass => crate::dsp::equalizer::EqFilterType::HighPass,
-                    config::FilterType::Bandpass => crate::dsp::equalizer::EqFilterType::Bandpass,
-                    config::FilterType::Notch => crate::dsp::equalizer::EqFilterType::Notch,
-                    config::FilterType::AllPass => crate::dsp::equalizer::EqFilterType::AllPass,
-                };
+                // `From` is the single place the config→DSP filter-type
+                // mapping lives; adding a variant to either enum and missing
+                // it here would previously have been a silent panic risk.
+                let filter_type: crate::dsp::equalizer::EqFilterType = band_cfg.filter_type.into();
                 eq.eq.set_band(
                     i,
                     crate::dsp::equalizer::EqBandParams {
@@ -664,6 +664,7 @@ impl DspGraph {
             ),
             retiring: None,
             non_finite_policy: crate::dsp::safety::NonFinitePolicy::Clamp,
+            build_stats: None,
             dropped_blocks: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -721,6 +722,29 @@ impl DspGraph {
         config: &EngineConfig,
         plans: PlanSet,
     ) -> Box<GraphGeneration> {
+        // Timed, and recorded on the control bus, because a generation build
+        // is the engine's one allocating operation and its cost is otherwise
+        // invisible: steady-state CPU telemetry averages it away, so a host
+        // rebuilding per slider drag sees a smooth graph and a stuttering UI.
+        let build_start = std::time::Instant::now();
+        let generation = self.build_generation_inner(config, plans);
+        let nanos = build_start.elapsed().as_nanos() as u64;
+        self.control_handle().record_build_cost(nanos);
+        // Mirror onto the engine-side counter block, which is what
+        // `EngineHandle` reads (a handle has no route to the graph).
+        if let Some(stats) = self.build_stats() {
+            stats.record(nanos);
+        }
+        generation
+    }
+
+    /// Body of [`Self::build_generation`], factored out so the timing wrapper
+    /// above is the only difference between the two.
+    fn build_generation_inner(
+        &mut self,
+        config: &EngineConfig,
+        plans: PlanSet,
+    ) -> Box<GraphGeneration> {
         // Flush queued control commands into the ACTIVE generation first so
         // their effects are mirrored onto the sticky user state BEFORE the
         // snapshot below is taken: a command enqueued before this call (e.g.
@@ -751,6 +775,19 @@ impl DspGraph {
                 .collect();
         }
         GraphGeneration::build_with_plans(config, sample_rate, &layout, user, plans)
+    }
+
+    /// The engine-side rebuild-cost counters, when they are attached.
+    ///
+    /// `None` for a graph built outside the engine (tests, `from_config`,
+    /// direct arena use), which is correct: there is no host to report to.
+    fn build_stats(&self) -> Option<&Arc<crate::engine::GraphBuildStats>> {
+        self.build_stats.as_ref()
+    }
+
+    /// Attach the engine-side rebuild-cost counters.
+    pub fn set_build_stats(&mut self, stats: Arc<crate::engine::GraphBuildStats>) {
+        self.build_stats = Some(stats);
     }
 
     /// Mirror the config's shell-level mode fields onto the graph.

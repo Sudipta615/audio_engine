@@ -63,6 +63,61 @@ impl Default for DynamicEqBandParams {
     }
 }
 
+/// Build a dynamic EQ band from its serialized form.
+///
+/// Lives here rather than in the `config` crate because the dependency runs
+/// the other way: `config` knows the file format, the engine knows the DSP.
+/// Fields the config does not carry take their [`DynamicEqBandParams`]
+/// defaults — notably `detector_mode`, which is a runtime tuning knob rather
+/// than something a config file should be pinning by default.
+impl From<&config::DynamicEqBandConfig> for DynamicEqBandParams {
+    fn from(c: &config::DynamicEqBandConfig) -> Self {
+        let d = Self::default();
+        Self {
+            frequency: c.frequency,
+            q: c.q,
+            static_gain_db: c.static_gain_db,
+            dynamic_gain_db: c.dynamic_gain_db,
+            threshold_db: c.threshold_db,
+            ratio: c.ratio,
+            attack_ms: c.attack_ms,
+            release_ms: c.release_ms,
+            range_db: c.range_db,
+            filter_type: c.filter_type.into(),
+            detector_mode: d.detector_mode,
+            enabled: c.enabled,
+        }
+    }
+}
+
+/// Build a [`config::DynamicEqBandConfig`] from a DSP band parameter set.
+///
+/// The inverse of [`DynamicEqBandParams::from`], used by the command handlers
+/// to mirror a live edit back into `EngineConfig` so a generation rebuild
+/// preserves it. The one field the config does not carry,
+/// `detector_mode`, has nowhere to go — a rebuild therefore restores that
+/// band to the default detector rather than preserving the runtime choice.
+/// That is a real (if narrow) limitation of the serialized form, and is why
+/// the config round-trip is documented as one-way-with-a-default rather than
+/// claimed lossless.
+impl From<&DynamicEqBandParams> for config::DynamicEqBandConfig {
+    fn from(p: &DynamicEqBandParams) -> Self {
+        Self {
+            enabled: p.enabled,
+            filter_type: p.filter_type.into(),
+            frequency: p.frequency,
+            static_gain_db: p.static_gain_db,
+            dynamic_gain_db: p.dynamic_gain_db,
+            threshold_db: p.threshold_db,
+            ratio: p.ratio,
+            attack_ms: p.attack_ms,
+            release_ms: p.release_ms,
+            range_db: p.range_db,
+            q: p.q,
+        }
+    }
+}
+
 /// A single dynamic EQ band processor with dedicated detector and smoothed biquad filters.
 #[derive(Debug, Clone)]
 pub struct DynamicEqBand {

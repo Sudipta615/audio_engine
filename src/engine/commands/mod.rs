@@ -19,7 +19,7 @@ mod correction;
 mod dsp;
 mod eq;
 mod lanes;
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod multichannel;
 mod output;
 mod playback;
@@ -308,6 +308,14 @@ impl AudioEngine {
     /// Dispatch a single engine command to the appropriate handler.
     fn handle_command(&mut self, cmd: EngineCommand) {
         match cmd {
+            // ── Whole-engine reconfiguration ──
+            EngineCommand::Reconfigure(config) => {
+                self.handle_reconfigure(config);
+            }
+            EngineCommand::LoadPreset(preset) => {
+                self.handle_load_preset(preset);
+            }
+
             // ── Playback ──
             EngineCommand::Play => self.handle_play(),
             EngineCommand::Pause => self.handle_pause(),
@@ -349,6 +357,12 @@ impl AudioEngine {
             // ── EQ ──
             EngineCommand::SetEqEnabled(enabled) => self.handle_set_eq_enabled(enabled),
             EngineCommand::SetEqAutoHeadroom(enabled) => self.handle_set_eq_auto_headroom(enabled),
+            EngineCommand::SetDynamicEqEnabled(enabled) => {
+                self.handle_set_dynamic_eq_enabled(enabled);
+            }
+            EngineCommand::SetDynamicEqBand { index, params } => {
+                self.handle_set_dynamic_eq_band(index, params);
+            }
             EngineCommand::SetEqBand {
                 index,
                 frequency,
@@ -436,6 +450,9 @@ impl AudioEngine {
             EngineCommand::RemoveEndpoint(id) => self.handle_remove_endpoint(id),
             EngineCommand::SetAuxInsert { enabled, wet_mix } => {
                 self.graph.set_aux_insert(enabled, wet_mix);
+            }
+            EngineCommand::SetConvolutionWetMix(mix) => {
+                self.handle_set_convolution_wet_mix(mix);
             }
 
             // ── Plugin host ──

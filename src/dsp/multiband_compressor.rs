@@ -248,6 +248,51 @@ pub struct MultibandCompressor {
     comp_mid_r: BandCompressor,
     comp_high_l: BandCompressor,
     comp_high_r: BandCompressor,
+
+    /// Mirror of the user-facing band parameters, indexed `0 = Low`,
+    /// `1 = Mid`, `2 = High`.
+    ///
+    /// See [`MultibandCompressor::band_settings`] for why this exists rather
+    /// than reading the [`BandCompressor`]s back.
+    band_user_params: [BandSettings; NUM_BANDS],
+}
+
+/// A multiband compressor band's user-facing settings, as the host set them.
+///
+/// Mirrors the payload of `EngineCommand::SetCompressorBandParams` plus the
+/// detector features from `EngineCommand::SetCompressorBandFeatures`, so a
+/// host can round-trip a settings snapshot without losing information.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BandSettings {
+    pub threshold_db: f32,
+    pub ratio: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub makeup_gain_db: f32,
+    /// Soft-knee width in dB (0 = hard knee).
+    pub knee_db: f32,
+    pub detector: CompressorDetector,
+    pub stereo_link: bool,
+}
+
+/// Number of compressor bands: Low / Mid / High.
+pub const NUM_BANDS: usize = 3;
+
+impl Default for BandSettings {
+    fn default() -> Self {
+        // Matches `neutral_band`'s coefficients, expressed in the units the
+        // host supplies, so a fresh compressor reads back as neutral.
+        Self {
+            threshold_db: -6.0,
+            ratio: 1.0,
+            attack_ms: 5.0,
+            release_ms: 100.0,
+            makeup_gain_db: 0.0,
+            knee_db: 6.0,
+            detector: CompressorDetector::Peak,
+            stereo_link: true,
+        }
+    }
 }
 
 /// Neutral band parameters — transparent by default (ratio 1:1, no makeup).
@@ -303,6 +348,8 @@ impl MultibandCompressor {
             comp_mid_r,
             comp_high_l,
             comp_high_r,
+
+            band_user_params: [BandSettings::default(); NUM_BANDS],
         }
     }
 
@@ -444,6 +491,17 @@ impl MultibandCompressor {
 
         *comp_l = comp_new_l;
         *comp_r = comp_new_r;
+
+        // Mirror for `band_settings`. Only the fields this setter owns are
+        // touched; knee / detector / link stay as `set_band_features` left
+        // them, matching the "preserve detector features" intent above.
+        if let Some(mirror) = self.band_user_params.get_mut(band) {
+            mirror.threshold_db = threshold_db;
+            mirror.ratio = ratio;
+            mirror.attack_ms = attack_ms;
+            mirror.release_ms = release_ms;
+            mirror.makeup_gain_db = makeup_gain_db;
+        }
     }
 
     /// Set detector features for a band: soft-knee width, detector mode and
@@ -467,11 +525,34 @@ impl MultibandCompressor {
         comp_r.knee_db = knee_db.max(0.0);
         comp_r.detector = detector;
         comp_r.stereo_link = stereo_link;
+
+        if let Some(mirror) = self.band_user_params.get_mut(band) {
+            mirror.knee_db = knee_db.max(0.0);
+            mirror.detector = detector;
+            mirror.stereo_link = stereo_link;
+        }
     }
 
     /// Whether the multiband compressor is currently enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Read one band's live *user-facing* parameters back.
+    ///
+    /// `band` is `0 = Low`, `1 = Mid`, `2 = High`; anything else yields
+    /// `None`.
+    ///
+    /// These come from a mirror of the values the host supplied, not from the
+    /// per-channel [`BandCompressor`]s. That distinction matters: the band
+    /// compressors store *coefficients* (`attack_coeff`, `makeup_gain` as a
+    /// linear factor, `threshold_db_cached` after clamping), which are what
+    /// the audio path needs but are not what a UI should display. Inverting
+    /// the coefficient mapping to recover milliseconds would also lose the
+    /// distinction between a value the host set and the same value clamped by
+    /// a range check, so the mirror is kept authoritative instead.
+    pub fn band_settings(&self, band: usize) -> Option<BandSettings> {
+        self.band_user_params.get(band).copied()
     }
 
     #[inline]

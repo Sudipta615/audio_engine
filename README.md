@@ -2,7 +2,7 @@
 
 # Shadow Desktop — Independent Core Audio Engine
 
-[![Crate Version](https://img.shields.io/badge/version-0.6.0-blue.svg?style=flat-square)](Cargo.toml)
+[![Crate Version](https://img.shields.io/badge/version-0.7.0-blue.svg?style=flat-square)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![Rust Edition](https://img.shields.io/badge/rustc-1.85%2B%20%7C%202021-orange.svg?style=flat-square)](Cargo.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-output-backends--os-integration)
@@ -235,7 +235,32 @@ cargo run --bin audio-engine-cli -- [options] [path_or_uri]
 # Examples:
 cargo run --bin audio-engine-cli -- -b alsa -d "hw:0,0" /home/user/Music
 cargo run --bin audio-engine-cli -- --backend wasapi -d "default" https://stream.example.com/live.opus
+
+# Load a TOML config (a patch over the built-in defaults)
+cargo run --bin audio-engine-cli -- --config ./shadow.toml
 ```
+
+### 3b. Terminal UI
+
+For interactive use there is a live terminal UI — transport, per-channel
+metering, gain reduction, CPU and latency, an EQ curve editor, and panels for
+dynamics, spatial and output:
+
+```bash
+# From the workspace
+cargo run -p engine-tui --bin engine-tui -- [options] [path_or_uri]
+
+# Or from an installed binary
+engine-tui --config ./shadow.toml ~/Music
+```
+
+`tab`/`shift-tab` cycle panels · `↑`/`↓` select a row · `←`/`→` adjust it ·
+`space` play/pause · `e` EQ · `d` dynamic EQ · `l` limiter · `m` spatial ·
+`q` quit (twice) · `ctrl-c` quit.
+
+It reads everything from `EngineHandle::settings()` and `playback_info()`, both
+of which are lock-free `ArcSwap` loads — the UI thread never contends with the
+audio thread. See `crates/tui`.
 
 #### Interactive Commands
 
@@ -298,7 +323,31 @@ int main() {
 
 ## 🔌 Configuration Model
 
-[`EngineConfig`](crates/config/src/engine_config.rs) is fully Serde-serializable, enabling straightforward JSON/TOML configuration storage:
+[`EngineConfig`](crates/config/src/engine_config.rs) is fully Serde-serializable, enabling straightforward JSON/TOML configuration storage. Every field is optional — loading is a **patch** over the defaults, not a replacement — and both binaries accept `--config <file>`:
+
+```bash
+# a partial config is valid; everything else inherits
+cat > shadow.toml <<'EOF'
+output_device = "hw:1,0"
+
+[eq]
+enabled = true
+dynamic_eq = { bands = [] }   # dynamic EQ is opt-in and ships empty
+
+[limiter]
+enabled = true
+true_peak = true
+EOF
+
+cargo run -p engine-tui -- --config shadow.toml
+```
+
+`EngineConfig::load_file` distinguishes *unreadable*, *malformed* and *invalid*
+(`ConfigFileError`) and refuses an invalid config rather than silently starting
+with different settings than the file describes; `save_file` writes through a
+temp file and a rename so a failure cannot truncate a working config.
+
+In code:
 
 ```rust
 use config::{AudioBackend, EngineConfig, EnginePreset, PrecisionMode, VolumeMode};
@@ -398,6 +447,7 @@ cargo fmt --all -- --check
 │   ├── config/                      # Serde-serializable engine & DSP configuration models
 │   ├── plugin-abi/                  # C-ABI plugin specification, vtables, and host loader
 │   ├── plugin-test-echo/            # Reference delay + gain audio plugin implementation
+│   ├── tui/                         # Terminal UI binary (ratatui + crossterm)
 │   └── opus-decoder/                # Pure-Rust RFC 8251 Opus audio decoder
 ├── src/
 │   ├── lib.rs                       # Crate root, feature gates, and prelude re-exports

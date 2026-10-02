@@ -239,6 +239,11 @@ pub struct DspGraph {
     // ── Real-time Float Safety & Containment ──
     pub non_finite_policy: crate::dsp::safety::NonFinitePolicy,
 
+    /// Engine-side rebuild-cost counters, when this graph is owned by an
+    /// `AudioEngine`. `None` for a standalone graph built by a test or a host
+    /// that drives the arena directly — there is no host to report to.
+    build_stats: Option<std::sync::Arc<crate::engine::GraphBuildStats>>,
+
     /// Blocks this graph refused to process because a preallocated scratch
     /// buffer was smaller than the block asked for.
     ///

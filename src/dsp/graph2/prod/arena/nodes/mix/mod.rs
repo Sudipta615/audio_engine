@@ -707,35 +707,44 @@ impl MixBusNode {
             return;
         }
         for (i, input) in self.inputs.iter_mut().enumerate() {
-            let (peak, mean_sq) = if i == 0 {
+            let (ch, peak, sum_sq) = if i == 0 {
                 let ch = master.len().max(1);
                 let mut peak = 0.0f32;
                 let mut sum_sq = 0.0f32;
                 for plane in master.iter().take(ch) {
+                    // Peak and RMS are scanned separately on purpose.
+                    //
+                    // `max(|x|)` is associative and commutative, so the SIMD
+                    // scan returns *exactly* the value the scalar loop did —
+                    // this is the one reduction that can be vectorized in a
+                    // bit-exactness-critical engine. `Σ x²` is not: its
+                    // summation order defines the result, and vectorizing it
+                    // would perturb the RMS readout (and, more importantly,
+                    // establish the precedent that reductions here may be
+                    // reordered). It stays scalar.
+                    //
+                    // The second pass costs one extra read of a block that is
+                    // already resident in L1, so it is cheaper than the scalar
+                    // branch it replaces.
+                    peak = peak.max(crate::dsp::simd::vector_abs_max(plane, frames));
                     for &v in plane.iter().take(frames) {
-                        let a = v.abs();
-                        if a > peak {
-                            peak = a;
-                        }
                         sum_sq += v * v;
                     }
                 }
-                (peak, sum_sq / (ch as f32 * frames as f32))
+                (ch, peak, sum_sq)
             } else {
                 let ch = input.channels.clamp(1, input.planes.len());
                 let mut peak = 0.0f32;
                 let mut sum_sq = 0.0f32;
                 for plane in input.planes.iter().take(ch) {
+                    peak = peak.max(crate::dsp::simd::vector_abs_max(plane, frames));
                     for &v in plane.iter().take(frames) {
-                        let a = v.abs();
-                        if a > peak {
-                            peak = a;
-                        }
                         sum_sq += v * v;
                     }
                 }
-                (peak, sum_sq / (ch as f32 * frames as f32))
+                (ch, peak, sum_sq)
             };
+            let mean_sq = sum_sq / (ch as f32 * frames as f32);
             let eps = 1e-12f32;
             let peak_db = 20.0 * (peak.max(eps)).log10();
             let rms_db = 20.0 * (mean_sq.max(eps).sqrt()).log10();
@@ -809,11 +818,10 @@ impl MixBusNode {
                 let mut peak = 0.0f32;
                 let mut sum_sq = 0.0f64;
                 for plane in master.iter().take(ch) {
+                    // Same reasoning as the f32 path: `max(|x|)` reassociates
+                    // freely, `Σ x²` does not.
+                    peak = peak.max(crate::dsp::simd::vector_abs_max_f64(plane, frames) as f32);
                     for &v in plane.iter().take(frames) {
-                        let a = v.abs() as f32;
-                        if a > peak {
-                            peak = a;
-                        }
                         sum_sq += v * v;
                     }
                 }
@@ -823,11 +831,8 @@ impl MixBusNode {
                 let mut peak = 0.0f32;
                 let mut sum_sq = 0.0f32;
                 for plane in input.planes.iter().take(ch) {
+                    peak = peak.max(crate::dsp::simd::vector_abs_max(plane, frames));
                     for &v in plane.iter().take(frames) {
-                        let a = v.abs();
-                        if a > peak {
-                            peak = a;
-                        }
                         sum_sq += v * v;
                     }
                 }

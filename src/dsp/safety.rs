@@ -209,6 +209,76 @@ where
     non_finite_count
 }
 
+/// f64 twin of [`contain_non_finite_planes`].
+///
+/// Exists because the Quality (`f64`) chain needs the same guarantee the
+/// Performance chain already had. Without it, switching precision mode — a
+/// quality setting, not a safety switch — silently dropped non-finite
+/// containment and let a `NaN` reach the output.
+///
+/// The `NonFiniteIncident::value` field is an `f32` in the incident record, so
+/// an f64 value narrows on report. That is a reporting detail only: the
+/// *containment* is applied at full `f64` precision on the sample itself, and
+/// a genuine f64 `Inf` still reports as `f32::INFINITY`.
+pub fn contain_non_finite_planes_f64<F>(
+    planes: &mut [&mut [f64]],
+    policy: NonFinitePolicy,
+    node_id: Option<u32>,
+    node_name: Option<&'static str>,
+    generation: u64,
+    mut on_incident: F,
+) -> usize
+where
+    F: FnMut(NonFiniteIncident),
+{
+    if policy == NonFinitePolicy::Ignore || planes.is_empty() {
+        return 0;
+    }
+
+    let mut non_finite_count = 0usize;
+
+    for (c, plane) in planes.iter_mut().enumerate() {
+        for (i, s) in plane.iter_mut().enumerate() {
+            if !s.is_finite() {
+                non_finite_count += 1;
+
+                on_incident(NonFiniteIncident {
+                    node_id,
+                    node_name: node_name.map(Cow::Borrowed),
+                    sample_index: i,
+                    channel: c,
+                    value: *s as f32,
+                    graph_generation: generation,
+                });
+
+                match policy {
+                    NonFinitePolicy::Ignore | NonFinitePolicy::Detect => {}
+                    NonFinitePolicy::Clamp => {
+                        *s = if s.is_nan() {
+                            0.0
+                        } else if s.is_sign_positive() {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                    }
+                    NonFinitePolicy::Silence | NonFinitePolicy::BypassNode => {
+                        *s = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
+    if policy == NonFinitePolicy::BypassNode && non_finite_count > 0 {
+        for plane in planes.iter_mut() {
+            plane.fill(0.0);
+        }
+    }
+
+    non_finite_count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +337,120 @@ mod tests {
         assert_eq!(block[2], 0.0);
         assert_eq!(block[0], 0.5);
         assert_eq!(block[3], 0.2);
+    }
+}
+
+#[cfg(test)]
+mod f64_tests {
+    use super::*;
+
+    /// The Quality chain must contain non-finite values exactly as the
+    /// Performance chain does.
+    ///
+    /// This is the regression test for a real gap: the f64 plan ran without
+    /// containment, so selecting `PrecisionMode::Quality` — a quality setting,
+    /// not a safety switch — dropped the guarantee the default `Clamp` policy
+    /// was supposed to give, and let a `NaN` reach the output.
+    #[test]
+    fn the_f64_path_clamps_where_the_f32_path_clamps() {
+        let values = [0.5f64, f64::NAN, f64::INFINITY, -1.0, f64::NEG_INFINITY];
+
+        let mut p32 = [
+            values[0] as f32,
+            f32::NAN,
+            f32::INFINITY,
+            -1.0,
+            f32::NEG_INFINITY,
+        ];
+        let mut planes32 = [&mut p32[..]];
+        let n32 = contain_non_finite_planes(
+            &mut planes32,
+            NonFinitePolicy::Clamp,
+            Some(1),
+            None,
+            0,
+            |_| {},
+        );
+
+        let mut p64 = values;
+        let mut planes64 = [&mut p64[..]];
+        let n64 = contain_non_finite_planes_f64(
+            &mut planes64,
+            NonFinitePolicy::Clamp,
+            Some(1),
+            None,
+            0,
+            |_| {},
+        );
+
+        assert_eq!(n32, n64, "both paths must report the same count");
+        assert_eq!(n64, 3, "NaN, +Inf, -Inf");
+        assert_eq!(
+            p64,
+            [0.5, 0.0, 1.0, -1.0, -1.0],
+            "f64 containment must match f32 containment sample for sample"
+        );
+    }
+
+    #[test]
+    fn the_f64_path_silences_likewise() {
+        let mut p = vec![0.25f64, f64::NAN, 0.75];
+        let mut planes = [&mut p[..]];
+        contain_non_finite_planes_f64(&mut planes, NonFinitePolicy::Silence, None, None, 0, |_| {});
+        assert_eq!(p, vec![0.25, 0.0, 0.75]);
+    }
+
+    #[test]
+    fn bypass_node_silences_the_whole_f64_block() {
+        let mut a = vec![0.5f64, f64::NAN, 0.5];
+        let mut b = vec![0.25f64, 0.25, 0.25];
+        let mut planes = [&mut a[..], &mut b[..]];
+        let n = contain_non_finite_planes_f64(
+            &mut planes,
+            NonFinitePolicy::BypassNode,
+            None,
+            None,
+            0,
+            |_| {},
+        );
+        assert_eq!(n, 1);
+        assert!(a.iter().all(|v| *v == 0.0), "channel with the fault: {a:?}");
+        assert!(
+            b.iter().all(|v| *v == 0.0),
+            "every channel is silenced, not just the bad one: {b:?}"
+        );
+    }
+
+    #[test]
+    fn ignore_touches_nothing_on_either_path() {
+        let mut a32 = [f32::NAN, 1.0];
+        let mut planes32 = [&mut a32[..]];
+        assert_eq!(
+            contain_non_finite_planes(
+                &mut planes32,
+                NonFinitePolicy::Ignore,
+                None,
+                None,
+                0,
+                |_| {}
+            ),
+            0
+        );
+        assert!(a32[0].is_nan(), "Ignore must leave the NaN in place");
+
+        let mut a64 = [f64::NAN, 1.0];
+        let mut planes64 = [&mut a64[..]];
+        assert_eq!(
+            contain_non_finite_planes_f64(
+                &mut planes64,
+                NonFinitePolicy::Ignore,
+                None,
+                None,
+                0,
+                |_| {}
+            ),
+            0
+        );
+        assert!(a64[0].is_nan(), "Ignore must leave the NaN in place");
     }
 }

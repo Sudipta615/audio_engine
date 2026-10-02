@@ -30,6 +30,15 @@ use crate::{buffer::AudioFrame, dsp::biquad::SmoothedBiquad, dsp::gain::GainProc
 /// with a non-lookahead detector that reacted after transients had passed —
 /// and it was removed.  Overshoot protection is the limiter's job; the EQ
 /// only ever applies linear, time-invariant gain.)
+/// Largest band gain [`ParametricEq::set_band`] will store, in dB.
+///
+/// Matches `Biquad::validate_gain_db`'s bound, so the value the read-back
+/// reports is always one the biquad can actually realize as finite
+/// coefficients. Any tighter bound would make the stored parameter and the
+/// audible one disagree.
+const MAX_BAND_GAIN_DB: f32 = 48.0;
+
+/// Multi-band parametric equalizer.
 #[derive(Debug, Clone)]
 pub struct ParametricEq {
     bands: Vec<EqBand>,
@@ -721,12 +730,58 @@ impl ParametricEq {
     }
 
     /// Set a band's parameters and update its coefficients
+    /// Set band parameters.
+    ///
+    /// Validates and clamps like [`Self::set_bass_shelf`] does, and for the
+    /// same reason. `update_coefficients` is not validation: it stores the
+    /// target parameters verbatim and the biquad clamps non-finite *gains*
+    /// later, at coefficient-computation time. That leaves `params.gain_db`
+    /// holding a NaN, which is worse than it sounds — `combined_max_gain_db`
+    /// sums the band gains, so one NaN makes it return NaN forever, and
+    /// `refresh_auto_headroom` then feeds that NaN to `set_headroom_db`, which
+    /// rejects it. The result is that auto-headroom silently stops responding
+    /// to *every* band edit for the rest of the session, with no indication
+    /// of why. Validating here keeps the stored parameters honest.
     pub fn set_band(&mut self, index: usize, params: EqBandParams) {
-        if let Some(band) = self.bands.get_mut(index) {
-            band.params = params;
-            band.update_coefficients(self.sample_rate);
-            self.refresh_auto_headroom();
+        let Some(band) = self.bands.get_mut(index) else {
+            return;
+        };
+        // Per-field, not whole-struct: a non-finite gain should not also throw
+        // away a perfectly good frequency change in the same command.
+        if params.gain_db.is_finite() {
+            band.params.gain_db = params.gain_db.clamp(-MAX_BAND_GAIN_DB, MAX_BAND_GAIN_DB);
+        } else {
+            log::warn!(
+                "ParametricEq::set_band: band {} non-finite gain {}; keeping {}",
+                index,
+                params.gain_db,
+                band.params.gain_db
+            );
         }
+        if params.frequency.is_finite() {
+            band.params.frequency = params.frequency;
+        } else {
+            log::warn!(
+                "ParametricEq::set_band: band {} non-finite frequency {}; keeping {}",
+                index,
+                params.frequency,
+                band.params.frequency
+            );
+        }
+        if params.q.is_finite() {
+            band.params.q = params.q;
+        } else {
+            log::warn!(
+                "ParametricEq::set_band: band {} non-finite Q {}; keeping {}",
+                index,
+                params.q,
+                band.params.q
+            );
+        }
+        band.params.filter_type = params.filter_type;
+        band.params.enabled = params.enabled;
+        band.update_coefficients(self.sample_rate);
+        self.refresh_auto_headroom();
     }
 
     /// Get number of bands
@@ -737,6 +792,21 @@ impl ParametricEq {
     /// Get band parameters
     pub fn band_params(&self, index: usize) -> Option<&EqBandParams> {
         self.bands.get(index).map(|b| &b.params)
+    }
+
+    /// The bass shelf's current gain in dB, after
+    /// [`Self::set_bass_shelf`]'s ±30 dB clamp.
+    ///
+    /// Exposed for settings read-back — a host cannot otherwise learn what
+    /// the engine holds after the clamp.
+    pub fn bass_shelf_gain_db(&self) -> f32 {
+        self.bass_band.params.gain_db
+    }
+
+    /// The treble shelf's current gain in dB, after
+    /// [`Self::set_treble_shelf`]'s ±30 dB clamp.
+    pub fn treble_shelf_gain_db(&self) -> f32 {
+        self.treble_band.params.gain_db
     }
 
     /// Set bass shelf gain

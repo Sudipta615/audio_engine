@@ -72,6 +72,10 @@ pub use engine::cue_split::{CueSegmentInfo, PregapPolicy};
 pub use engine::dsp_persistence::DspStateStore;
 #[cfg(feature = "audio-output")]
 pub use engine::{AudioEngine, EngineError, EngineHandle, EngineWake};
+pub use engine::{
+    AuxSettings, CompressorBandSetting, DynamicEqBandSetting, EngineSettings, EqBandSetting,
+    GraphBuildStats, LimiterSettings,
+};
 pub use engine::{OfflineRenderResult, OfflineRenderer};
 
 #[cfg(feature = "network-streaming")]

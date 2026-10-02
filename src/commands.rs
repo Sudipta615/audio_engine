@@ -5,6 +5,36 @@ use crate::source::AudioSource;
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum EngineCommand {
+    /// Transactionally reconfigure the whole engine from a complete
+    /// [`EngineConfig`](config::EngineConfig).
+    ///
+    /// The one-shot counterpart to the per-stage setters: every control a host
+    /// can set individually is also expressible here, and applying them as a
+    /// single generation rebuild is what makes a *multi-setting* change
+    /// glitch-free. Setting four stage toggles in a row produces four
+    /// rebuilds and four audible transitions; this produces one.
+    ///
+    /// Bus-topology changes (slot count, trims, sends, aux) force a generation
+    /// swap because they size the generation's bus. Everything else applies
+    /// in place.
+    ///
+    /// `EngineConfig` is `Serialize`/`Deserialize`, so a host can load a
+    /// settings file and push it straight through this.
+    Reconfigure(config::EngineConfig),
+    /// Load a named [`EnginePreset`](config::EnginePreset) into the running
+    /// engine.
+    ///
+    /// The preset supplies the *policy* fields it owns (which DSP stages run,
+    /// precision mode, resampler quality, volume mode, backend preference).
+    /// It leaves identity fields — device name, endpoint list, mix-slot count,
+    /// IR paths — at their defaults, so the handler merges the preset **over
+    /// the live config** rather than replacing it wholesale. That means
+    /// `--preset fidelity` on a config file that names a specific DAC keeps
+    /// pointing at that DAC.
+    ///
+    /// Routed through [`Self::Reconfigure`], so bus-topology changes still
+    /// swap generations instead of mutating in place.
+    LoadPreset(config::EnginePreset),
     Play,
     Pause,
     Stop,
@@ -139,6 +169,14 @@ pub enum EngineCommand {
         enabled: bool,
         wet_mix: f32,
     },
+    /// Wet/dry mix for the *canonical chain's* convolution insert, in `[0, 1]`.
+    ///
+    /// Distinct from [`EngineCommand::SetAuxInsert`], which addresses the
+    /// aux bus insert. This one is the convolution stage that sits in the
+    /// main signal chain (`ProdStage::Convolution`); the impulse response
+    /// itself still comes from `config.convolution.ir_path` at generation
+    /// build, so this command only moves the blend.
+    SetConvolutionWetMix(f32),
     /// Plugin host: live enable toggle for the whole plugin
     /// insert (all slots). Disabled = the plan step is skipped,
     /// bit-exact; attached plugin instances stay loaded.
@@ -229,6 +267,20 @@ pub enum EngineCommand {
     /// reserves the curve's own peak boost as pre-EQ attenuation and keeps it
     /// updated as bands change; disabling restores the manual headroom.
     SetEqAutoHeadroom(bool),
+    /// Enable or disable the dynamic-EQ corrective layer.
+    ///
+    /// A no-op when no dynamic bands are configured — enabling a layer with
+    /// no bands has nothing to do, and the engine treats that as "off".
+    SetDynamicEqEnabled(bool),
+    /// Set one dynamic-EQ band's full parameter set.
+    ///
+    /// Out-of-range indices are ignored, matching `SetEqBand`. This takes the
+    /// DSP parameter type rather than a config struct because the runtime
+    /// control surface does not need the serialized spelling.
+    SetDynamicEqBand {
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    },
     SetEqBand {
         index: usize,
         frequency: f32,

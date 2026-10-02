@@ -197,11 +197,18 @@ fn a_playing_tick_stays_far_below_the_ungated_cost() {
 /// The size the measurement above is partly about, pinned so a future field
 /// addition shows up as a diff against a known number rather than as a slower
 /// machine.
+///
+/// `1624 → 1632`: the `EngineSettings` read-back field is an `Arc`, so it adds
+/// exactly one pointer. That placement is deliberate rather than incidental —
+/// with the settings inline (eight `Vec`s), every telemetry publish deep-copied
+/// them and this same test measured **8** allocations per idle tick instead of
+/// 1. Keeping the snapshot behind an `Arc` moves that cost to the reader (a UI
+///    polling at 30–60 Hz) instead of the engine tick, which is where it belongs.
 #[test]
 fn playback_info_size_is_known() {
     assert_eq!(
         std::mem::size_of::<PlaybackInfo>(),
-        1624,
+        1632,
         "PlaybackInfo changed size; the per-tick memcpy above is proportional to it, \
          so re-measure and update the figures in this file's module docs."
     );

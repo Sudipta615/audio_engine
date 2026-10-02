@@ -27,6 +27,8 @@ lets non-Rust hosts drive the whole surface.
 │                               #   dlopen loader, static registry)
 ├── crates/plugin-test-echo/    # `plugin-test-echo` crate — the reference
 │                               #   delay+gain plugin (cdylib + rlib)
+├── crates/tui/                 # `engine-tui` crate — the terminal UI
+│                               #   (`engine-tui` binary; ratatui+crossterm)
 ├── crates/opus-decoder/        # vendored RFC 8251 Opus decoder (a fork of the
 │                               #   crates.io 0.1.1; see Cargo.toml for why).
 │                               #   Edition 2024, so the workspace needs
@@ -99,16 +101,22 @@ lets non-Rust hosts drive the whole surface.
 └── tests/                      # headless + `tests/fidelity/` DSP/decoder suites
 ```
 
-Four crates ship versions that **must stay in lockstep** (see Versioning):
+Five crates ship versions that **must stay in lockstep** (see Versioning):
 `engine` (workspace root), `config` (`crates/config`), `plugin-abi`
-(`crates/plugin-abi`), and `plugin-test-echo` (`crates/plugin-test-echo`).
+(`crates/plugin-abi`), `plugin-test-echo` (`crates/plugin-test-echo`), and
+`engine-tui` (`crates/tui`).
 All four are **workspace members** — `crates/opus-decoder` is a fifth member
 but deliberately sits on its own 0.1.x line.
 
 They are members but do NOT inherit `[workspace.package].version`: they are an
 independently versioned realtime product lineage whose versions do not track
 Ultimate Engine's 1.x series, so each states its own version and moves in
-lockstep by policy. That distinction is load-bearing — when these crates were
+lockstep by policy.
+
+`engine-tui` is a workspace member **rather than a module** in the root crate so
+`ratatui`/`crossterm` are never pulled into a library integrator's dependency
+tree — a host that links `audio-engine` for its DSP should not inherit a
+terminal UI framework. Both are pure Rust, so the no-FFI property holds. That distinction is load-bearing — when these crates were
 path dependencies with no `[workspace]` table, every `--workspace` command in
 CI silently resolved to the root package alone and 56 tests across them never
 ran.
@@ -144,9 +152,11 @@ Adopt strict [Semantic Versioning](https://semver.org) with the form
 
 ### Rules — every version bump MUST do all of this in the same commit/PR
 
-1. Bump **both** crate versions in lockstep:
+1. Bump **all five** crate versions in lockstep:
    - `Cargo.toml` → `[package] version` for `engine`
    - `crates/config/Cargo.toml` → `[package] version` for `config`
+   - `crates/plugin-abi/Cargo.toml`, `crates/plugin-test-echo/Cargo.toml`,
+     `crates/tui/Cargo.toml`
 2. Add a dated `## [X.Y.Z] — <ISO date>` section at the **top** of `CHANGELOG.md`,
    with `### Added`, `### Fixed`, `### Changed` subsections as applicable. Keep the
    existing entry format; pre-release segments are discouraged for this project.
@@ -242,7 +252,8 @@ patterns are:
 
 Before considering a change "complete", verify:
 
-- [ ] **Versions in sync**: `engine` and `config` Cargo.toml versions match the new
+- [ ] **Versions in sync**: `engine`, `config`, `plugin-abi`,
+      `plugin-test-echo` and `engine-tui` Cargo.toml versions match the new
       CHANGELOG entry (see Versioning).
 - [ ] **CHANGELOG updated** at the top with a dated section for every user-visible
       change.
@@ -264,6 +275,11 @@ Before considering a change "complete", verify:
 - [ ] **Docs consistent**: `README.md`, `docs/ARCHITECTURE.md`, `docs/SIGNAL_FLOW.md`,
       and `docs/EMBEDDING.md` still describe the real layout and
       behavior; update the module map when you add/move/remove a module.
+- [ ] **New `EngineCommand` variants have a handle method and read-back.** The
+      control surface is write-only at the enum level, so a variant with no
+      `EngineHandle` setter and no field in `EngineSettings` is unreachable
+      from a typed host and invisible to a UI. Adding a command means adding
+      both, plus a case in `src/engine/tests/settings.rs`.
 - [ ] **License file present**: `LICENSE-APACHE` exists at the repo root (do not
       remove it), the Cargo.toml `license` field is `Apache-2.0`, and the README
       declares the Apache-2.0 license — all three must stay in sync.

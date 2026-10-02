@@ -62,6 +62,32 @@ impl AudioEngine {
         output_buffer: Arc<FixedFrameBuffer>,
         sample_sink: Box<dyn SampleSink>,
     ) -> Result<Self, EngineError> {
+        // Validate before anything is built. A config error is a value the
+        // engine cannot honour at all — `mix_slots < 2` has no valid graph,
+        // a non-finite trim gain would be clamped into something the caller
+        // never asked for — so the honest response is to refuse the config
+        // rather than build a graph whose behaviour differs from the file
+        // that produced it. Warnings are logged and retained on the engine
+        // for the host to read back via `EngineHandle::config_validation`.
+        let config_validation = config.validate();
+        for issue in &config_validation.issues {
+            match issue.severity {
+                config::ConfigSeverity::Error => {
+                    return Err(EngineError::Config(format!(
+                        "config validation [{}]: {}",
+                        issue.kind.code(),
+                        issue.message
+                    )));
+                }
+                config::ConfigSeverity::Warning => {
+                    log::warn!(
+                        "config validation [{}]: {}",
+                        issue.kind.code(),
+                        issue.message
+                    );
+                }
+            }
+        }
         let (cmd_tx, cmd_rx) = channel::bounded(256);
         let (event_tx, event_rx) = channel::bounded(256);
         #[cfg(feature = "audio-output")]
@@ -84,7 +110,7 @@ impl AudioEngine {
         #[cfg(feature = "audio-output")]
         let device_monitor = DeviceMonitor::new(config.output_backend, Duration::from_millis(1500));
 
-        Ok(Self {
+        let mut engine = Self {
             output_buffer,
             sample_sink,
             cmd_tx,
@@ -104,6 +130,7 @@ impl AudioEngine {
             playlist: Playlist::new(),
             analyzer: Arc::new(crate::dsp::AudioAnalyzer::new_default()),
             config,
+            config_validation,
             duration_secs: 0.0,
             output_sample_rate,
             speed: 1.0,
@@ -141,7 +168,38 @@ impl AudioEngine {
                 output_sample_rate,
                 2,
             )),
-        })
+            graph_build: Arc::new(super::GraphBuildStats::default()),
+        };
+        // Let the graph mirror its rebuild cost into the block the handles
+        // read. Done after construction because the graph is built inside the
+        // struct literal.
+        let build = Arc::clone(&engine.graph_build);
+        engine
+            .graph
+            .with_graph(|g| g.set_build_stats(Arc::clone(&build)));
+        Ok(engine.with_initial_settings())
+    }
+
+    /// Publish a correct settings snapshot immediately, before the first tick.
+    ///
+    /// The telemetry cadence that normally refreshes `PlaybackInfo::settings`
+    /// is gated at two seconds, which would leave a freshly-constructed engine
+    /// advertising empty EQ and compressor band lists — and a UI would render
+    /// that as "this engine has no EQ bands", not "this engine has not polled
+    /// yet". Seeding the snapshot here means the very first read a host makes
+    /// is already truthful.
+    fn with_initial_settings(self) -> Self {
+        // `ArcSwap::rcu` may re-invoke the closure if the compare-exchange
+        // loses a race, so the closure must be idempotent: clone inside it
+        // rather than moving out of a captured binding. This runs exactly
+        // once per engine, so the clone is free in practice.
+        let settings = Arc::new(self.snapshot_settings());
+        self.playback_info.rcu(|old| {
+            let mut next: crate::buffer::PlaybackInfo = old.as_ref().clone();
+            next.settings = Arc::clone(&settings);
+            Arc::new(next)
+        });
+        self
     }
 
     /// Convenience constructor using the default configuration.
@@ -314,6 +372,7 @@ impl AudioEngine {
             Arc::clone(&self.analyzer),
             Arc::clone(&self.meters),
             Arc::clone(&self.wake),
+            Arc::clone(&self.graph_build),
         )
     }
 }

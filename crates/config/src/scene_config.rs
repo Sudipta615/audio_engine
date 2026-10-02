@@ -28,6 +28,7 @@ fn default_scene_rate() -> u32 {
 /// = facing `+Y`). The quaternion is lossless — no Euler decomposition is
 /// involved in a scene round-trip.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SceneListenerConfig {
     #[serde(default)]
     pub position: [f32; 3],
@@ -66,6 +67,7 @@ pub enum BassIntent {
 /// A point/extended source (spec §13.2): position in metres, gain, spread,
 /// and its sends into the room / LFE paths.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialObjectConfig {
     #[serde(default)]
     pub name: String,
@@ -290,6 +292,7 @@ impl Default for SpatialObjectConfig {
 /// names, e.g. `["FL", "FR", "C", "LFE", "SL", "SR"]`) plus gain. The
 /// renderer routes each channel by its role.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialBedConfig {
     #[serde(default)]
     pub name: String,
@@ -319,6 +322,7 @@ impl Default for SpatialBedConfig {
 /// A diffuse field (spec §13.3): rain, wind, ambience — positionless,
 /// decoded to surrounding ambience.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialFieldConfig {
     #[serde(default)]
     pub name: String,
@@ -342,6 +346,7 @@ impl Default for SpatialFieldConfig {
 /// fields + room. Content only — the renderer and output layout are host
 /// choices.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialSceneConfig {
     #[serde(default = "default_scene_rate")]
     pub sample_rate: u32,

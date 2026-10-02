@@ -376,6 +376,15 @@ impl LookaheadLimiter {
         self.attack_coeff = (-1.0_f32 / (self.attack_secs * self.sample_rate)).exp();
     }
 
+    /// Attack time in milliseconds, recovered from `attack_secs`.
+    ///
+    /// Reported for settings read-back. This is the value after
+    /// [`Self::set_attack`]'s clamp, so it reflects what the limiter is
+    /// actually doing rather than what was requested.
+    pub fn attack_ms(&self) -> f32 {
+        self.attack_secs * 1000.0
+    }
+
     pub fn set_release(&mut self, release_ms: f32) {
         if !release_ms.is_finite() || release_ms <= 0.0 {
             log::warn!(

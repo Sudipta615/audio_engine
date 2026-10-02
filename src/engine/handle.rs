@@ -15,6 +15,7 @@ use crossbeam::channel::{Receiver, Sender};
 
 use crate::buffer::{EngineCommand, PlaybackInfo, PlaybackState};
 use crate::engine::cue_split::PregapPolicy;
+use crate::engine::GraphBuildStats;
 use crate::events::{EngineEvent, OutputEvent};
 use crate::source::AudioSource;
 
@@ -34,6 +35,10 @@ pub struct EngineHandle {
     /// Wakes the tick pump, so a command takes effect now rather than at the
     /// pump's next idle timeout.
     wake: Arc<crate::engine::EngineWake>,
+    /// Mirror of the graph control bus's rebuild-cost counters, published by
+    /// the engine thread on the telemetry cadence so a UI can read them
+    /// without touching the graph. See [`Self::last_graph_build_ms`].
+    graph_build: Arc<GraphBuildStats>,
 }
 
 impl std::fmt::Debug for EngineHandle {
@@ -56,6 +61,7 @@ impl EngineHandle {
         analyzer: Arc<crate::dsp::AudioAnalyzer>,
         meters: Arc<crate::dsp::meters::ProfessionalMeters>,
         wake: Arc<crate::engine::EngineWake>,
+        graph_build: Arc<GraphBuildStats>,
     ) -> Self {
         Self {
             cmd_tx,
@@ -66,7 +72,38 @@ impl EngineHandle {
             analyzer,
             meters,
             wake,
+            graph_build: Arc::clone(&graph_build),
         }
+    }
+
+    /// Cost of the most recent graph reconfiguration, in milliseconds.
+    ///
+    /// Building a generation allocates megabytes — the mix-bus planes, the
+    /// node arena, the plan set and the scratch — then hands the whole thing
+    /// over for a swap, blocking the control thread for the duration.
+    ///
+    /// This is deliberately *not* folded into `cpu_usage_pct`. The telemetry
+    /// window is two seconds, so a millisecond-scale spike on a single tick
+    /// averages away to nothing: a host that rebuilds the graph on every
+    /// slider drag sees a smooth CPU graph and a stuttering UI, with nothing
+    /// in the ordinary telemetry pointing at the cause.
+    ///
+    /// Reference points: a 48 kHz / 512-frame block deadline is ~2.7 ms, and a
+    /// full rebuild measures in the tens of milliseconds on the reference
+    /// machine. If this approaches your block deadline, throttle rebuilds
+    /// rather than letting them run per input event.
+    ///
+    /// `0.0` before the first rebuild. The initial construction is *not*
+    /// counted: it happens once, before playback, and would otherwise dominate
+    /// the mean.
+    pub fn last_graph_build_ms(&self) -> f64 {
+        self.graph_build.last_ms()
+    }
+
+    /// Mean graph-rebuild cost in milliseconds, and how many rebuilds have
+    /// happened. See [`Self::last_graph_build_ms`].
+    pub fn graph_build_stats(&self) -> (f64, u64) {
+        self.graph_build.mean_ms_and_count()
     }
 
     /// Send a raw [`EngineCommand`] directly to the engine.
@@ -385,11 +422,155 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::SetPitch(semitones));
     }
 
+    // ── Multi-Track Lanes ───────────────────────────────────────────────
+
+    /// Add a track as an independent lane on the first free mix-bus slot ≥ 2,
+    /// playing alongside the primary stream.
+    ///
+    /// This is the typed entry point to the multi-lane feature. The same
+    /// command is available on [`EngineCommand`] for hosts that prefer the raw
+    /// enum; both routes are handled identically by the engine.
+    ///
+    /// [`EngineCommand`]: crate::commands::EngineCommand
+    pub fn add_track(&self, source: impl Into<AudioSource>) {
+        let _ = self.send_command(EngineCommand::AddTrack(source.into()));
+    }
+
+    /// Remove the lane on `slot` (if any) and silence it.
+    pub fn remove_track(&self, slot: u8) {
+        let _ = self.send_command(EngineCommand::RemoveTrack(slot));
+    }
+
+    /// Set a lane's linear gain in `[0.0, 1.0]`.
+    pub fn set_track_gain(&self, slot: u8, gain: f32) {
+        let _ = self.send_command(EngineCommand::SetTrackGain { slot, gain });
+    }
+
+    /// Set a lane's pan in `[-1.0, 1.0]`.
+    pub fn set_track_pan(&self, slot: u8, pan: f32) {
+        let _ = self.send_command(EngineCommand::SetTrackPan { slot, pan });
+    }
+
+    /// Set a lane's post-fader master-send gain in `[0.0, 1.0]`: scales the
+    /// lane's contribution to the master sum, independent of its user gain.
+    pub fn set_track_master_gain(&self, slot: u8, gain: f32) {
+        let _ = self.send_command(EngineCommand::SetTrackMasterGain { slot, gain });
+    }
+
+    /// Set a lane's post-fader aux-send gain in `[0.0, 1.0]`: taps the lane's
+    /// signal into the aux bus accumulator.
+    pub fn set_track_send(&self, slot: u8, gain: f32) {
+        let _ = self.send_command(EngineCommand::SetTrackSend { slot, gain });
+    }
+
+    /// Configure program-gated ducking across lanes.
+    ///
+    /// When `source_slot`'s peak rises above `threshold_db`, every slot in
+    /// `targets` is attenuated by `depth_db` with the given attack/release.
+    /// Passing an empty `targets` list disables the derivation.
+    pub fn duck_tracks(
+        &self,
+        source_slot: u8,
+        targets: Vec<u8>,
+        threshold_db: f32,
+        depth_db: f32,
+        attack_ms: f32,
+        release_ms: f32,
+    ) {
+        let _ = self.send_command(EngineCommand::DuckTracks {
+            source_slot,
+            targets,
+            threshold_db,
+            depth_db,
+            attack_ms,
+            release_ms,
+        });
+    }
+
     // ── Equalizer & Audio Shaping ───────────────────────────────────────
 
     /// Enable or disable the parametric EQ.
     pub fn set_eq_enabled(&self, enabled: bool) {
         let _ = self.send_command(EngineCommand::SetEqEnabled(enabled));
+    }
+
+    /// Transactionally reconfigure the whole engine from a complete config.
+    ///
+    /// The one-shot counterpart to the per-stage setters, and the right tool
+    /// whenever more than one setting changes together — four individual
+    /// toggles produce four rebuilds and four audible transitions, this
+    /// produces one. A config carrying errors is refused rather than
+    /// half-applied, matching the constructor's contract.
+    pub fn reconfigure(&self, config: config::EngineConfig) {
+        let _ = self.send_command(EngineCommand::Reconfigure(config));
+    }
+
+    /// Apply a named preset's policy over the live config.
+    ///
+    /// Only the fields the preset actually changes from the baseline are
+    /// taken, so this never resets EQ bands, loaded IRs, the endpoint list, or
+    /// the spatial scene — those are per-machine facts a preset has no
+    /// opinion about. `Consumer` is exactly the default config and therefore
+    /// a no-op; `Fidelity` disables the stages it names and leaves the rest.
+    pub fn load_preset(&self, preset: config::EnginePreset) {
+        let _ = self.send_command(EngineCommand::LoadPreset(preset));
+    }
+
+    /// Enable or disable automatic EQ headroom.
+    ///
+    /// When enabled the engine reserves the curve's own peak boost as pre-EQ
+    /// attenuation and keeps it updated as bands change; disabling restores
+    /// the manual headroom.
+    pub fn set_eq_auto_headroom(&self, enabled: bool) {
+        let _ = self.send_command(EngineCommand::SetEqAutoHeadroom(enabled));
+    }
+
+    /// Enable or disable the dynamic-EQ corrective layer.
+    ///
+    /// The layer runs *in front of* the static EQ bands and reacts to the
+    /// material; it is a no-op unless `config.eq.dynamic_eq.bands` is
+    /// non-empty, which is why arming it needs no band argument here. See
+    /// [`EngineCommand::SetDynamicEqEnabled`].
+    pub fn set_dynamic_eq_enabled(&self, enabled: bool) {
+        let _ = self.send_command(EngineCommand::SetDynamicEqEnabled(enabled));
+    }
+
+    /// Set one dynamic-EQ band's full parameter set.
+    ///
+    /// Out-of-range indices are logged and dropped. A band set this way is
+    /// mirrored into `EngineConfig`, so it survives a generation rebuild; note
+    /// the rebuild restores that band's detector to the default, because the
+    /// serialized form does not carry it.
+    pub fn set_dynamic_eq_band(
+        &self,
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    ) {
+        let _ = self.send_command(EngineCommand::SetDynamicEqBand { index, params });
+    }
+
+    /// Set a band's full parameter set, including its filter type.
+    ///
+    /// The layout-preserving [`Self::set_eq_band`] picks the filter type from
+    /// the band index (shelves at the ends, peaking in the middle); this
+    /// variant lets a host choose explicitly.
+    pub fn set_eq_band_params(
+        &self,
+        index: usize,
+        frequency: f32,
+        gain_db: f32,
+        q: f32,
+        filter_type: crate::dsp::equalizer::EqFilterType,
+        enabled: bool,
+    ) {
+        let _ = self.send_command(EngineCommand::SetEqBandParams {
+            index,
+            frequency,
+            gain_db,
+            q,
+            filter_type,
+            enabled,
+        });
     }
 
     /// Load a complete EQ preset (e.g. AutoEQ).
@@ -423,9 +604,75 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::SetGraphicEqEnabled(enabled));
     }
 
+    /// Set the Graphic EQ preamp in dB.
+    pub fn set_graphic_eq_preamp(&self, db: f32) {
+        let _ = self.send_command(EngineCommand::SetGraphicEqPreamp(db));
+    }
+
+    /// Set the dedicated bass shelf gain in dB (clamped to ±30 by the EQ).
+    pub fn set_bass_shelf(&self, gain_db: f32) {
+        let _ = self.send_command(EngineCommand::SetBassShelf(gain_db));
+    }
+
+    /// Set the dedicated treble shelf gain in dB (clamped to ±30 by the EQ).
+    pub fn set_treble_shelf(&self, gain_db: f32) {
+        let _ = self.send_command(EngineCommand::SetTrebleShelf(gain_db));
+    }
+
+    /// Enable or disable M/S (mid/side) EQ mode.
+    pub fn set_midside_eq(&self, enabled: bool) {
+        let _ = self.send_command(EngineCommand::SetMidsideEq(enabled));
+    }
+
     /// Set stereo enhancer width `[0.0 .. 2.0]`.
     pub fn set_stereo_width(&self, width: f32) {
         let _ = self.send_command(EngineCommand::SetStereoWidth(width));
+    }
+
+    // ── Dynamics ─────────────────────────────────────────────────────────
+
+    /// Enable or disable the multiband compressor.
+    pub fn set_compressor_enabled(&self, enabled: bool) {
+        let _ = self.send_command(EngineCommand::SetCompressorEnabled(enabled));
+    }
+
+    /// Set one compressor band's threshold / ratio / attack / release /
+    /// makeup gain. `band` is `0 = Low`, `1 = Mid`, `2 = High`.
+    #[allow(clippy::too_many_arguments, reason = "Mirrors the command's payload.")]
+    pub fn set_compressor_band_params(
+        &self,
+        band: usize,
+        threshold_db: f32,
+        ratio: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        makeup_gain_db: f32,
+    ) {
+        let _ = self.send_command(EngineCommand::SetCompressorBandParams {
+            band,
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+            makeup_gain_db,
+        });
+    }
+
+    // ── Transitions ──────────────────────────────────────────────────────
+
+    /// Set the crossfade configuration (shape-independent fields).
+    pub fn set_crossfade_config(&self, config: config::CrossfadeConfig) {
+        let _ = self.send_command(EngineCommand::SetCrossfadeConfig(config));
+    }
+
+    /// Set the crossfade curve shape.
+    pub fn set_crossfade_curve(&self, curve: config::CrossfadeCurve) {
+        let _ = self.send_command(EngineCommand::SetCrossfadeCurve(curve));
+    }
+
+    /// Set the track transition mode (Gapless, Crossfade, Fade, Stop).
+    pub fn set_transition_mode(&self, mode: config::TransitionMode) {
+        let _ = self.send_command(EngineCommand::SetTransitionMode(mode));
     }
 
     // ── Spatial & Headphone Processing ──────────────────────────────────
@@ -493,6 +740,42 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::SetOutputBackend(backend));
     }
 
+    /// Set the fallback policy for exclusive-mode acquisition.
+    pub fn set_fallback_policy(&self, policy: config::FallbackPolicy) {
+        let _ = self.send_command(EngineCommand::SetFallbackPolicy(policy));
+    }
+
+    /// Install an explicit output profile and apply it to the active device.
+    ///
+    /// The profile's backend preference is honored at stream (re)creation.
+    #[cfg(feature = "audio-output")]
+    pub fn set_output_profile(&self, profile: crate::output::OutputProfile) {
+        let _ = self.send_command(EngineCommand::SetOutputProfile(profile));
+    }
+
+    /// Remove the explicit output profile; auto-selection resumes.
+    #[cfg(feature = "audio-output")]
+    pub fn clear_output_profile(&self) {
+        let _ = self.send_command(EngineCommand::ClearOutputProfile);
+    }
+
+    /// Set the DSP precision mode (f32 Performance / f64 Quality).
+    pub fn set_precision_mode(&self, mode: crate::dsp::pipeline::PrecisionMode) {
+        let _ = self.send_command(EngineCommand::SetPrecisionMode(mode));
+    }
+
+    /// Request stream recovery after a device disconnection or error.
+    ///
+    /// [`EngineCommand::AutoRecoverStream`] is deliberately **not** mirrored
+    /// here: it is an engine-internal marker the background device-monitor
+    /// thread injects, and it no-ops whenever the live stream reports healthy.
+    /// A host that wants recovery asks for it explicitly, like this.
+    ///
+    /// [`EngineCommand::AutoRecoverStream`]: crate::commands::EngineCommand::AutoRecoverStream
+    pub fn recover_stream(&self) {
+        let _ = self.send_command(EngineCommand::RecoverStream);
+    }
+
     /// Configure additional physical output endpoints.
     #[cfg(feature = "audio-output")]
     pub fn set_endpoints(&self, endpoints: Vec<config::EndpointConfig>) {
@@ -504,6 +787,15 @@ impl EngineHandle {
     /// stays as configured. No-op when no IR engine exists yet.
     pub fn set_aux_insert(&self, enabled: bool, wet_mix: f32) {
         let _ = self.send_command(EngineCommand::SetAuxInsert { enabled, wet_mix });
+    }
+
+    /// Set the main convolution insert's wet/dry mix.
+    ///
+    /// Distinct from [`Self::set_aux_insert`], which drives the *aux bus*
+    /// insert. This one addresses the convolution stage in the canonical
+    /// chain; see `EngineCommand::SetConvolutionWetMix`.
+    pub fn set_convolution_wet_mix(&self, wet_mix: f32) {
+        let _ = self.send_command(EngineCommand::SetConvolutionWetMix(wet_mix));
     }
 
     // ── Plugin host ──────────────────────────────────────
@@ -731,6 +1023,40 @@ impl EngineHandle {
     }
 
     // ── Telemetry & State Inspection ────────────────────────────────────
+
+    /// Read back every user-settable control.
+    ///
+    /// The engine's control surface is otherwise **write-only** — every
+    /// [`EngineCommand`] is fire-and-forget, and the engine clamps and
+    /// range-checks on the way in, so a host that shadows these values
+    /// itself drifts from what is actually running. This is the
+    /// authoritative answer, sampled on the same `ArcSwap` cadence as
+    /// [`Self::playback_info`] and read out of its `settings` field.
+    ///
+    /// The snapshot lags a command by at most one telemetry interval; it is
+    /// a display surface, not a synchronisation primitive.
+    ///
+    /// Cloning costs two small `Vec`s (EQ bands, compressor bands) plus the
+    /// graphic-EQ slider list, which is cheap enough for a 30–60 Hz UI poll.
+    pub fn settings(&self) -> crate::engine::EngineSettings {
+        // Cloned out of the shared `Arc`, so the per-band `Vec`s are only
+        // allocated for a caller that actually reads them.
+        (*self.playback_info.load().settings).clone()
+    }
+
+    /// Cheap variant of [`Self::settings`] that touches only the top-level
+    /// scalars (volume, speed, precision, backend, stage enables).
+    ///
+    /// Avoids the per-band `Vec` allocations when a caller only needs to
+    /// redraw a status line.
+    pub fn settings_summary(&self) -> crate::engine::EngineSettings {
+        let info = self.playback_info.load();
+        let mut s = (*info.settings).clone();
+        s.eq_bands.clear();
+        s.compressor_bands.clear();
+        s.graphic_eq_sliders_db.clear();
+        s
+    }
 
     /// Fetch an atomic, lock-free snapshot of current [`PlaybackInfo`].
     pub fn playback_info(&self) -> PlaybackInfo {

@@ -7,6 +7,7 @@ use super::enums::{
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CrossfadeConfig {
     pub enabled: bool,
     pub duration_ms: u64,
@@ -24,6 +25,7 @@ impl Default for CrossfadeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EqBandConfig {
     pub enabled: bool,
     pub filter_type: FilterType,
@@ -80,9 +82,72 @@ impl Default for DynamicEqBandConfig {
 
 /// Configuration for multi-band dynamic EQ.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DynamicEqConfig {
     pub enabled: bool,
     pub bands: Vec<DynamicEqBandConfig>,
+}
+
+impl DynamicEqConfig {
+    /// A ready-to-use four-band corrective set, disabled by default.
+    ///
+    /// The layout is the conventional dynamic-EQ *correction* set rather than
+    /// a musical one: a subsonic high-pass, a rumble notch, a mud low-mid cut,
+    /// and a presence/air shelf. Each reacts to the material, which is what a
+    /// dynamic layer is for — tonal shaping belongs to the static bands.
+    ///
+    /// Ships `enabled: false`: turning a corrective layer onto someone's
+    /// library unasked is not a default worth having.
+    pub fn default_corrective_set() -> Self {
+        Self {
+            enabled: false,
+            bands: vec![
+                DynamicEqBandConfig {
+                    filter_type: FilterType::HighPass,
+                    frequency: 25.0,
+                    q: 0.707,
+                    dynamic_gain_db: -6.0,
+                    threshold_db: -20.0,
+                    ratio: 2.0,
+                    range_db: 12.0,
+                    enabled: true,
+                    ..Default::default()
+                },
+                DynamicEqBandConfig {
+                    filter_type: FilterType::Notch,
+                    frequency: 60.0,
+                    q: 3.0,
+                    dynamic_gain_db: -6.0,
+                    threshold_db: -22.0,
+                    ratio: 3.0,
+                    range_db: 12.0,
+                    enabled: true,
+                    ..Default::default()
+                },
+                DynamicEqBandConfig {
+                    filter_type: FilterType::Peaking,
+                    frequency: 350.0,
+                    q: 1.0,
+                    dynamic_gain_db: -4.0,
+                    threshold_db: -18.0,
+                    ratio: 2.0,
+                    enabled: true,
+                    ..Default::default()
+                },
+                DynamicEqBandConfig {
+                    filter_type: FilterType::HighShelf,
+                    frequency: 8000.0,
+                    q: 0.707,
+                    dynamic_gain_db: 3.0,
+                    threshold_db: -24.0,
+                    ratio: 1.5,
+                    range_db: 6.0,
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
 }
 
 /// A named EQ preset, optionally scoped to a specific output device.
@@ -143,6 +208,7 @@ impl EqPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EqConfig {
     pub enabled: bool,
     pub preamp_db: f32,
@@ -156,6 +222,14 @@ pub struct EqConfig {
     /// Saved presets (serialized alongside the config).
     #[serde(default)]
     pub presets: Vec<EqPreset>,
+    /// Dynamic-EQ corrective layer, applied *before* the static bands.
+    ///
+    /// `#[serde(default)]` so a config file written before this field existed
+    /// keeps parsing. The default is `enabled: false` with no bands, which
+    /// makes the layer a structural no-op — the static-only path stays
+    /// bit-exact for every pre-existing configuration.
+    #[serde(default)]
+    pub dynamic_eq: DynamicEqConfig,
 }
 
 impl EqConfig {
@@ -194,6 +268,7 @@ impl EqConfig {
             auto_headroom: false,
             bands,
             presets: Vec::new(),
+            dynamic_eq: DynamicEqConfig::default(),
         }
     }
 }
@@ -293,6 +368,7 @@ impl GraphicEqLayout {
 /// `EqConfig` bands are ignored until the graphic EQ is disabled). When
 /// disabled, the plain `EqConfig` drives the EQ.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GraphicEqConfig {
     pub enabled: bool,
     pub layout: GraphicEqLayout,
@@ -365,11 +441,13 @@ impl Default for EqConfig {
                 },
             ],
             presets: Vec::new(),
+            dynamic_eq: DynamicEqConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoudnessConfig {
     pub mode: LoudnessMode,
     pub target_lufs: f32,
@@ -402,6 +480,7 @@ impl Default for LoudnessConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CrossfeedConfig {
     pub enabled: bool,
     pub profile: CrossfeedProfile,
@@ -423,6 +502,7 @@ impl Default for CrossfeedConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StereoEnhancerConfig {
     pub enabled: bool,
     pub width: f32,
@@ -438,6 +518,7 @@ impl Default for StereoEnhancerConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimiterConfig {
     pub enabled: bool,
     pub lookahead_ms: f32,
@@ -468,6 +549,7 @@ fn default_stereo_link() -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BandConfig {
     pub threshold_db: f32,
     pub ratio: f32,
@@ -505,6 +587,7 @@ impl Default for BandConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MultibandCompressorConfig {
     pub enabled: bool,
     pub low_band: BandConfig,
@@ -513,6 +596,7 @@ pub struct MultibandCompressorConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ConvolutionConfig {
     pub enabled: bool,
     pub wet_mix: f32,
@@ -529,6 +613,7 @@ pub struct ConvolutionConfig {
 /// pipeline's balance control instead — these entries are intentionally not
 /// applied to the front L/R pair of a downmixed stereo stream.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChannelTrimEntry {
     /// 0-based output channel index this entry applies to.
     pub channel: usize,
@@ -580,6 +665,7 @@ pub struct ChannelRoutingConfig {
 /// [`crate::decode::ChannelId::Lfe`] (derived from the active channel layout),
 /// plus an optional LFE low-pass filter (bass management, spec §17/§34).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LfeConfig {
     pub enabled: bool,
     /// Gain in dB applied to LFE-role channels (0.0 = unity).
@@ -673,6 +759,7 @@ pub enum CrossoverFilterType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BassManagementConfig {
     pub enabled: bool,
     /// Enable the mains high-pass section.
@@ -756,6 +843,7 @@ pub enum ChannelMixTemplate {
 
 /// Configuration for explicit upmix/downmix at the decode/output boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChannelMixConfig {
     pub enabled: bool,
     pub template: ChannelMixTemplate,
@@ -812,6 +900,7 @@ pub enum CorrectionTarget {
 /// IRs wired without a separate load command. A missing/unreadable IR
 /// leaves the node inactive — bit-exact passthrough.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CorrectionConfig {
     #[serde(default)]
     pub enabled: bool,

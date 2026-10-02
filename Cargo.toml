@@ -13,7 +13,7 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on.
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
@@ -42,6 +42,7 @@ members = [
     "crates/config",
     "crates/plugin-abi",
     "crates/plugin-test-echo",
+    "crates/tui",
     "crates/opus-decoder",
 ]
 resolver = "2"
@@ -234,6 +235,10 @@ lofty = { version = "0.22", optional = true }
 # bit-identical drop-in for the reference Chromaprint, used for track
 # identification via the AcoustID service.
 chromaprint-next = { version = "0.1", optional = true }
+# Terminal UI for the `audio-engine-tui` binary. Both are pure Rust, so the
+# "100% pure Rust, no FFI" property of the workspace is preserved.
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 # (WavPack previously used a runtime-loaded `libwavpack` via `libloading`;
 # removed — see `codec-wavpack` above. No native codec backend now needs
 # `libloading`.)

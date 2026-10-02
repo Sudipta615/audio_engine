@@ -119,6 +119,16 @@ impl AudioEngine {
         // a control-plane observer reading `EngineHandle::graph_generation`
         // never sees a value the graph itself does not hold.
         self.publish_graph_generation();
+        // Publish the settings read-back whenever a command actually landed.
+        // The main telemetry cadence below is gated at two seconds, which
+        // would leave a UI showing a toggle's old value for up to two seconds
+        // after the user pressed it. This is not that gate's job: it runs
+        // exactly once per tick that had work to do, and commands are
+        // user-driven (never per-sample), so the extra `ArcSwap` clone is
+        // bounded by the host's own input rate.
+        if processed_commands > 0 {
+            self.publish_settings();
+        }
         // Persist the active spatial scene when it changed (writes
         // once per change; the steady path is a plain field compare).
         self.spatial_persistence.maybe_save(&self.graph);
@@ -442,6 +452,11 @@ impl AudioEngine {
             // expensive part of building them.
             let mut stats = Some(stats);
             let mut lanes = Some(lanes);
+            // Built outside the `FnMut` closure for the same reason: the
+            // closure cannot borrow `self` mutably, and the snapshot reads
+            // the live graph nodes. `Arc` so the publish stays a refcount
+            // bump rather than a deep copy of the per-band vectors.
+            let mut settings = Some(std::sync::Arc::new(self.snapshot_settings()));
             self.playback_info.rcu(|old| {
                 let mut next: PlaybackInfo = old.as_ref().clone();
                 next.cpu_usage_pct = cpu_pct;
@@ -484,6 +499,13 @@ impl AudioEngine {
                 next.meters = Some(self.meters.snapshot());
                 next.bit_perfect = is_bp;
                 next.node_diagnostics = self.graph.node_diagnostics();
+                // Write-only control surface made readable: every setter
+                // a host can drive has a matching read-back here, so a UI
+                // never has to shadow engine state it cannot query.
+                if let Some(s) = settings.take() {
+                    next.settings = s;
+                }
+
                 Arc::new(next)
             });
             self.telemetry.dsp_time = Duration::ZERO;
@@ -613,6 +635,31 @@ impl AudioEngine {
         });
     }
 
+    /// Publish a fresh [`EngineSettings`] read-back into the snapshot.
+    ///
+    /// Separate from the two-second telemetry cadence so that a control the
+    /// host just changed is visible on the next tick rather than up to two
+    /// seconds later. Skips the write when nothing that the snapshot reports
+    /// has actually moved, which keeps a stream of no-op commands (a slider
+    /// held at its clamp, say) from churning the `ArcSwap`.
+    pub(crate) fn publish_settings(&self) {
+        let settings = std::sync::Arc::new(self.snapshot_settings());
+        {
+            let current = self.playback_info.load();
+            if *current.settings == *settings {
+                // Nothing the read-back reports has moved. Returning here is
+                // what keeps a stream of no-op commands (a slider held at its
+                // clamp, say) from churning the `ArcSwap` at the input rate.
+                return;
+            }
+        }
+        self.playback_info.rcu(|old| {
+            let mut next = old.as_ref().clone();
+            next.settings = std::sync::Arc::clone(&settings);
+            Arc::new(next)
+        });
+    }
+
     pub fn playback_info_arc(&self) -> Arc<ArcSwap<PlaybackInfo>> {
         Arc::clone(&self.playback_info)
     }
@@ -626,6 +673,15 @@ impl AudioEngine {
 
     pub fn config(&self) -> &config::EngineConfig {
         &self.config
+    }
+
+    /// The validation result captured when this engine was constructed.
+    ///
+    /// `errors` is always empty on a live engine — a config with errors is
+    /// refused by the constructor. `warnings` and the typed `issues` list are
+    /// what remains actionable, e.g. "all DSP off but dither enabled".
+    pub fn config_validation(&self) -> &config::ConfigValidation {
+        &self.config_validation
     }
 
     pub fn set_config(&mut self, config: config::EngineConfig) {

@@ -524,9 +524,61 @@ int main(int argc, char** argv) {
 | `duration_secs()` | track duration (s) |
 | `volume()` / `speed()` / `latency_ms()` | live values |
 | `playlist_len()` / `playlist_index()` | queue info |
+| `meters_snapshot()` | `ProfessionalMeterSnapshot` (peak, true-peak, RMS, LUFS) |
 | `analyzer()` | `Arc<AudioAnalyzer>` for `snapshot()` (levels + spectrum) |
 | `clone_event_receiver()` | `Receiver<EngineEvent>` |
 | `clone_output_event_receiver()` | `Receiver<OutputEvent>` (`audio-output` only) |
+| `settings()` | `EngineSettings` — read-back of every settable control |
+| `settings_summary()` | Same, minus the per-band `Vec`s (cheaper for a status line) |
+| `config_validation()` | `ConfigValidation` — warnings + typed issues from construction |
+| `last_graph_build_ms()` | Cost of the most recent graph rebuild (ms) |
+| `graph_build_stats()` | `(mean_ms, count)` for rebuilds since startup |
+
+### Reading state back
+
+`EngineCommand` is **write-only**: every control is a fire-and-forget message,
+and the engine clamps and range-checks on the way in. Do not shadow these
+values yourself — a shadow copy cannot know that a `+80 dB` band request was
+clamped to `+48`, that a `NaN` was refused, or that an out-of-range lane index
+was dropped, so it will drift from what is actually running.
+
+`EngineHandle::settings()` is the authoritative read-back:
+
+```rust
+use engine::{EngineHandle, EngineSettings};
+
+fn draw(handle: &EngineHandle) {
+    let s: EngineSettings = handle.settings();
+    for (i, band) in s.eq_bands.iter().enumerate() {
+        // These are the values the EQ *holds*, after clamping.
+        println!("band {i}: {:.0} Hz {:+.1} dB Q{:.2}", band.frequency, band.gain_db, band.q);
+    }
+    if !s.limiter.true_peak {
+        println!("warning: limiter is limiting samples, not reconstructed peaks");
+    }
+    let slot2_muted = s.input_muted(2);
+    let _ = slot2_muted;
+}
+```
+
+It covers EQ and dynamic-EQ bands, the compressor, limiter, crossfeed,
+convolution, correction, spatial, the mix bus and the output policy. Refreshed
+on any tick that processed a command, so it lags by at most one tick — it is a
+display surface, not a synchronisation primitive.
+
+For the reverse direction, `EngineCommand::Reconfigure(EngineConfig)` applies a
+whole config as one transactional rebuild, and `LoadPreset(EnginePreset)`
+merges a preset's *policy* over the live config while preserving your EQ
+curves, loaded impulse responses, device and mix topology.
+
+### Graph reconfiguration cost
+
+A generation build allocates megabytes (mix planes, node arena, plan set,
+scratch) and blocks the control thread. A 48 kHz / 512-frame block deadline is
+~2.7 ms; a full rebuild measures in the tens of milliseconds. **That spike is
+invisible in `cpu_usage_pct`**, whose two-second window averages it away — so
+if your UI rebuilds the graph on a slider drag, watch `last_graph_build_ms()`
+rather than the CPU figure, and throttle rebuilds.
 
 ### `EngineEvent` (discrete, async)
 

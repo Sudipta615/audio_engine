@@ -5,6 +5,141 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-10-02
+
+The control surface becomes readable, the configuration file becomes real, and
+two correctness gaps in the DSP path are closed. Every item here was found by
+measuring the engine rather than reading it, and each carries a regression
+test.
+
+### Added
+
+- **`EngineSettings`: a read-back of every user-settable control.**
+  `EngineCommand` was write-only — 120-odd fire-and-forget variants with no
+  way to ask what the engine actually held. A host that shadowed those values
+  itself drifted, because the engine clamps (`Biquad::validate_gain_db` caps a
+  band at ±48 dB), ignores non-finite input, drops out-of-range indices, and
+  preserves some fields across a generation rebuild while resetting others.
+  `EngineHandle::settings()` returns a lock-free snapshot (published on the
+  same `ArcSwap` as the rest of the telemetry; `settings_summary()` for the
+  cheap variant), covering EQ and dynamic-EQ bands, the compressor, limiter,
+  crossfeed, convolution, correction, spatial, the mix bus, and the output
+  policy. This was the missing prerequisite for any UI, including the new TUI.
+- **A terminal UI: the `engine-tui` binary, in a new `engine-tui` workspace
+  member.** A live, keyboard-driven front end — transport and position,
+  per-channel peak/true-peak metering, gain reduction, CPU and latency, an EQ
+  curve editor, compressor/limiter rows, spatial and output panels — driven
+  entirely through `EngineHandle`. It is a separate crate rather than a module
+  so `ratatui`/`crossterm` are never pulled into a library integrator's
+  dependency tree; both are pure Rust, so the workspace's no-FFI property
+  holds. `app` is free of terminal types, which is why the interaction model is
+  tested headlessly (21 tests) alongside render tests against ratatui's
+  `TestBackend`.
+- **Config files.** `config::EngineConfig::{load_file, save_file}` with TOML,
+  plus `engine-tui --config` and `audio-engine-cli --config`. Loading is a
+  *patch* over the defaults, so a partial file inherits rather than replaces.
+  `ConfigFileError` distinguishes unreadable / malformed / invalid, because
+  those need different responses, and an invalid file is **fatal** rather than
+  silently downgraded to defaults — quietly starting with different settings
+  than the user wrote is exactly the failure this exists to prevent. Saves go
+  through a temp file and a rename, so a failure cannot truncate a working
+  config.
+- **`DynamicEq` is reachable.** The implementation existed and
+  `DynamicEqConfig` deserialized, but nothing consumed it: it was absent from
+  the graph, from the pipeline, and from `EngineCommand`. It is now a
+  corrective layer in front of the static bands (order rationale documented on
+  `EqNode`), configured by `config.eq.dynamic_eq`, driven by
+  `SetDynamicEqEnabled` / `SetDynamicEqBand`, mirrored in the read-back, and
+  seeded by `DynamicEqConfig::default_corrective_set()`.
+- **`EngineCommand::Reconfigure` and `LoadPreset`.** `AudioEngine::reconfigure`
+  existed but was unreachable from a command, so a multi-setting change cost
+  one generation rebuild *per setting* instead of one total. `EnginePreset::
+  from_preset` was fully implemented and called from nowhere; `LoadPreset` now
+  merges a preset's *policy* over the live config while preserving user content
+  (EQ curves, saved presets, compressor bands, the loaded IR), identity (device,
+  endpoints) and topology (mix slots, trims, aux) — and the merge is
+  reversible, so `Fidelity → Consumer` genuinely restores the baseline.
+- **`EngineHandle::last_graph_build_ms` / `graph_build_stats`.** A generation
+  build is the engine's one allocating operation — mix planes, node arena,
+  plan set, scratch — and measures in the tens of milliseconds against a
+  ~2.7 ms block deadline at 48 kHz / 512 frames. That cost is *invisible* in
+  `cpu_usage_pct`, whose two-second window averages a millisecond-scale spike
+  to nothing. A host rebuilding on every slider drag saw a smooth graph and a
+  stuttering UI with nothing pointing at the cause; it is now separately
+  observable.
+- **23 missing `EngineHandle` setters**, completing the typed API: the whole
+  multi-lane surface (`add_track`, `remove_track`, `set_track_gain`,
+  `set_track_pan`, `set_track_master_gain`, `set_track_send`, `duck_tracks`),
+  `recover_stream`, the shelves and M/S EQ, `set_eq_auto_headroom`,
+  `set_eq_band_params`, `set_graphic_eq_preamp`, the compressor toggles, the
+  crossfade/transition/precision/fallback/output-profile setters, and
+  `set_convolution_wet_mix` (new command, reaching the canonical chain's
+  convolution insert — distinct from the existing aux-bus `SetAuxInsert`).
+  The API is now uniform: every command is reachable from the handle.
+
+### Fixed
+
+- **The Quality (`f64`) chain ran without non-finite containment.** The f32
+  path applied `NonFinitePolicy` — `Clamp` by default — after every stage; the
+  f64 path did not. Selecting `PrecisionMode::Quality` therefore silently
+  dropped a safety guarantee and let a `NaN` reach the output. The f64 runner
+  now applies the same policy after the same stages, and
+  `contain_non_finite_planes_f64` is the f64 twin of the existing helper. This
+  also explains a long-standing performance oddity: the f64 chain measured
+  ~2.2x *faster* than f32 on a mostly-bypassed configuration, because f32 was
+  doing strictly more work. Both paths now cost the same and are equally
+  guarded.
+- **A non-finite EQ band gain poisoned auto-headroom for the rest of the
+  session.** `ParametricEq::set_band` stored parameters verbatim; the biquad
+  clamps gains later, at coefficient-computation time, so the audio was safe
+  but `params.gain_db` held a `NaN`. `combined_max_gain_db` sums the band
+  gains, so one `NaN` made it return `NaN` forever; `refresh_auto_headroom`
+  fed that to `set_headroom_db`, which rejects non-finite input — silently
+  disabling auto-headroom's response to *every* subsequent band edit, with no
+  indication of why. `set_band` now validates and clamps per field, matching
+  `set_bass_shelf`, so a bad gain is refused without discarding a good
+  frequency in the same command.
+- **A partial config section failed to parse.** `#[serde(default)]` was on
+  some fields and not others, so `[eq] enabled = true` failed with "missing
+  field `preamp_db`" — a config file could not set one EQ field without
+  specifying all of them. Every config struct that already implements `Default`
+  now carries container-level `#[serde(default)]`, which makes the documented
+  patch semantics real.
+- **The settings snapshot was empty for the first two seconds** after
+  construction, and lagged every command by up to the telemetry interval. It is
+  now seeded at construction and refreshed on any tick that processed a command,
+  so the first read a host makes is already truthful.
+
+### Changed
+
+- **Configuration validation now gates engine construction.** `EngineConfig::
+  validate()` existed and was called from nowhere. A config with *errors*
+  (`mix_slots < 2`, a non-finite trim gain) is now refused outright, with a
+  message naming the typed issue kind; warnings are logged and retained on the
+  engine as `EngineHandle`'d `config_validation()`. This is a deliberate
+  behaviour change: a config the engine cannot honor is rejected at
+  construction and at `Reconfigure` rather than partially applied, because
+  half-applying it leaves the engine in a state no configuration describes.
+- **`EngineHandle::new` takes a ninth argument** (the shared rebuild-cost
+  counters). It is documented as internally-called; the new argument is why a
+  handle can report graph costs it cannot otherwise reach.
+- **The true-peak FIR stays scalar, deliberately.** With the SIMD layer now in
+  use for metering, the remaining unvectorized hot spot is the 400-tap
+  polyphase detector at ~8% of a block budget. Vectorizing it would require
+  reassociating the dot product, which changes its result — not an option in a
+  bit-exactness-critical engine. Documented in place rather than "fixed".
+
+### Performance
+
+- **Peak metering is 8x faster and bit-exact.** `simd::vector_abs_max` now
+  backs the mix-bus meters, replacing a scalar `max(|x|)` scan (measured 16 µs
+  → 2 µs for a stereo 4096-frame pair). `max` is associative and commutative,
+  so the vectorized result is *identical* to the scalar one — the one reduction
+  that can be vectorized without a bit-exactness cost. The RMS sum in the same
+  loop deliberately stays scalar: its summation order defines the result, and
+  vectorizing it would both perturb the readout and establish the precedent
+  that reductions here may be reordered.
+
 ## [0.6.0] — 2026-10-01
 
 Phase 4 of the audit: the structural findings. Most of these are not runtime

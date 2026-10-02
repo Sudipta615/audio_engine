@@ -296,12 +296,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI args first so --log-level can be applied before the logger
     // is initialized. (env_logger can only be initialized once per process.)
     let args: Vec<String> = std::env::args().collect();
+    // Every field of EngineConfig is `serde(default)`, so an unspecified key
+    // inherits from the default rather than failing to parse — a config file
+    // is a patch, not a replacement.
     let mut config = EngineConfig::default();
     let mut log_level = "info".to_string();
 
+    // Pass 1: locate --config and load it into `config`. This happens before
+    // pass 2 so that --backend/--device always win, whatever order the user
+    // typed them in. Doing both in one loop would make precedence depend on
+    // argv order, which is not a contract anyone wants to document.
+    if let Some(path) = flag_value(&args, "--config").or_else(|| flag_value(&args, "-c")) {
+        match EngineConfig::load_file(&path) {
+            Ok(loaded) => {
+                for issue in loaded.validate().issues {
+                    eprintln!("config warning [{}]: {}", issue.kind.code(), issue.message);
+                }
+                config = loaded;
+            }
+            Err(e) => {
+                // A bad config file is fatal, not a warning: starting with
+                // different settings than the user asked for is exactly the
+                // kind of silent divergence this loader exists to prevent.
+                eprintln!("Error: {}", e);
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Pass 2: explicit flags override the file.
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--config" | "-c" => {
+                i += 1;
+            }
             "--backend" | "-b" => {
                 i += 1;
                 if i < args.len() {
@@ -332,10 +361,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Usage: audio-engine-cli [OPTIONS] [file_path_or_uri]");
                 println!();
                 println!("Options:");
+                println!(
+                    "  --config, -c <file>       TOML config file (patched over the defaults)"
+                );
                 println!("  --backend, -b <backend>   Output backend (auto, wasapi, alsa, coreaudio, asio)");
                 println!("  --device, -d <name>       Output device name (or 'default')");
                 println!("  --log-level <level>       Log level (error, warn, info, debug, trace)");
                 println!("  --help, -h                Show this help");
+                println!();
+                println!("Precedence: --backend/--device override the config file; the config");
+                println!("file overrides the built-in defaults. Every config key is optional, so");
+                println!("a config file is a patch rather than a replacement.");
                 println!();
                 println!("Interactive commands can be entered once launched.");
                 return Ok(());
@@ -853,4 +889,16 @@ fn print_event(event: EngineEvent) {
             println!("\n  \x1b[31m[Engine] Room measurement failed: {}\x1b[0m", msg);
         }
     }
+}
+
+/// Value following `flag` in `args`, if present.
+fn flag_value(args: &[String], flag: &str) -> Option<std::path::PathBuf> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).map(std::path::PathBuf::from);
+        }
+        i += 1;
+    }
+    None
 }

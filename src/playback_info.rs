@@ -7,8 +7,12 @@ pub use crate::diagnostics::{
 };
 pub use crate::dsp::graph2::diagnostics::NodeDiagnostics;
 pub use crate::dsp::pipeline::EngineStats;
+pub use crate::engine::settings::{
+    AuxSettings, CompressorBandSetting, EngineSettings, EqBandSetting, LimiterSettings,
+};
 #[cfg(feature = "audio-output")]
 pub use crate::output::output_info::OutputInfo;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlaybackState {
@@ -166,6 +170,27 @@ pub struct PlaybackInfo {
     pub node_diagnostics: Vec<NodeDiagnostics>,
     /// Structured diagnostic incident event log (§6.5, Item 16).
     pub diagnostic_events: Vec<DiagnosticEvent>,
+    /// Read-back of every user-settable control.
+    ///
+    /// [`EngineCommand`](crate::commands::EngineCommand) is write-only, so
+    /// this is the only way for a host to learn what the engine *actually*
+    /// holds after its own clamping and range checks — which is exactly what
+    /// a UI needs to avoid drifting from reality. Snapshotted on the same
+    /// cadence as the rest of this struct.
+    ///
+    /// **Behind an `Arc`, deliberately.** Every telemetry publish clones the
+    /// whole `PlaybackInfo` inside `ArcSwap::rcu`, and an idle tick publishes
+    /// on every tick. With the settings inline, that clone deep-copied eight
+    /// `Vec`s — turning the engine's "exactly one allocation per idle tick"
+    /// invariant into eight, measured by
+    /// `tests/fidelity/producer_tick_allocations.rs`. Behind an `Arc` the
+    /// publish is one refcount bump, the idle-tick bound holds, and
+    /// `PlaybackInfo` stays small enough to copy cheaply.
+    ///
+    /// The cost moves to the *reader*: [`EngineSettings`] is only cloned out
+    /// when a host asks for it, which is a UI polling at 30–60 Hz, not the
+    /// engine tick.
+    pub settings: Arc<EngineSettings>,
 }
 
 /// Spatial master output telemetry (with listener pose). Mirrored from the [`crate::dsp::graph2::prod::SpatialNode`]
@@ -345,6 +370,7 @@ impl Default for PlaybackInfo {
             health_snapshot: None,
             node_diagnostics: Vec::new(),
             diagnostic_events: Vec::new(),
+            settings: Arc::new(EngineSettings::default()),
         }
     }
 }

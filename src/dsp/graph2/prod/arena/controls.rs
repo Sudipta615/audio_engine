@@ -178,6 +178,11 @@ pub(crate) enum NodeCmd {
         params: EqBandParams,
     },
     SetMidsideEq(bool),
+    SetDynamicEqEnabled(bool),
+    SetDynamicEqBand {
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    },
 
     // ── Convolution ───────────────────────────────────────────────────────
     SetConvolutionWetMix(f32),
@@ -261,6 +266,21 @@ pub(crate) struct ControlBus {
     reclaimed: AtomicU64,
     /// Commands dropped on a full queue.
     dropped: AtomicU64,
+    /// Wall-clock nanoseconds spent building the most recent generation.
+    ///
+    /// Published control-side after a rebuild, read by a host that wants to
+    /// know what a reconfiguration actually costs. A generation build is the
+    /// one operation in the engine that allocates megabytes (mix planes, the
+    /// node arena, the plan set, scratch), so a host that rebuilds on a slider
+    /// drag pays this cost per rebuild — measured at tens of milliseconds on
+    /// the reference machine, against a block deadline of ~2.7 ms at 48 kHz /
+    /// 512 frames. That gap is the whole reason this counter exists: the spike
+    /// is invisible in steady-state CPU telemetry and only shows up here.
+    last_build_nanos: AtomicU64,
+    /// Cumulative nanoseconds across every generation build.
+    total_build_nanos: AtomicU64,
+    /// Number of generation builds.
+    build_count: AtomicU64,
     /// Sticky user state (audio-written at drain, control-read at build).
     user_volume: AtomicU32,
     user_balance: AtomicU32,
@@ -427,6 +447,9 @@ impl ControlBus {
             swap_seq: AtomicU64::new(0),
             reclaimed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            last_build_nanos: AtomicU64::new(0),
+            total_build_nanos: AtomicU64::new(0),
+            build_count: AtomicU64::new(0),
             user_volume: AtomicU32::new(1.0f32.to_bits()),
             user_balance: AtomicU32::new(0.0f32.to_bits()),
             user_speed: AtomicU32::new(1.0f32.to_bits()),
@@ -928,6 +951,37 @@ impl GraphControlHandle {
         self.bus.dropped.load(Ordering::Relaxed)
     }
 
+    /// Record the cost of one generation build. Called control-side only.
+    pub(crate) fn record_build_cost(&self, nanos: u64) {
+        self.bus.last_build_nanos.store(nanos, Ordering::Relaxed);
+        self.bus
+            .total_build_nanos
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.bus.build_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How long the most recent generation build took, in milliseconds.
+    pub fn last_build_ms(&self) -> f64 {
+        self.bus.last_build_nanos.load(Ordering::Relaxed) as f64 / 1e6
+    }
+
+    /// Mean generation-build cost in milliseconds across the engine's life.
+    ///
+    /// `0.0` before the first rebuild — the initial construction is not a
+    /// rebuild and is not counted, since it happens once before playback.
+    pub fn mean_build_ms(&self) -> f64 {
+        let count = self.bus.build_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        self.bus.total_build_nanos.load(Ordering::Relaxed) as f64 / count as f64 / 1e6
+    }
+
+    /// How many generation builds have happened.
+    pub fn build_count(&self) -> u64 {
+        self.bus.build_count.load(Ordering::Relaxed)
+    }
+
     // ── Control surface (enqueue) ─────────────────────────────────────────
 
     pub fn set_volume(&self, volume: f32) {
@@ -1036,6 +1090,20 @@ impl GraphControlHandle {
 
     pub fn set_midside_eq(&self, enabled: bool) {
         self.enqueue(node_id::EQ, NodeCmd::SetMidsideEq(enabled));
+    }
+
+    /// Enable or disable the dynamic-EQ corrective layer.
+    pub fn set_dynamic_eq_enabled(&self, enabled: bool) {
+        self.enqueue(node_id::EQ, NodeCmd::SetDynamicEqEnabled(enabled));
+    }
+
+    /// Set one dynamic-EQ band's full parameter set.
+    pub fn set_dynamic_eq_band(
+        &self,
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    ) {
+        self.enqueue(node_id::EQ, NodeCmd::SetDynamicEqBand { index, params });
     }
 
     pub fn set_convolution_wet_mix(&self, mix: f32) {
@@ -1935,6 +2003,10 @@ fn apply_node_cmd(node: &mut GraphNode, cmd: &NodeCmd) {
         (GraphNode::Eq(n), NodeCmd::SetEqTrebleShelf(db)) => n.eq.set_treble_shelf(*db),
         (GraphNode::Eq(n), NodeCmd::SetEqBand { index, params }) => n.eq.set_band(*index, *params),
         (GraphNode::Eq(n), NodeCmd::SetMidsideEq(e)) => n.midside_enabled = *e,
+        (GraphNode::Eq(n), NodeCmd::SetDynamicEqEnabled(e)) => n.set_dynamic_enabled(*e),
+        (GraphNode::Eq(n), NodeCmd::SetDynamicEqBand { index, params }) => {
+            n.set_dynamic_band(*index, *params);
+        }
         (GraphNode::Convolution(n), NodeCmd::SetConvolutionWetMix(mix)) => {
             n.engine.set_wet_mix(*mix)
         }
@@ -2130,6 +2202,39 @@ impl DspGraph {
 
     pub fn is_midside_eq(&self) -> bool {
         self.eq().midside_enabled
+    }
+
+    /// Enable or disable the dynamic-EQ corrective layer.
+    pub fn set_dynamic_eq_enabled(&self, enabled: bool) {
+        self.control_handle().set_dynamic_eq_enabled(enabled);
+    }
+
+    /// Whether the dynamic-EQ layer is currently processing.
+    pub fn is_dynamic_eq_enabled(&self) -> bool {
+        self.eq().is_dynamic_enabled()
+    }
+
+    /// Set one dynamic-EQ band's full parameter set.
+    pub fn set_dynamic_eq_band(
+        &self,
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    ) {
+        self.control_handle().set_dynamic_eq_band(index, params);
+    }
+
+    /// Number of dynamic-EQ bands currently configured (0 when the layer is
+    /// structurally absent, which is what makes "enabled" meaningless).
+    pub fn dynamic_eq_band_count(&self) -> usize {
+        self.eq().dynamic_band_count
+    }
+
+    /// One dynamic-EQ band's live parameters, for settings read-back.
+    pub fn dynamic_eq_band(
+        &self,
+        index: usize,
+    ) -> Option<crate::dsp::equalizer::DynamicEqBandParams> {
+        self.eq().dynamic_band(index).copied()
     }
 
     pub fn set_convolution_wet_mix(&self, mix: f32) {

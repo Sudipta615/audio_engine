@@ -11,6 +11,23 @@ impl AudioEngine {
         self.graph.set_stereo_width(width);
     }
 
+    /// Wet/dry mix for the canonical chain's convolution insert.
+    ///
+    /// The engine's own `config.convolution.wet_mix` is updated too, so a
+    /// later generation rebuild (track change, sample-rate change) inherits
+    /// the live value rather than snapping back to the value the config file
+    /// was loaded with. That inheritance is the same contract the volume /
+    /// balance / speed user-state replay uses.
+    pub(super) fn handle_set_convolution_wet_mix(&mut self, wet_mix: f32) {
+        if !wet_mix.is_finite() {
+            log::warn!("Convolution wet mix ignored: non-finite value");
+            return;
+        }
+        let clamped = wet_mix.clamp(0.0, 1.0);
+        self.config.convolution.wet_mix = clamped;
+        self.graph.set_convolution_wet_mix(clamped);
+    }
+
     pub(super) fn handle_set_balance(&mut self, balance: f32) {
         self.graph.set_balance(balance);
     }

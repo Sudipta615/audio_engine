@@ -55,6 +55,20 @@ impl Crossfeed {
         self.enabled
     }
 
+    /// The active acoustic profile.
+    ///
+    /// The custom profile's three parameters are meaningful only when this
+    /// returns `CrossfeedProfile::Custom`; they are read separately by
+    /// [`Self::custom_params`].
+    pub fn profile(&self) -> CrossfeedProfile {
+        self.profile
+    }
+
+    /// The custom profile's `(frequency_hz, q, delay_ms)`.
+    pub fn custom_params(&self) -> (f32, f32, f32) {
+        (self.custom_freq, self.custom_q, self.custom_delay_ms)
+    }
+
     /// Fixed delay-line latency of the crossfeed network in milliseconds
     /// (0 when disabled). The low-pass biquads add phase delay too, but the
     /// *buffer* delay is the deterministic term worth accounting for in the

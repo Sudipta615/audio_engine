@@ -19,6 +19,48 @@ impl AudioEngine {
         );
     }
 
+    /// Enable or disable the dynamic-EQ corrective layer.
+    ///
+    /// The config mirror is what carries the setting across a generation
+    /// rebuild — `apply_config` re-applies `config.eq.dynamic_eq` when the
+    /// arena is rebuilt on a track or sample-rate change, so without the
+    /// write-back a live toggle would silently revert.
+    pub(super) fn handle_set_dynamic_eq_enabled(&mut self, enabled: bool) {
+        self.config.eq.dynamic_eq.enabled = enabled;
+        self.graph.set_dynamic_eq_enabled(enabled);
+        info!(
+            "Dynamic EQ: {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Set one dynamic-EQ band's parameters.
+    ///
+    /// Mirrors into `config.eq.dynamic_eq.bands` when the index is in range
+    /// so a generation rebuild preserves it, matching the static EQ's
+    /// user-state replay. An out-of-range index is logged and dropped — the
+    /// static `SetEqBand` does the same, so the two agree on the contract.
+    pub(super) fn handle_set_dynamic_eq_band(
+        &mut self,
+        index: usize,
+        params: crate::dsp::equalizer::DynamicEqBandParams,
+    ) {
+        if index >= crate::dsp::equalizer::MAX_DYNAMIC_EQ_BANDS {
+            log::warn!(
+                "Dynamic EQ band index {} is outside range (max {})",
+                index,
+                crate::dsp::equalizer::MAX_DYNAMIC_EQ_BANDS
+            );
+            return;
+        }
+        let bands = &mut self.config.eq.dynamic_eq.bands;
+        if bands.len() <= index {
+            bands.resize_with(index + 1, Default::default);
+        }
+        bands[index] = config::DynamicEqBandConfig::from(&params);
+        self.graph.set_dynamic_eq_band(index, params);
+    }
+
     pub(super) fn handle_set_eq_band(
         &mut self,
         index: usize,

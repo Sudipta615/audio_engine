@@ -84,6 +84,7 @@ fn default_voice_full_quality() -> usize {
 /// for full-quality voices, ranked by [`VoicePriority`]. The engine's
 /// `VoiceBudget` consumes this to build a per-block admission plan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialVoiceConfig {
     /// Master enable. When disabled the budget is left at the engine default.
     #[serde(default = "default_true")]
@@ -114,6 +115,7 @@ impl Default for SpatialVoiceConfig {
 /// accumulate meters on the audio thread (allocation-free) and a host reads
 /// the snapshot on the control thread.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialMeterConfig {
     /// Master enable. Disabled = the meter accumulators stay dormant (zero
     /// cost and zero reported levels).
@@ -164,6 +166,7 @@ fn default_max_spl_db() -> f32 {
 
 /// Configuration for adaptive psychoacoustic bass enhancement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PsychoacousticBassConfig {
     /// Maximum harmonic generated (2 = 2nd harmonic only, up to 5).
     #[serde(default = "default_max_harmonic")]
@@ -196,6 +199,7 @@ impl Default for PsychoacousticBassConfig {
 
 /// Configuration for the spatial bass engine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpatialBassConfig {
     /// Operating mode.
     #[serde(default)]

@@ -1,9 +1,10 @@
 //! Engine configuration types.
 //!
 //! The crate is organized into focused modules — [`enums`], [`dsp_config`],
-//! [`rate_policy`], and [`engine_config`] — all re-exported at the crate root
-//! so the public API remains `config::TypeName`.
+//! [`rate_policy`], [`engine_config`], and [`config_file`] — all re-exported at
+//! the crate root so the public API remains `config::TypeName`.
 
+mod config_file;
 mod dsp_config;
 mod engine_config;
 mod enums;
@@ -13,6 +14,7 @@ mod spatial_render;
 mod versioned;
 pub mod versioned_state;
 
+pub use config_file::{load_file_warnings, ConfigFileError};
 pub use dsp_config::{
     BandConfig, BassManagementConfig, ChannelEqConfig, ChannelEqEntry, ChannelMixConfig,
     ChannelMixTemplate, ChannelRoutingConfig, ChannelTrimConfig, ChannelTrimEntry,

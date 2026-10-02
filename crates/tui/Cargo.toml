@@ -1,0 +1,25 @@
+[package]
+name = "engine-tui"
+version = "0.7.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Sudipta615/ultimate-engine"
+description = "Shadow Desktop terminal UI: a live, keyboard-driven front end for the audio-engine control surface"
+
+# A separate workspace member rather than a module inside `audio-engine`.
+#
+# The TUI is a *consumer* of the engine's public handle surface, not part of
+# the engine. Keeping it out of the core crate means `ratatui`/`crossterm` are
+# never pulled into a library integrator's dependency tree — an embedded host
+# that links `audio-engine` for its DSP should not inherit a terminal UI
+# framework — and it lets the UI be tested as a unit without the engine's
+# audio backend.
+#
+# Versioned in lockstep with `audio-engine`/`config` for the same reason those
+# three move together: the TUI compiles against a specific handle surface.
+
+[dependencies]
+audio-engine = { path = "../..", version = "0.7.0" }
+config = { path = "../config", version = "0.7.0" }
+ratatui = "0.30.2"
+crossterm = "0.29.0"

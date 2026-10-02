@@ -38,6 +38,44 @@ impl EqFilterType {
     }
 }
 
+/// Two filter-type enums exist on purpose: `config::FilterType` is the
+/// serialized spelling (`"lowshelf"`), while this crate's [`FilterType`] is
+/// the DSP-internal one (`Lowshelf`). This `From` is the single place that
+/// mapping lives, so a new variant cannot be added to one and forgotten in
+/// the other.
+impl From<config::FilterType> for EqFilterType {
+    fn from(f: config::FilterType) -> Self {
+        match f {
+            config::FilterType::Peaking => Self::Peaking,
+            config::FilterType::LowShelf => Self::LowShelf,
+            config::FilterType::HighShelf => Self::HighShelf,
+            config::FilterType::LowPass => Self::LowPass,
+            config::FilterType::HighPass => Self::HighPass,
+            config::FilterType::Notch => Self::Notch,
+            config::FilterType::Bandpass => Self::Bandpass,
+            config::FilterType::AllPass => Self::AllPass,
+        }
+    }
+}
+
+/// Reverse of [`From<config::FilterType> for EqFilterType`], so a runtime
+/// parameter set can be mirrored back into a config file without hand-mapping
+/// every variant.
+impl From<EqFilterType> for config::FilterType {
+    fn from(f: EqFilterType) -> Self {
+        match f {
+            EqFilterType::Peaking => Self::Peaking,
+            EqFilterType::LowShelf => Self::LowShelf,
+            EqFilterType::HighShelf => Self::HighShelf,
+            EqFilterType::LowPass => Self::LowPass,
+            EqFilterType::HighPass => Self::HighPass,
+            EqFilterType::Notch => Self::Notch,
+            EqFilterType::Bandpass => Self::Bandpass,
+            EqFilterType::AllPass => Self::AllPass,
+        }
+    }
+}
+
 /// Parameters for a single EQ band
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EqBandParams {

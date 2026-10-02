@@ -3,7 +3,7 @@
 
 mod buffers;
 mod clock;
-mod commands;
+pub(crate) mod commands;
 mod construction;
 mod crossfade;
 pub mod cue_split;
@@ -19,6 +19,7 @@ pub mod offline;
 mod output_setup;
 pub(crate) mod preload;
 mod recovery;
+pub mod settings;
 mod spatial_persistence;
 mod stream;
 mod telemetry;
@@ -43,7 +44,12 @@ pub use graph_plan::GraphPlanReport;
 pub use handle::EngineHandle;
 pub(crate) use loudness_state::LoudnessScanState;
 pub(crate) use recovery::RecoveryState;
+pub use settings::{
+    AuxSettings, CompressorBandSetting, DynamicEqBandSetting, EngineSettings, EqBandSetting,
+    LimiterSettings,
+};
 pub(crate) use telemetry::EngineTelemetry;
+pub use telemetry::GraphBuildStats;
 pub use wake::EngineWake;
 
 use std::sync::{atomic::AtomicBool, Arc};
@@ -119,6 +125,15 @@ pub struct AudioEngine {
     /// share the same `Arc` via [`Self::analyzer`] or the handle.
     analyzer: Arc<AudioAnalyzer>,
     config: EngineConfig,
+    /// The result of validating `config` at construction.
+    ///
+    /// Errors cause [`AudioEngine::new`] to refuse the config outright, so a
+    /// live engine's `errors` vector is always empty; the warnings and the
+    /// typed `issues` list are what a host can still act on. Kept on the
+    /// engine (rather than recomputed on demand) because a config mutates
+    /// across the session — the volume / convolution-wet-mix handlers write
+    /// back into it — so this is the snapshot as of construction.
+    config_validation: config::ConfigValidation,
     duration_secs: f32,
     output_sample_rate: u32,
     speed: f32,
@@ -178,6 +193,10 @@ pub struct AudioEngine {
     pub(crate) track_cache: crate::track_cache::TrackCache,
     /// Professional audio metering subsystem.
     pub(crate) meters: Arc<crate::dsp::meters::ProfessionalMeters>,
+    /// Rebuild-cost counters, shared with every `EngineHandle` this engine
+    /// hands out. See [`GraphBuildStats`] for why this is separate from the
+    /// ordinary CPU telemetry.
+    graph_build: Arc<GraphBuildStats>,
 }
 
 impl AudioEngine {
