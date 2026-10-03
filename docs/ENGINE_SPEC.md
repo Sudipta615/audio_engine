@@ -287,8 +287,8 @@ Output reproducibility is formally classified into three equivalence tiers:
 
 1. **Untrusted Input Handling**: All audio files, network byte streams, CUE sheets, and metadata tags are classified as untrusted input.
 2. **Allocation Bounds**: Parsers enforce strict upper bounds on memory allocation:
-   - Max channel count: 16
-   - Max block frames: 8192
+   - Max channel count: 16 (`MAX_CHANNELS`)
+   - Max block frames: 4096 (`MAX_AUDIO_BLOCK_FRAMES`)
    - Max metadata string length: 64 KB
 3. **Integer Arithmetic Safety**: All sample calculations, buffer strides, allocations, lengths, and file offsets strictly utilize checked, bounded, or saturating arithmetic (`checked_add`, `checked_mul`, `saturating_sub`, bounded range assertions) to prevent integer overflow vulnerabilities. Wrapping arithmetic (`wrapping_add`, `wrapping_mul`) is strictly forbidden for memory sizing, bounds, and offsets; it is preserved exclusively for intentional modular arithmetic algorithms (e.g., cryptographic/hashing calculations, PRNG state updates, phase wrapping, and circular sequence counters).
 4. **Fuzzing Standard**: Continuous mutation and coverage-guided fuzzing verify that malformed headers, integer wraps, and truncations yield clean error returns without panics.

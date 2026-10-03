@@ -13,7 +13,7 @@ use engine::{AudioEngine, EngineConfig, EngineHandle};
 
 fn print_help() {
     println!("\n=== Headless Audio Engine CLI Commands ===");
-    println!("  open <file-or-dir>    - Open and play an audio source (file, directory, or URI)");
+    println!("  open <file-or-dir>    - Open and play an audio source (file, directory, or local file:// URI)");
     println!("  queue <file-or-dir>   - Add a file or directory of files to the playback queue");
     println!("  clear                 - Clear the playback queue");
     println!("  next                  - Skip to the next queue entry");
@@ -358,7 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--help" | "-h" => {
-                println!("Usage: audio-engine-cli [OPTIONS] [file_path_or_uri]");
+                println!("Usage: audio-engine-cli [OPTIONS] [file_path]");
                 println!();
                 println!("Options:");
                 println!(

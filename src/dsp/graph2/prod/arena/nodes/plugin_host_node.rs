@@ -28,6 +28,21 @@ pub const MAX_PLUGIN_SLOTS: usize = 4;
 
 /// One hosted plugin slot: the instance + its config-derived identity.
 struct HostedSlot {
+    /// Keeps the `dlopen` handle — and therefore the mapped library image —
+    /// alive for as long as `instance` can be called through.
+    ///
+    /// Named `_host` because it is deliberately never read: it is held purely
+    /// so the mapped image outlives `instance`.
+    ///
+    /// `PluginInstance` stores a **by-value copy** of the plugin's vtable, so
+    /// on its own it keeps nothing alive: if the last `Arc<PluginHost>` were
+    /// dropped, `PluginHost`'s `Library` would `dlclose` the image and every
+    /// subsequent `process` / `drop_instance` call would jump into unmapped
+    /// memory. That is a SIGSEGV rather than a glitch, and `catch_unwind`
+    /// cannot contain it. Holding the host here makes the instance's lifetime
+    /// a strict subset of the library's, which is the invariant the vtable
+    /// copy silently assumes.
+    _host: std::sync::Arc<plugin_abi::PluginHost>,
     instance: plugin_abi::PluginInstance,
     /// The configured source (path or `static:<uid>`) — for reports.
     source: String,
@@ -91,6 +106,7 @@ impl PluginHostNode {
         self.latency_samples = self.latency_samples.max(host.descriptor().latency_samples);
         let tail = host.descriptor().tail_samples;
         self.slots.push(HostedSlot {
+            _host: std::sync::Arc::clone(host),
             instance,
             source: source.to_string(),
             enabled,

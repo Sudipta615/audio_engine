@@ -14,28 +14,57 @@ and [`SIGNAL_FLOW.md`](SIGNAL_FLOW.md) for the DSP chain.
 
 ## 1. Add the dependency
 
-The engine is a workspace crate (`engine`) with a companion configuration crate (`config`).
+The workspace root is the **`audio-engine`** package and its library target is named
+**`engine`** — so the dependency key is `audio-engine` and you `use engine::…`.
+The companion configuration crate is **`config`**.
 
 ```toml
 [dependencies]
-engine = { path = "path/to/engine" }
-config = { path = "path/to/engine/crates/config" }
+audio-engine = { path = "path/to/engine" }
+config        = { path = "path/to/engine/crates/config" }
 ```
 
-Enable the features you need (see [Cargo features](../README.md#-cargo-features)). The
-default set covers everyday playback:
+`audio-engine` declares `publish = false`, so a path or git dependency is the only way
+to consume it (see the [Distribution](../README.md#-distribution) section — it is not on
+crates.io).
+
+### Cargo features
+
+Enable the extra features you need; the `default` set is
+`["audio-output", "resample", "all-codecs", "sofa-import"]` and covers everyday
+playback.
 
 ```toml
-engine = { path = "path/to/engine", features = ["audio-output", "resample", "codec-flac"] }
+audio-engine = { path = "path/to/engine", features = ["c-ffi", "tag-write"] }
 ```
 
-For an **output-less / headless host** that only decodes, runs DSP, and reads telemetry
-(loudness scanner, visualizer, batch analyzer), you can drop `audio-output`:
+> **`audio-output` is required, not optional.** `src/lib.rs` carries a `compile_error!`
+> that fires on any build without the feature, because the output layer
+> (`output::output`, `output::capabilities`, and every per-OS backend) reaches `cpal`
+> unconditionally. There is *no* output-less build of this crate. `audio-output` also
+> implies `resample`, because `output::endpoint` drives a Rubato slip resampler for
+> clock-drift correction.
+
+This has a consequence for headless hosts. A loudness scanner, visualizer or batch
+analyzer that "just needs DSP and telemetry, no DAC" cannot drop `audio-output` —
+the build fails before it starts. Use the **sink-driven** model in §2 and §5 instead:
+`AudioEngine::with_sink(config, NoopSink)` runs the entire decode → DSP → limiter path
+and discards the samples, so the output layer is compiled in but never opens a device.
+The OS backend simply never gets constructed.
 
 ```toml
-engine = { path = "path/to/engine", default-features = false,
-           features = ["resample", "codec-flac", "codec-wav"] }
+# Correct: default features, then choose a sink at runtime.
+audio-engine = { path = "path/to/engine" }
 ```
+
+```toml
+# Incorrect — `compile_error!`: "the `audio-output` feature is required".
+audio-engine = { path = "path/to/engine", default-features = false,
+                features = ["resample", "codec-flac", "codec-wav"] }
+```
+
+The full feature table, including which backends are non-default, is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md#optional-features).
 
 ---
 
@@ -196,8 +225,9 @@ use engine::sink::NoopSink;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).expect("usage: analyze <audio-file>");
 
-    // `audio-output` is not needed here; `with_sink(NoopSink)` runs the whole
-    // decode → DSP → limiter path but discards the samples.
+    // `audio-output` is still compiled in (it is mandatory), but
+    // `with_sink(NoopSink)` runs the whole decode → DSP → limiter path
+    // and discards the samples, so no device is ever opened.
     let mut engine = AudioEngine::with_sink(EngineConfig::default(), Box::new(NoopSink))?;
     let handle = engine.handle();
 
@@ -414,53 +444,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 9. C FFI
 
 Enable the `c-ffi` feature to expose a stable `extern "C"` API for C, C++, Python
-(ctypes), C#, Node.js FFI, etc. Handles are opaque, every call returns a status code, and
-no panics ever cross the boundary.
+(ctypes), C#, Node.js FFI, etc. Handles are opaque, every call returns a status code,
+and no panics ever cross the boundary.
+
+> **There is no generated header.** The repository ships no `engine_ffi.h` and runs no
+> `cbindgen` step — the surface is hand-written `#[no_mangle] extern "C"` in
+> [`src/ffi.rs`](../src/ffi.rs) with no extra dependencies. **Your host must declare
+> the prototypes itself**, or generate them from the `#[no_mangle]` signatures
+> (`grep '^pub extern "C" fn' src/ffi.rs`). The declarations below are the authoritative
+> shape; copy them into your own header.
 
 ```c
+/* engine_ffi.h — YOU declare this. There is no generated header in the repository;
+   these prototypes are transcribed from the #[no_mangle] extern "C" signatures
+   in src/ffi.rs. Regenerate with: grep '^pub extern "C" fn' src/ffi.rs */
+#ifndef ENGINE_FFI_H
+#define ENGINE_FFI_H
 #include <stdint.h>
-#include <stdio.h>
+#include <stddef.h>
 
 typedef struct EngineHandleFFI EngineHandleFFI;
 
-/* lifecycle */
-EngineHandleFFI* engine_create(uint32_t backend); /* 0 Auto, 4 Default */
-void             engine_destroy(EngineHandleFFI* h);
+/* ---- ABI versioning -------------------------------------------------- */
+uint32_t engine_abi_version(void);
+int32_t  engine_abi_compatible(uint32_t host_version);
 
-/* transport */
-int32_t engine_play(EngineHandleFFI* h);
-int32_t engine_pause(EngineHandleFFI* h);
-int32_t engine_stop(EngineHandleFFI* h);
-int32_t engine_seek(EngineHandleFFI* h, float position_secs);
-int32_t engine_set_volume(EngineHandleFFI* h, float linear);
-int32_t engine_set_volume_db(EngineHandleFFI* h, float db);
-int32_t engine_set_speed(EngineHandleFFI* h, float speed);
+/* ---- lifecycle ------------------------------------------------------ */
+EngineHandleFFI* engine_create(uint32_t backend); /* a backend_id constant */
+void              engine_destroy(EngineHandleFFI* engine);
 
-/* sources & queue */
-int32_t engine_open_file(EngineHandleFFI* h, const char* path);
-int32_t engine_open_uri(EngineHandleFFI* h, const char* uri);
-int32_t engine_enqueue_file(EngineHandleFFI* h, const char* path);
-int32_t engine_next(EngineHandleFFI* h);
-int32_t engine_previous(EngineHandleFFI* h);
-int32_t engine_clear_playlist(EngineHandleFFI* h);
+/* ---- transport ------------------------------------------------------- */
+int32_t engine_play(EngineHandleFFI* handle);
+int32_t engine_pause(EngineHandleFFI* handle);
+int32_t engine_stop(EngineHandleFFI* handle);
+int32_t engine_seek(EngineHandleFFI* handle, float position_secs);
+int32_t engine_set_volume(EngineHandleFFI* handle, float volume);
+int32_t engine_set_volume_db(EngineHandleFFI* handle, float db);
+int32_t engine_set_speed(EngineHandleFFI* handle, float speed);
 
-/* queries */
-float   engine_position_secs(EngineHandleFFI* h);  /* -1.0 on error */
-float   engine_duration_secs(EngineHandleFFI* h);  /* -1.0 on error */
-int32_t engine_playback_state(EngineHandleFFI* h); /* 0 stopped,1 playing,2 paused,3 buffering */
-int64_t engine_playlist_len(EngineHandleFFI* h);   /* -1 on error */
+/* ---- sources & queue ------------------------------------------------- */
+int32_t engine_open_file(EngineHandleFFI* handle, const char* path);
+int32_t engine_open_uri(EngineHandleFFI* handle, const char* uri);
+int32_t engine_enqueue_file(EngineHandleFFI* handle, const char* path);
+int32_t engine_next(EngineHandleFFI* handle);
+int32_t engine_previous(EngineHandleFFI* handle);
+int32_t engine_clear_playlist(EngineHandleFFI* handle);
 
-/* structured diagnostics (v3.49+; each out-param optional, pass NULL to skip) */
-int32_t engine_diagnostics_info(EngineHandleFFI* h,
-                                int32_t* engine_error_kind,    /* DiagnosticKind code, -1 if none */
-                                char*    engine_error_message,  /* buffer of engine_error_message_len bytes */
-                                size_t   engine_error_message_len,
-                                int32_t* bit_perfect_cause,     /* BitPerfectCause code, 0 = none */
-                                int32_t* diagnostic_count);
+/* ---- queries --------------------------------------------------------- */
+float   engine_position_secs(EngineHandleFFI* handle);  /* -1.0 on error */
+float   engine_duration_secs(EngineHandleFFI* handle);  /* -1.0 on error */
+int32_t engine_playback_state(EngineHandleFFI* handle);
+int64_t engine_playlist_len(EngineHandleFFI* handle);   /* -1 on error */
 
-/* spatial health (v3.49+; out-params optional, pass NULL to skip). */
-/* Level codes: 0 Inactive, 1 Good, 2 Moderate, 3 Poor. */
-int32_t engine_spatial_health(EngineHandleFFI* h,
+/* ---- aux bus insert -------------------------------------------------- */
+int32_t engine_set_aux_insert(EngineHandleFFI* handle, int32_t enabled, float wet_mix);
+int32_t engine_aux_insert_state(EngineHandleFFI* handle, int32_t* enabled, float* wet_mix);
+
+/* ---- room & headphone correction ------------------------------------- */
+int32_t engine_set_correction_enabled(EngineHandleFFI* handle, int32_t enabled);
+int32_t engine_set_correction_depth(EngineHandleFFI* handle, float depth);
+int32_t engine_load_correction_ir(EngineHandleFFI* handle, const char* path);
+int32_t engine_correction_info(EngineHandleFFI* handle,
+                               int32_t* enabled, float* depth, int64_t* ir_len_samples,
+                               float* latency_ms, float* max_gain_db, int32_t* phase_mode);
+
+/* ---- spatial --------------------------------------------------------- */
+int32_t engine_spatial_info(EngineHandleFFI* handle,
+                            int32_t* enabled,
+                            int32_t* voice_active, int32_t* voice_full_voices,
+                            int32_t* voice_degraded_voices, int32_t* voice_dropped_voices,
+                            float* peak_db_l, float* peak_db_r,
+                            float* rms_db_l,  float* rms_db_r);
+int32_t engine_spatial_listener_pose(EngineHandleFFI* handle,
+                                     float* yaw_deg, float* pitch_deg, float* roll_deg,
+                                     float* pos_x, float* pos_y, float* pos_z);
+int32_t engine_set_spatial_listener_pose(EngineHandleFFI* handle,
+                                         float qx, float qy, float qz, float qw,
+                                         float px, float py, float pz);
+int32_t engine_set_spatial_listener_tracking(EngineHandleFFI* handle,
+                                            float smoothing_ms,
+                                            float max_angular_rate_deg_s);
+int32_t engine_set_spatial_quality(EngineHandleFFI* handle, int32_t quality);
+int32_t engine_set_spatial_voice(EngineHandleFFI* handle, int32_t enabled,
+                                 int32_t capacity, int32_t full_quality_capacity,
+                                 int32_t policy);
+int32_t engine_set_spatial_automation(EngineHandleFFI* handle, int32_t object, int32_t kind,
+                                      const float* times, const float* values,
+                                      int32_t points_count, float time_secs);
+int32_t engine_set_spatial_automation_time(EngineHandleFFI* handle, float seconds);
+int32_t engine_trigger_spatial_cue(EngineHandleFFI* handle, const char* name);
+int32_t engine_stop_spatial_cue(EngineHandleFFI* handle, size_t target);
+int32_t engine_stop_all_spatial_cues(EngineHandleFFI* handle);
+int32_t engine_spatial_render_cost(EngineHandleFFI* handle,
+                                   float* cost_units, float* utilization, float* tail_blocks);
+
+/* spatial health. Level codes: 0 Inactive, 1 Good, 2 Moderate, 3 Poor. */
+int32_t engine_spatial_health(EngineHandleFFI* handle,
                               int32_t* status,               /* overall verdict */
                               int32_t* localization,         /* localization quality */
                               int32_t* reflection_dominance, /* direct-vs-reflected */
@@ -470,16 +549,48 @@ int32_t engine_spatial_health(EngineHandleFFI* h,
                               float*   correlation,          /* inter-channel correlation [-1,1] */
                               float*   direct_reflected_ratio_db, /* +INF = no reflections */
                               int32_t* active_sources);      /* enabled source count */
+
+/* ---- multi-endpoint matrix ------------------------------------------- */
+int32_t engine_upsert_endpoint(EngineHandleFFI* handle, const char* id, const char* device,
+                               uint32_t backend, float gain, int32_t enabled,
+                               int32_t drift_correction);
+int32_t engine_remove_endpoint(EngineHandleFFI* handle, const char* id);
+int32_t engine_clear_endpoints(EngineHandleFFI* handle);
+int32_t engine_endpoint_count(EngineHandleFFI* handle);
+int32_t engine_endpoint_id(EngineHandleFFI* handle, int32_t index, char* buf, size_t buf_len);
+int32_t engine_endpoint_info(EngineHandleFFI* handle, int32_t index,
+                             int32_t* enabled, float* gain,
+                             uint64_t* written_frames, uint64_t* dropped_frames,
+                             size_t* available_frames, uint64_t* transport_error_count);
+
+/* ---- structured diagnostics (every out-param is optional; pass NULL) --- */
+int32_t engine_diagnostics_info(EngineHandleFFI* handle,
+                                int32_t* engine_error_kind,    /* DiagnosticKind code, -1 if none */
+                                char*    engine_error_message,  /* buffer of engine_error_message_len bytes */
+                                size_t   engine_error_message_len,
+                                int32_t* bit_perfect_cause,     /* BitPerfectCause code, 0 = none */
+                                int32_t* diagnostic_count);
+#endif /* ENGINE_FFI_H */
 ```
 
-Minimal C program:
+47 entry points are exported. `engine_create`'s `backend` argument is a `u32` from the
+`backend_id` constants — there is no `ENGINE_BACKEND_DEFAULT`:
+
+| `backend_id` constant | Value | Meaning |
+|---|---|---|
+| `AUTO` | 0 | Let the platform choose its default shared output |
+| `EXCLUSIVE_WASAPI` | 1 | Native WASAPI exclusive mode |
+| `EXCLUSIVE_ALSA` | 2 | Direct ALSA `hw:`/`plughw:` access |
+| `EXCLUSIVE_CORE_AUDIO_HOG` | 3 | Native CoreAudio hog mode |
+| `EXCLUSIVE_ASIO` | 4 | ASIO direct output |
+| `PIPEWIRE` | 5 | Native PipeWire pro-audio output |
+| `JACK` | 6 | Native JACK pro-audio output |
+
+Minimal C program (with the prototypes you declared above):
 
 ```c
-#include <stdio.h>
-#include <unistd.h>
-
 int main(int argc, char** argv) {
-    EngineHandleFFI* h = engine_create(0);          /* ENGINE_BACKEND_AUTO */
+    EngineHandleFFI* h = engine_create(0);          /* backend_id::AUTO */
     if (!h) { fprintf(stderr, "engine_create failed\n"); return 1; }
 
     engine_open_file(h, argv[1]);
@@ -502,12 +613,13 @@ int main(int argc, char** argv) {
 `-4=EngineNotRunning`.
 
 > **Current FFI surface.** The C API covers lifecycle, transport, source open, queue
-> next/previous, and the position/state/duration queries. DSP controls (EQ bands,
-> crossfade config, channel routing) and event subscription are **not yet exported**
-> over C — if your host needs them over FFI, add `#[no_mangle] extern "C"` wrappers in
-> [`src/ffi.rs`](../src/ffi.rs) following the existing opaque-handle + status-code
-> pattern, or drive the engine's public `EngineCommand` type from Rust instead. The Rust
-> `EngineHandle` is the complete API; the FFI is a subset.
+> navigation, aux insert, room-correction IR control, the spatial scene/pose/quality/voice/
+> cue surface, the multi-endpoint matrix, and structured diagnostics. **Parametric EQ band
+> control, crossfade configuration, channel routing, and event subscription are not
+> exported over C.** If your host needs them, add `#[no_mangle] extern "C"` wrappers in
+> [`src/ffi.rs`](../src/ffi.rs) following the existing opaque-handle + status-code pattern,
+> or drive the engine's public `EngineCommand` type from Rust instead. The Rust
+> `EngineHandle` is the complete API; the FFI is a documented subset of it.
 
 ---
 

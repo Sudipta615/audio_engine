@@ -5,19 +5,25 @@ Guidance for AI coding agents (and humans) working in this repository.
 ## Project snapshot
 
 **Shadow Desktop** is a headless, high-performance, bit-perfect audiophile audio
-playback & DSP engine written in 100% pure Rust. It is a Cargo workspace with a
-graph-runtime architecture: a node-based DSP graph (compiled execution plans, live
-generation swaps) is the **production hot path**, an N-input mix bus carries the
-primary stream, crossfade partner, and independent lane tracks, a standalone aux
-bus node provides per-send automation and an insert seam, and a multi-endpoint
-output matrix fans the master out to several devices, each with its own realtime
-thread and clock-drift-corrected resampler. Since v3.52 the engine's graph is a
+playback & DSP engine written in Rust with no C/C++ codec SDKs. It is a Cargo
+workspace with a graph-runtime architecture: a node-based DSP graph (compiled
+execution plans, live generation swaps) is the **production hot path**, an N-input mix
+bus carries the primary stream, crossfade partner, and independent lane tracks, a
+standalone aux bus node provides per-send automation and an insert seam, and a
+multi-endpoint output matrix fans the master out to several devices, each with its own
+realtime thread and clock-drift-corrected resampler. The engine's graph is a
 `Graph2Engine` (Graph 2.0): its execution plans are *lowered* from a Graph2
-topology. Since v4.0.0 the legacy `dsp::graph` module is gone —
-the node arena lives as the crate-private `dsp::graph2::prod::arena`, the
-Graph2 lowering is the only plan source, and the former public surface is
-re-exported from `dsp::graph2::prod`. A stable C FFI
-lets non-Rust hosts drive the whole surface.
+topology by `prod/lowering.rs`, which is the only plan source. The former public
+`dsp::graph` module no longer exists — the node arena lives as the crate-private
+`dsp::graph2::prod::arena` and the former public surface is re-exported from
+`dsp::graph2::prod`. An optional `c-ffi` feature exposes an `extern "C"` subset to
+non-Rust hosts.
+
+Two qualifications on "pure Rust", because the unqualified claim is false: `alsa`
+binds the C `libasound` on Linux, and the WASAPI/ASIO (COM) and CoreAudio (ObjC)
+backends are FFI. Those are OS audio APIs, not codec SDKs. The DSP hot path itself has
+no unsafe FFI — its `unsafe` is confined to `src/dsp/simd/` (`std::arch` intrinsics
+behind runtime feature detection) and ring-buffer slice reconstruction.
 
 ```
 ├── Cargo.toml                  # workspace + `engine` crate (the library/bins)
@@ -64,8 +70,7 @@ lets non-Rust hosts drive the whole surface.
 │   │                           #   + rt/ (realtime executor: immutable
 │   │                           #   preallocated RtPlan, atomic publish/
 │   │                           #   swap/retire, zero-alloc enum dispatch)
-│   │                           #   + prod/ (v3.51–v4.0.0:
-│   │                           #   the production engine ON Graph 2.0 —
+│   │                           #   + prod/ (the production engine ON Graph 2.0 —
 │   │                           #   NodeKind::Prod stage kinds, the chain as
 │   │                           #   a real Graph2 topology, plan LOWERING
 │   │                           #   onto the arena PlanSet, Graph2Engine +
@@ -95,31 +100,37 @@ lets non-Rust hosts drive the whole surface.
 │   ├── output/                 # per-OS backends (alsa/wasapi/asio/coreaudio/cpal) +
 │   │                           #   endpoint.rs (per-endpoint worker, drift correction)
 │   │                           #   + device_monitor, output_profile, rate_policy
-│   └── bin/                    # `audio-engine-cli`, `replaygain-scanner`
-├── benches/                    # dsp_bench, pipeline_bench, graph_plan_bench, spatial_bench
-├── docs/                       # ARCHITECTURE.md, SIGNAL_FLOW.md, EMBEDDING.md
+│   └── bin/                    # `audio-engine-cli`, `replaygain-scanner`,
+│                               #   `aelog_replay`, `release-qualification`
+├── benches/                    # dsp_bench, pipeline_bench, graph_plan_bench,
+│                               #   spatial_bench, performance_budget
+├── docs/                       # README.md, GETTING_STARTED.md, ENGINE_SPEC.md,
+│                               #   OWNERS_GUIDE.md, ARCHITECTURE.md, SIGNAL_FLOW.md,
+│                               #   EMBEDDING.md, HISTORY.md,
+│                               #   LICENSES_AND_ATTRIBUTION.md
 └── tests/                      # headless + `tests/fidelity/` DSP/decoder suites
 ```
 
 Five crates ship versions that **must stay in lockstep** (see Versioning):
-`engine` (workspace root), `config` (`crates/config`), `plugin-abi`
-(`crates/plugin-abi`), `plugin-test-echo` (`crates/plugin-test-echo`), and
-`engine-tui` (`crates/tui`).
-All four are **workspace members** — `crates/opus-decoder` is a fifth member
-but deliberately sits on its own 0.1.x line.
+`audio-engine` (workspace root; its library target is named `engine`), `config`
+(`crates/config`), `plugin-abi` (`crates/plugin-abi`), `plugin-test-echo`
+(`crates/plugin-test-echo`), and `engine-tui` (`crates/tui`).
+**Six** crates are workspace members — `crates/opus-decoder` is the sixth, and
+deliberately sits on its own 0.1.x line because it is a vendored fork of an upstream
+crate.
 
 They are members but do NOT inherit `[workspace.package].version`: they are an
-independently versioned realtime product lineage whose versions do not track
-Ultimate Engine's 1.x series, so each states its own version and moves in
-lockstep by policy.
+independently versioned realtime product lineage, so each states its own version and
+moves in lockstep by policy. (`[workspace.package]` was removed in 0.9.0 — nothing ever
+inherited from it, so it was dead configuration drifting since 0.6.0.)
 
 `engine-tui` is a workspace member **rather than a module** in the root crate so
 `ratatui`/`crossterm` are never pulled into a library integrator's dependency
 tree — a host that links `audio-engine` for its DSP should not inherit a
-terminal UI framework. Both are pure Rust, so the no-FFI property holds. That distinction is load-bearing — when these crates were
-path dependencies with no `[workspace]` table, every `--workspace` command in
-CI silently resolved to the root package alone and 56 tests across them never
-ran.
+terminal UI framework. Both are pure Rust, so no new FFI enters the DSP path. That
+distinction is load-bearing — when these crates were path dependencies with no
+`[workspace]` table, every `--workspace` command in CI silently resolved to the root
+package alone and 56 tests across them never ran.
 
 ## Feature flags
 
@@ -134,6 +145,40 @@ instead of surfacing a dozen unresolved-import errors from backend internals.
 Because a required feature cannot be exercised by CI's `default` /
 `all-features` matrix alone, the `features` CI job checks the individual
 combinations explicitly. Add to it when a new feature is introduced.
+
+## Toolchain and MSRV — there is no MSRV story yet
+
+`rust-toolchain.toml` pins **`stable`**, and **no `rust-version` is declared** in
+any workspace manifest. Do not write documentation implying a supported MSRV — there
+isn't one.
+
+The dependency floor is **1.89** (`lofty` → `ogg_pager` declares it), but the tree
+does **not** currently build at 1.89: it uses `#[allow(clippy::manual_is_multiple_of)]`,
+a later lint, and 1.89's clippy raises 18 additional warnings. Declaring
+`rust-version = "1.89"` would be a claim the tree does not honour, so the field stays
+absent. Establishing a real MSRV — by either removing the newer lint and the 18
+warnings or by raising the floor deliberately — is follow-up work.
+
+The one hard constraint that does hold: `crates/opus-decoder` is edition 2024, so the
+workspace needs `resolver = "2"` and **Rust ≥ 1.85**.
+
+## Distribution — GitHub, not crates.io
+
+Do not add crates.io availability claims to any document, and do not add
+`publish = true` without revisiting the reasoning in `Cargo.toml`. As of 0.9.0:
+
+- `config` — the name is already owned on crates.io by `config-rs`; publishing is
+  impossible without squatting someone else's name.
+- `crates/opus-decoder` — a fork of the upstream crate of the same name. `cargo
+  publish` rewrites a path dependency into a bare version requirement, so every
+  consumer would silently receive the **unpatched upstream 0.1.1**, reinstating the
+  debug-build shift overflow at `celt/vq.rs` that this fork exists to fix. The failure
+  is invisible: the build succeeds and the panic only appears on Ogg Opus input.
+
+Renaming both would break every downstream path, which a 0.x minor must not do. So
+every affected crate declares `publish = false` and the release ships from GitHub
+(source plus prebuilt binaries). **`plugin-abi` is the one publishable crate.** Revisit
+under product-scoped names (`shadow-config`, `shadow-opus-decoder`) at a major release.
 
 ## Versioning — Semantic Versioning (`x.y.z`)
 
@@ -169,9 +214,14 @@ Adopt strict [Semantic Versioning](https://semver.org) with the form
 - Any new backward-compatible capability → a **minor**.
 - Any breaking change → a **major**.
 
-**Example.** Adding a new public `EngineHandle::set_gain` method = minor → `3.1.0`.
-Fixing a limiter off-by-one bug = patch → `3.0.1`. Removing the `CpalOutput` type
-= major → `4.0.0`.
+**Example.** Adding a new public `EngineHandle::set_gain` method = minor → `0.10.0`.
+Fixing a limiter off-by-one bug = patch → `0.9.1`. Removing the `CpalOutput` type
+= major → `1.0.0`.
+
+> **Under 1.0 there is no compatibility floor.** Strict SemVer's stability promise
+> begins at 1.0.0. Before then, a `y` bump may still carry a breaking change when
+> there is no alternative — but it must be called out in the CHANGELOG entry, not
+> left for a user to discover. This project is at 0.9.0; treat the API as unstable.
 
 ## Modularity — no god files
 
@@ -269,12 +319,20 @@ Before considering a change "complete", verify:
         `license`, `repository`, and `homepage` values for both packages match the
         README's claims.
 - [ ] **CI green**: `cargo fmt --all -- --check`, `cargo clippy --workspace
-      --all-targets -- -D warnings`, and `cargo test --workspace` pass. Optional
-      feature builds (`tag-write`, `fingerprint`, `c-ffi`, `network-streaming`,
-      `wasapi-native`, `asio-native`) compile when the change touches those paths.
+      --all-targets -- -D warnings`, `cargo test --workspace`, and
+      `cargo deny check` pass. Optional feature builds (`sofa-import` — which is
+      in `default`, so it must keep building — plus `plugin-dylib`, `pipewire`,
+      `jack`, `asio`, `tag-write`, `fingerprint`, `c-ffi`, `network-streaming`,
+      `wasapi-native`, `asio-native`, and the `all-codecs` aggregate) compile when
+      the change touches those paths.
 - [ ] **Docs consistent**: `README.md`, `docs/ARCHITECTURE.md`, `docs/SIGNAL_FLOW.md`,
-      and `docs/EMBEDDING.md` still describe the real layout and
-      behavior; update the module map when you add/move/remove a module.
+      `docs/EMBEDDING.md`, `docs/GETTING_STARTED.md`, and `docs/OWNERS_GUIDE.md`
+      still describe the real layout and behavior; update the module map when you
+      add/move/remove a module.
+- [ ] **No new false claims.** Every capability sentence in the README must be
+      backed by code you read, and every limitation must still be listed. A
+      documented limitation that has been fixed is removed; a limitation that has
+      appeared is added, in the same PR.
 - [ ] **New `EngineCommand` variants have a handle method and read-back.** The
       control surface is write-only at the enum level, so a variant with no
       `EngineHandle` setter and no field in `EngineSettings` is unreachable

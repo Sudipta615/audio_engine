@@ -1,10 +1,17 @@
 [package]
 name = "engine-tui"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
 description = "Shadow Desktop terminal UI: a live, keyboard-driven front end for the audio-engine control surface"
+readme = "../../README.md"
+keywords = ["audio", "dsp", "tui", "player"]
+categories = ["multimedia::audio", "command-line-interface"]
+# Not published: depends on `audio-engine`, which is itself `publish = false`
+# (see the root manifest). A published TUI would need a published engine.
+publish = false
+
 
 # A separate workspace member rather than a module inside `audio-engine`.
 #
@@ -19,7 +26,7 @@ description = "Shadow Desktop terminal UI: a live, keyboard-driven front end for
 # three move together: the TUI compiles against a specific handle surface.
 
 [dependencies]
-audio-engine = { path = "../..", version = "0.8.0" }
-config = { path = "../config", version = "0.8.0" }
+audio-engine = { path = "../..", version = "0.9.0" }
+config = { path = "../config", version = "0.9.0" }
 ratatui = "0.30.2"
 crossterm = "0.29.0"

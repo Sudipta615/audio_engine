@@ -132,6 +132,11 @@ impl AudioEngine {
         // Persist the active spatial scene when it changed (writes
         // once per change; the steady path is a plain field compare).
         self.spatial_persistence.maybe_save(&self.graph);
+        // Persist the hand-tuned DSP state (limiter, EQ preset library, output
+        // device/backend) when it changed. `save_if_changed` compares against
+        // the last state it wrote, so the steady path is a struct compare
+        // rather than disk I/O on every tick.
+        self.persist_dsp_state();
         #[cfg(feature = "audio-output")]
         self.poll_device_monitor();
         self.drain_capture();
@@ -644,9 +649,10 @@ impl AudioEngine {
     /// held at its clamp, say) from churning the `ArcSwap`.
     pub(crate) fn publish_settings(&self) {
         let settings = std::sync::Arc::new(self.snapshot_settings());
+        let config = std::sync::Arc::new(self.config.clone());
         {
             let current = self.playback_info.load();
-            if *current.settings == *settings {
+            if *current.settings == *settings && *current.config == *config {
                 // Nothing the read-back reports has moved. Returning here is
                 // what keeps a stream of no-op commands (a slider held at its
                 // clamp, say) from churning the `ArcSwap` at the input rate.
@@ -656,8 +662,15 @@ impl AudioEngine {
         self.playback_info.rcu(|old| {
             let mut next = old.as_ref().clone();
             next.settings = std::sync::Arc::clone(&settings);
+            next.config = std::sync::Arc::clone(&config);
             Arc::new(next)
         });
+    }
+
+    /// Persist the hand-tuned DSP state, writing only when it moved.
+    fn persist_dsp_state(&mut self) {
+        let state = snapshot_dsp_state(&self.config);
+        self.dsp_persistence.save_if_changed(&state);
     }
 
     pub fn playback_info_arc(&self) -> Arc<ArcSwap<PlaybackInfo>> {
@@ -1002,5 +1015,26 @@ impl Drop for AudioEngine {
         // Persist the final spatial scene state so the next
         // session restores exactly what was active at shutdown.
         self.spatial_persistence.save_now(&self.graph);
+        // Same for the DSP state: a session that ended seconds after the user
+        // moved the limiter must not lose that move.
+        self.persist_dsp_state();
+    }
+}
+
+/// Project the live config onto the persisted [`DspState`] and write it if it
+/// moved.
+///
+/// Deliberately narrow: this is the set of settings a user tunes by hand and
+/// expects to find again. Everything else in `EngineConfig` is either derived
+/// at construction, restored from the host's own config file, or meaningful
+/// only for the running graph (the active EQ curve is applied through the
+/// control path, and persisting it here would give two sources of truth for
+/// one value).
+fn snapshot_dsp_state(config: &config::EngineConfig) -> config::DspState {
+    config::DspState {
+        eq_presets: config.eq.presets.clone(),
+        limiter: config.limiter.clone(),
+        output_device: config.output_device.clone(),
+        output_backend: config.output_backend,
     }
 }

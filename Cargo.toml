@@ -13,10 +13,39 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on.
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
+description = "Shadow Desktop: a bit-perfect, headless audiophile audio playback and DSP engine written in pure Rust, with a node-graph realtime core, multi-endpoint output, spatial audio, room correction and a stable C ABI"
+readme = "README.md"
+keywords = ["audio", "dsp", "realtime", "audiophile", "bit-perfect"]
+categories = ["multimedia::audio", "multimedia::audio::playback"]
+publish = false
+
+# 0.9.0 distribution decision, deliberately chosen over the alternative of
+# renaming two crates:
+#
+# Publishing this workspace would require two renames that are breaking for
+# every downstream path, which a 0.x minor must not carry:
+#
+#   * `config` — the name is already taken on crates.io by `config-rs`
+#     (~107M all-time downloads), so publishing this crate is impossible
+#     without squatting someone else's name.
+#   * `opus-decoder` — this is an in-tree *fork* of the upstream crate of the
+#     same name. `cargo publish` rewrites a path dependency to a bare version
+#     requirement, so every consumer would silently receive the **unpatched
+#     upstream 0.1.1** — reinstating exactly the debug-build shift overflow at
+#     `celt/vq.rs` that this fork exists to fix. That failure is invisible: the
+#     build succeeds and the panic only appears on Ogg Opus input.
+#
+# So 0.9.0 ships from GitHub (source + prebuilt binaries via `release.yml`)
+# rather than from crates.io, and every crate that would be unsafe or
+# impossible to publish declares `publish = false`. `plugin-abi` is the one
+# exception: it is genuinely standalone and is publishable on its own.
+#
+# Revisit when the project is ready to publish under its own product-scoped
+# names (`shadow-config`, `shadow-opus-decoder`) in a major release.
 
 # `config`, `plugin-abi`, `plugin-test-echo` and `opus-decoder` are WORKSPACE
 # MEMBERS, not merely path dependencies.
@@ -47,10 +76,16 @@ members = [
 ]
 resolver = "2"
 
-[workspace.package]
-version = "0.6.0"
-edition = "2021"
-license = "Apache-2.0"
+# `[workspace.package]` was removed in 0.9.0. It declared
+# `version = "0.6.0"`, but **no crate inherited anything from it** — not one
+# manifest used `workspace = true` — so it was dead configuration that had
+# been drifting since 0.6.0 and would have misled the next maintainer into
+# thinking a second version line existed. Every crate states its own
+# `version`, which is the lockstep policy AGENTS.md describes.
+#
+# `fuzz/` is deliberately NOT a member and is NOT excluded. It is its own
+# workspace, declared by `fuzz/Cargo.toml`'s own `[workspace]` table (added in
+# 0.9.0), because cargo-fuzz builds it out-of-tree with its own lockfile.
 
 [lib]
 name = "engine"
@@ -195,10 +230,10 @@ realfft = "3.5"
 # cepstral minimum-phase, hybrid-phase rendering. Same crate realfft builds
 # on, so this adds no new compiled code.
 rustfft = "6.2"
-config = { path = "crates/config" }
+config = { path = "crates/config", version = "0.9.0" }
 # The Rust-native plugin ABI + host. Default features off —
 # the `plugin-dylib` engine feature pulls in the loader.
-plugin-abi = { path = "crates/plugin-abi", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.0", default-features = false }
 thread-priority = { version = "3.1", optional = true }
 # Pure-Rust Monkey's Audio (APE) decoder, enabled by the `codec-ape` feature.
 ape-decoder = { version = "0.3.2", optional = true }
@@ -314,8 +349,8 @@ rusty-opus = "0.9.1"
 # `.wv` fixtures at test time (no committed binary assets).
 wavicle = { version = "0.1", features = ["encode"] }
 # The reference plugin (in-process, via the static registry).
-plugin-abi = { path = "crates/plugin-abi", default-features = false }
-plugin-test-echo = { path = "crates/plugin-test-echo", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.0", default-features = false }
+plugin-test-echo = { path = "crates/plugin-test-echo", version = "0.9.0", default-features = false }
 # Parses `testdata/fixtures.toml` for the decode fixture smoke test. Test-only:
 # the library itself has no TOML dependency.
 toml = "0.8"
@@ -738,6 +773,42 @@ path = "tests/cue_split_queue.rs"
 name = "lra_allocation"
 path = "tests/fidelity/lra_allocation.rs"
 
+# ── Registered in 0.9.0 ───────────────────────────────────────────────────────
+# These three files existed and carried 23 `#[test]` functions, but were never
+# compiled. Cargo auto-discovers `tests/*.rs` and `tests/*/main.rs` — **not**
+# `tests/*/*.rs` — and `tests/fidelity/` has no `main.rs`, so without an
+# explicit `[[test]]` entry each file was invisible to the build system. No
+# error, no warning, no CI failure: 21 KB of hand-written parser-robustness
+# and mutation coverage that had simply never run.
+#
+# `AGENTS.md` even instructs contributors to `cargo test --test fuzz_mutation`,
+# which failed with "no test target named 'fuzz_mutation'" — the documentation
+# described a target that did not exist.
+#
+# Coverage measurement (`cargo llvm-cov` in CI) is what would have caught this
+# class of omission automatically; it is now part of the `coverage` job.
+[[test]]
+name = "fuzz_mutation"
+path = "tests/fidelity/fuzz_mutation.rs"
+
+[[test]]
+name = "fuzz_expanded"
+path = "tests/fidelity/fuzz_expanded.rs"
+
+[[test]]
+name = "coverage_guided_fuzzing"
+path = "tests/fidelity/coverage_guided_fuzzing.rs"
+
+# Bit-exact golden suite. Added in 0.9.0 because the project's headline claim
+# is bit-perfectness and **no committed byte-existed anywhere in the
+# repository** — `golden_reference_vectors.rs` re-derived its own expectations
+# inside the test, so a change that altered every output sample while
+# preserving every invariant would have passed cleanly. This suite compares
+# against committed artifacts under `tests/fidelity/goldens/`.
+[[test]]
+name = "golden_bit_exact"
+path = "tests/fidelity/golden_bit_exact.rs"
+
 
 
 
@@ -763,8 +834,8 @@ overflow-checks = true
 #
 # `codegen-units` is deliberately left at its default of 16 rather than set to
 # 1. Forcing 1 roughly triples the wall time of `cargo test --release` on this
-# tree (208k lines, 90+ test binaries) for a measurable-but-small gain over thin
-# LTO alone, which is a bad trade for a build people run locally.
+# tree (~187k lines, 95 integration test binaries) for a measurable-but-small
+# gain over thin LTO alone, which is a bad trade for a build people run locally.
 lto = "thin"
 
 # `panic = "abort"` is deliberately NOT set: the plugin host relies on

@@ -28,19 +28,44 @@
 #
 # `lint` still runs debug, because clippy and rustfmt are profile-independent.
 #
-# Two jobs are deliberately NOT `continue-on-error`, and their failures are
+# Jobs that are deliberately NOT `continue-on-error`, and whose failures are
 # meant to block a merge:
-#   * `fixtures` — the generated decode corpus, which is the only coverage of
-#     the externally-encoded lossy/container decode paths.
-#   * `perf`     — the realtime wall-clock budget gate.
+#   * `fixtures`  — the generated decode corpus (the only coverage of the
+#                   externally-encoded lossy/container decode paths) AND the
+#                   RFC 8251 Opus bitstream conformance sweep.
+#   * `perf`      — the realtime wall-clock budget gate.
+#   * `release-gate` — the project's own `engine::eval` qualification pipeline.
+#
+# Every action is pinned to a full commit SHA with the version in a trailing
+# comment. A floating tag on a third-party action that installs packages from
+# crates.io is remote code execution with a one-commit delay, and a wrong SHA is
+# worse than a floating tag — so where a SHA could not be established with
+# confidence it was left off entirely rather than guessed.
 
 name: CI
 
 on:
   push:
     branches: [main, master]
+    # Tag pushes run this workflow too, not only `release.yml`, so a tag gets the
+    # same 15 checks a branch push does. `release.yml` is additive: it builds and
+    # uploads the artefacts.
+    tags: ['v*']
   pull_request:
+  # Nightly fuzzing campaign. Weekdays only: libFuzzer coverage growth is
+  # cumulative, and a weekend-only schedule would mean a long idle gap every
+  # week followed by a burst. 03:17 UTC rather than 03:00 to avoid the top of
+  # the hour, when every other scheduled workflow on the platform fires.
+  schedule:
+    - cron: '17 3 * * 1-5'
   workflow_dispatch:
+
+# Least privilege, stated once for the whole workflow. Without this block every
+# job inherits the repository default `GITHUB_TOKEN` scope, which on older
+# repositories is read/write on contents. Nothing here pushes, comments, or
+# creates releases — `release.yml` only reads — so read-only is the whole story.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,15 +88,24 @@ jobs:
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # `rust-toolchain.toml` pins the MSRV (1.89). Linting is
+      # profile-independent, but clippy only knows about lints that exist in
+      # the toolchain running it, so lint on current stable to get the newest
+      # lints; the `toolchain-floor` job is what proves the tree still builds
+      # at the pinned toolchain with the lockfile honoured.
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -108,26 +142,39 @@ jobs:
   features:
     name: feature combinations
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
 
       - name: Install ALSA
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `audio-output` alone must work: it implies `resample` because
       # `output::endpoint` drives a rubato slip resampler for drift correction.
       - name: check (audio-output only)
         run: cargo check --workspace --no-default-features --features audio-output
 
-      # `audio-output` without any codec.
-      - name: check (audio-output, no codecs)
+      # The no-codec case is the step above, not this one.
+      #
+      # This step was labelled "check (audio-output, no codecs)" while passing
+      # `--features audio-output,all-codecs`, i.e. while enabling every codec.
+      # A label that contradicts its command is worse than no label: it reads as
+      # coverage of a configuration that is not being built, which is how a real
+      # break in the no-codec path stays invisible. Relabelled to say what it
+      # does. The configuration it actually covers — every codec, but NOT the
+      # default `sofa-import` — is genuinely distinct from `--all-features` and
+      # from `--features audio-output`, so the step stays.
+      - name: check (audio-output + all-codecs, no sofa-import)
         run: cargo check --workspace --no-default-features --features audio-output,all-codecs
 
       # Each optional backend family composes through `audio-output`.
@@ -153,22 +200,28 @@ jobs:
   # ── Supply chain ───────────────────────────────────────────────────────────
   #
   # There was no dependency-policy or advisory check in CI, and `Cargo.lock`
-  # carries 27 crates at two versions each.
+  # carries 27 crates at two versions each. Both tools now read an in-repo
+  # policy file (`deny.toml`, `.cargo/audit.toml`) instead of whatever defaults
+  # are compiled into the action binary.
   supply-chain:
     name: supply chain
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: cargo deny (advisories, licenses, bans, sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
       - name: cargo audit (RustSec advisories)
         run: |
@@ -189,32 +242,106 @@ jobs:
 
   # ── MSRV ───────────────────────────────────────────────────────────────────
   #
-  # `crates/opus-decoder` requires edition 2024 (Rust 1.85). The root manifest
-  # declared no `rust-version`, so an older toolchain failed with an opaque
-  # edition error rather than a stated minimum.
-  msrv:
-    name: minimum supported rust version
+  # The toolchain comes from `rust-toolchain.toml`, not from a literal here. The
+  # version this job used to hardcode — 1.85 — could never have passed: it was
+  # read off `crates/opus-decoder`'s edition-2024 requirement, which is the
+  # floor for that ONE member and was never reconciled against the rest of the
+  # resolved graph. `cargo` rejects the graph outright at 1.85 ("ratatui@0.30.2
+  # requires rustc 1.88.0", and eight others). The real floor is set from
+  # below by transitive `rust-version` declarations and is recorded, with the
+  # evidence, in `rust-toolchain.toml`.
+  #
+  # No `RUSTUP_TOOLCHAIN` is set in this job on purpose: that is what makes it
+  # read the file. Setting it here would silently defeat the job's purpose.
+  # ── Toolchain floor ────────────────────────────────────────────────────────
+  #
+  # This job used to be called `msrv` and hardcoded `rustup toolchain install
+  # 1.85`. That job could never have passed: the dependency graph requires
+  # 1.89 (`lofty 0.22.4` -> non-optional `ogg_pager 0.7.2` declares
+  # `rust-version = "1.89"`), and Cargo enforces declared floors against the
+  # active toolchain. So the repository carried an MSRV claim that nothing
+  # verified and that was not achievable.
+  #
+  # It is renamed `toolchain-floor` because that is what it can honestly
+  # assert today. The workspace pins `stable` (see `rust-toolchain.toml`) and
+  # declares **no** `rust-version`, because 1.89 does not build this tree: the
+  # source uses `#[allow(clippy::manual_is_multiple_of)]`, a lint that does
+  # not exist before a much later clippy, and 1.89's clippy raises 18 extra
+  # warnings that CI's `-D warnings` turns into failures.
+  #
+  # What this job does assert, and asserts usefully:
+  #
+  #   1. the pinned toolchain resolves and is the one every other job uses;
+  #   2. the *dependency* floor is what we think it is, so a transitive bump
+  #      that silently raises the requirement is caught here rather than in a
+  #      contributor's `cargo build`;
+  #   3. the tree builds at the pinned toolchain with `--locked`, so a
+  #      dependency update cannot drift under a green build.
+  #
+  # Establishing a real MSRV — fix the 18 lint sites, drop the unknown-lint
+  # allow, run the full suite on the floor, then declare `rust-version` and
+  # build the `msrv` leg on it — is tracked as follow-up work, not smuggled
+  # into a release.
+  toolchain-floor:
+    name: toolchain floor
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Deliberately unset: this job must exercise the toolchain that
+      # `rust-toolchain.toml` pins, not an override.
+      RUSTUP_TOOLCHAIN: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - name: Install toolchain (MSRV)
+      - name: Resolve the toolchain from rust-toolchain.toml
         run: |
-          rustup toolchain install 1.85 --profile minimal
-          rustup default 1.85
+          rustup show active-toolchain
+          rustc --version --verbose
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal --component rustfmt,clippy
 
       - name: Install ALSA
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: check (MSRV)
-        run: cargo check --workspace --locked
+      # `--locked`: a silently updated dependency is exactly the drift that
+      # makes a declared floor a lie.
+      - name: check (pinned toolchain, locked)
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Assert no manifest declares a rust-version we do not honour
+        run: |
+          if grep -rn '^rust-version' Cargo.toml crates/*/Cargo.toml; then
+            echo "::error::a crate declares rust-version but the toolchain is"
+            echo "::error::pinned to stable. Either build the floor and declare"
+            echo "::error::it, or remove the declaration — an unverified floor"
+            echo "::error::is worse than no floor."
+            exit 1
+          fi
+
+      # Reports the real dependency-imposed floor. Not gating (it cannot be,
+      # without a declared MSRV to compare against) but printed on every run so
+      # a transitive bump that raises the requirement is visible in the log
+      # rather than discovered by a contributor.
+      - name: Report the dependency-imposed Rust floor
+        run: |
+          cargo tree --edges normal,build,dev \
+            --prefix none --format '{p} {r}' \
+            | awk '{print $NF}' | grep -E '^[0-9]+\.[0-9]+' \
+            | sort -V | tail -1 \
+            | xargs -I{} echo "highest declared dependency rust-version: {}"
 
   # ── Test ───────────────────────────────────────────────────────────────────
   test:
     name: test (${{ matrix.os }}, ${{ matrix.features }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: stable
     strategy:
       # Any single failing leg fails the job, but do not cancel in-flight legs:
       # a macOS failure plus a cancelled Windows run tells you much less than
@@ -224,12 +351,13 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         features: [default, all-features]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup default stable
 
       # Linux needs ALSA headers for `cpal`; the engine does not open a device
       # in CI, but the crate still links against `libasound`.
@@ -237,16 +365,41 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.os }}-${{ matrix.features }}
 
+      # `shell: bash` is explicit because this step needs shell control flow and
+      # the Windows leg would otherwise run it under PowerShell, where
+      # `[ "x" = "y" ]` is a syntax error rather than a comparison. Git Bash is
+      # present on `windows-latest`.
+      #
+      # `realtime_budget` is skipped in all six legs and runs ONLY in the
+      # dedicated `perf` job. Rationale in that job; the short version is that it
+      # is a wall-clock assertion, its own module doc records a max-latency
+      # assertion failing 6 runs in 25 on unmodified code (reporting 198% of
+      # budget) before it was relaxed to a median bound, and that reasoning holds
+      # for a dedicated runner but not for six shared GitHub-hosted runners
+      # running in parallel while a neighbour tenant saturates the host.
+      #
+      # Cargo has no per-target skip, and `--skip` matches TEST NAMES, not
+      # target names, so `--skip realtime_budget` would match nothing at all.
+      # These are the three test functions in `tests/fidelity/realtime_budget.rs`.
+      # If you add a test to that file, add it here or it will run in six
+      # parallel matrix legs.
       - name: test (release)
+        shell: bash
         run: |
+          set -euo pipefail
+          skip_realtime_budget=(
+            --skip production_chain_stays_within_half_the_block_deadline
+            --skip resampler_tiers_are_within_budget
+            --skip small_blocks_stay_within_budget
+          )
           if [ "${{ matrix.features }}" = "all-features" ]; then
-            cargo test --workspace --release --all-features --no-fail-fast
+            cargo test --workspace --release --all-features --no-fail-fast -- "${skip_realtime_budget[@]}"
           else
-            cargo test --workspace --release --no-fail-fast
+            cargo test --workspace --release --no-fail-fast -- "${skip_realtime_budget[@]}"
           fi
 
       # The fixture smoke test skips itself when `testdata/fixtures/` is
@@ -254,17 +407,24 @@ jobs:
       # This is intentional: it keeps the `test` matrix from depending on
       # GStreamer being installed, which is not true on every runner image.
 
-  # ── Fixtures ───────────────────────────────────────────────────────────────
+  # ── Fixtures + Opus conformance ────────────────────────────────────────────
   fixtures:
-    name: decode fixture corpus
+    name: decode fixture corpus + opus conformance
     runs-on: ubuntu-latest
+    # The Opus conformance sweep decodes ~110 M samples/channel of reference
+    # bitstream and runs a port of `opus_compare` over each vector. That is the
+    # long pole in this job by a wide margin, hence the generous ceiling.
+    timeout-minutes: 75
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup default stable
 
       # The encoders the generator needs, verified present on GStreamer 1.24.x.
       # `aiffenc`, `avenc_pcm_s16be` and `adtsmux` are absent upstream and the
@@ -278,7 +438,7 @@ jobs:
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Generate fixtures + manifest
         run: ./scripts/make_fixtures.sh
@@ -300,48 +460,416 @@ jobs:
             exit 1
           fi
 
-      - name: Upload corpus (for debugging a failed run)
+      # ── RFC 6716 / RFC 8251 bitstream conformance ──────────────────────────
+      #
+      # Nine tests across `crates/opus-decoder` are `#[ignore]`d because they
+      # need the official Opus test-vector corpus, and nothing in CI ever set
+      # `OPUS_TESTVECTORS_DIR`. RFC 8251 bitstream conformance therefore had 0%
+      # execution: the crate's README claims "all 12 official test vectors pass"
+      # and nothing was checking.
+      #
+      # WHERE THE VECTORS COME FROM. This step was originally specified against
+      # `github.com/xiph/opus-testvectors`, branch `main`. That repository does
+      # not exist — GitHub returns 404 for the repo and for its `main` ref, and
+      # it does not appear in the `xiph` organisation's repository list. The
+      # vectors are not published as a git repository at all; they are a tarball
+      # from the Xiph project site. So the pin here is by CONTENT, which for a
+      # tarball is a stronger guarantee than a commit SHA would have been.
+      - name: Fetch the Opus test-vector corpus (sha256-pinned)
+        env:
+          OPUS_VECTORS_URL: https://opus-codec.org/static/testvectors/opus_testvectors-rfc8251.tar.gz
+          # sha256 of the 74,624,664-byte RFC 8251 tarball
+          # (`opus_newvectors/`, Last-Modified 2024-04-12). Changing this line
+          # means re-verifying the upstream artefact deliberately, in a commit
+          # whose diff shows the old and new digest.
+          OPUS_VECTORS_SHA256: 6b26a22f9ba87b2b836906a9bb7afec5f8e54d49553b1200382520ee6fedfa55
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/opus-vectors"
+          mkdir -p "$root"
+          curl --fail --location --silent --show-error \
+               --retry 3 --retry-delay 5 \
+               -o "$root/corpus.tar.gz" "$OPUS_VECTORS_URL"
+          echo "$OPUS_VECTORS_SHA256  $root/corpus.tar.gz" | sha256sum --check --strict
+          tar -xzf "$root/corpus.tar.gz" -C "$root"
+          for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
+            test -s "$root/opus_newvectors/testvector$n.bit"
+            test -s "$root/opus_newvectors/testvector$n.dec"
+            test -s "$root/opus_newvectors/testvector${n}m.dec"
+          done
+          ls -l "$root/opus_newvectors"
+
+      # `tests/common.rs::load_vector_spec` and
+      # `tests/conformance_rfc.rs::load_manifest` both require a `vectors.txt`
+      # manifest, and the upstream tarball contains no such file — only
+      # `testvectorNN.bit` / `.dec` / `m.dec` pairs. (Upstream's own
+      # `tests/run_vectors.sh` iterates 01..12 by hand and never reads a
+      # manifest.) The project-local template the tests point at in their panic
+      # message, `testdata/vectors.example.txt`, does not exist in this
+      # repository, so the manifest is synthesised here instead.
+      #
+      # Only `testvector07` gets an entry: it is the only vector looked up BY
+      # NAME (`celt_output_rates.rs` and `multistream.rs` both call
+      # `load_packets("testvector07")`), and `load_packets` consumes only the
+      # `.bit` path from the record — `fs_hz` and `channels` are parsed and then
+      # ignored. The values written are the rate and channel count those two
+      # tests decode at (48 kHz mono, per their own `OpusDecoder::new` calls),
+      # not an invented mapping.
+      - name: Generate vectors.txt (the upstream corpus ships no manifest)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/opus-vectors/opus_newvectors"
+          {
+            echo "# name bit dec fs_hz channels"
+            echo "# Generated in CI; see the step comment above."
+            printf 'testvector07 testvector07.bit testvector07.dec 48000 1\n'
+          } > "$dir/vectors.txt"
+          cat "$dir/vectors.txt"
+          echo "OPUS_TESTVECTORS_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Opus conformance (previously never executed)
+        run: |
+          set -euo pipefail
+          {
+            # Bit-exact SILK conformance: `final_range()` and the NLSF->LPC
+            # coefficients are compared against the C reference stream's own
+            # final-range values, for every packet of testvector02. Needs only
+            # testvector02.bit. Both tests are in the `opus-decoder` lib.
+            cargo test --release -p opus-decoder --lib -- --ignored testvector02 --nocapture
+
+            # Every packet of every vector parses through the RFC 8251 framing
+            # and TOC tables.
+            cargo test --release -p opus-decoder --lib -- --ignored parse_official_vectors_smoke
+
+            # CELT decodes, and PLC conceals, at every public output rate.
+            cargo test --release -p opus-decoder --test celt_output_rates -- --ignored
+
+            # Multistream channel mapping: the call-recording case, and
+            # mapping value 255 silencing an output channel.
+            cargo test --release -p opus-decoder --test multistream -- --ignored
+
+            # PLC smoke over a real CELT stream (i16 vs f32 must agree, output
+            # must be finite, concealment must actually produce samples).
+            cargo test --release -p opus-decoder --test conformance_rfc -- --ignored plc_smoke_test --nocapture
+          } 2>&1 | tee opus-conformance.log
+
+      # NOT RUN HERE, AND THIS IS A KNOWN GAP:
+      # `tests/conformance_rfc.rs::rfc_conformance_vectors` is the ninth
+      # ignored test and is the one that does the full reference-vs-decoded PCM
+      # quality comparison across all 12 vectors. It iterates EVERY entry in
+      # `vectors.txt` and uses each entry's `fs_hz` and `channels` to build the
+      # decoder and to call the `opus_compare` port, so running it needs a
+      # correct 12-row manifest. That manifest is a project-local file which does
+      # not exist in this repository, and its `fs_hz`/`channels` per vector
+      # cannot be reconstructed from the corpus alone: the shipped `.dec` lengths
+      # only pin the channel count down for the vectors whose `.bit` streams
+      # have a uniform frame configuration, and the CELT-only vectors do not.
+      # Guessing the remaining rows would produce a conformance gate that fails
+      # for a reason unrelated to conformance, which is worse than the gap being
+      # visible. Landing `testdata/vectors.example.txt` with the real mapping is
+      # the fix, and it belongs to whoever owns `testdata/`.
+      - name: Record which ignored Opus tests ran
+        run: |
+          set -euo pipefail
+          echo "Corpus:  $OPUS_TESTVECTORS_DIR"
+          ls "$OPUS_TESTVECTORS_DIR/vectors.txt"
+          echo "See the comment above 'Opus conformance' for the one ignored"
+          echo "test that remains unrun (rfc_conformance_vectors) and why."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
-        uses: actions/upload-artifact@v4
+        with:
+          name: opus-conformance-log
+          path: opus-conformance.log
+          retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
         with:
           name: decode-fixtures
           path: testdata/fixtures/
           retention-days: 7
 
   # ── Realtime performance budget ────────────────────────────────────────────
+  #
+  # The ONE place `realtime_budget` runs. It is excluded from all six `test`
+  # matrix legs on purpose: it is a wall-clock assertion about a callback
+  # deadline, and its own module doc records that an assertion on
+  # `max_callback_duration_us` "failed 6 runs in 25 on unmodified code" at 198%
+  # of budget before the author settled on a median bound. That trade — trading
+  # a strict max for a median so a shared, noisy runner does not produce
+  # spurious failures — is defensible for a single dedicated runner and much
+  # weaker for six shared GitHub-hosted runners in three operating systems
+  # running concurrently alongside each other and alongside other tenants.
+  # A flaky gate is worse than no gate: it trains people to re-run.
   perf:
     name: realtime budget
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: perf
 
       # A wall-clock assertion is meaningless in a debug build — see the header
-      # comment. `--release` is not optional here.
+      # comment. `--release` is not optional here. Deliberately NOT skipped.
       - name: realtime budget (release)
         run: cargo test --release --test realtime_budget -- --nocapture
+
+  # ── Release gate ───────────────────────────────────────────────────────────
+  #
+  # The project's own definition of "release-qualified": the `release-qualification`
+  # binary runs `engine::eval::run_qualification_pipeline()` and exits non-zero
+  # unless `qualification_status == Pass`. No CI job ever invoked it, so the
+  # thing the repository calls its release gate was never actually run.
+  #
+  # KNOWN GAP, recorded here because it is invisible anywhere else: the release
+  # gate's own implementation is untested. `src/eval/suites.rs` (682 LOC),
+  # `src/eval/qualification.rs` (502) and `src/eval/performance_matrix.rs` (399)
+  # contain no inline `#[cfg(test)]` module at all. So this job is a black box
+  # that can return Pass for reasons nobody has verified. Fixing it needs test
+  # modules in those three files, which the CI/supply-chain workstream does not
+  # own. Until they exist, treat a Pass here as "the pipeline agrees with
+  # itself", not as "the pipeline is correct".
+  release-gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+
+      # The gate binary links the whole engine, including `cpal`/`alsa-sys`,
+      # whose build script probes for `libasound` headers.
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-gate
+
+      - name: release-qualification
+        run: cargo run --release --locked --bin release-qualification -- --json
+
+  # ── Benches ────────────────────────────────────────────────────────────────
+  #
+  # All five `benches/*.rs` targets were compiled and executed never: there was
+  # no `cargo bench` anywhere in CI. criterion baselines do not bitrot by
+  # themselves, but harness code does — a refactor that changes a benchmark's
+  # setup changes its numbers without anyone noticing.
+  #
+  # These benches contain NO assertions (the single `assert` grep hit in
+  # `graph_plan_bench.rs` is the word inside a doc comment pointing at the
+  # equivalence suite for the real CI gate), so running them cannot fail on a
+  # regression. The gating wall-clock bound is `realtime_budget` in the `perf`
+  # job. What this job buys is that the benchmarks still compile, still run,
+  # and still produce a comparable number.
+  benches:
+    name: benches
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: benches
+
+      # Short measurement windows: this job is about proving the harnesses run,
+      # not about producing publishable numbers. criterion's defaults (3 s warm
+      # up, 5 s measure, per benchmark) would dominate the job's runtime.
+      - name: cargo bench (smoke)
+        run: cargo bench --workspace -- --warm-up-time 0.5 --measurement-time 1.0
+
+  # ── Miri ───────────────────────────────────────────────────────────────────
+  #
+  # Nothing in this tree had ever run under a dynamic checker, and the tree is
+  # full of exactly the code miri is for: `unsafe impl GlobalAlloc` in four test
+  # files, `unsafe impl Sync` on the `AuxSendBus` that the whole realtime
+  # architecture's "both sides run on the same audio thread" contract rests on,
+  # raw-pointer FFI in `src/ffi.rs`, and hand-rolled COM vtables in
+  # `asio_output/com.rs` and `wasapi_output/com.rs`.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    # miri is orders of magnitude slower than a normal test run, and this job
+    # compiles the library under an interpreter.
+    timeout-minutes: 45
+    env:
+      # Overrides `rust-toolchain.toml` (1.89). miri only ships on nightly.
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install nightly with miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: miri
+
+      # Builds and installs the miri sysroot for the host target. Slow, and
+      # cached by rustup afterwards.
+      - name: cargo miri setup
+        run: cargo miri setup
+
+      # SCOPE, AND WHY IT IS NARROW.
+      #
+      # Two modules only:
+      #   * `dsp::graph2` — the plan executor: raw pointer arithmetic over
+      #     preallocated audio buffers, the atomic publish/swap/retire path, and
+      #     the `unsafe impl Sync` contracts. If miri can prove this module's
+      #     aliasing and data-race freedom, the riskiest memory code in the
+      #     repository is checked.
+      #   * `buffer` — the cache-padded SPSC rings and the DSD byte path. Same
+      #     argument, and it is the other place with hand-written pointer code.
+      #
+      # What is NOT here, and cannot be:
+      #   * `extern "C"` FFI (`src/ffi.rs`, the ALSA/CoreAudio bindings). miri
+      #     cannot execute foreign code and shims it out, so a run over these
+      #     paths would be checking miri's shims, not the engine.
+      #   * SIMD (`simd_qualification`, `portable-atomic` paths). miri does not
+      #     model the vector intrinsics these lower to.
+      #   * The `#[cfg(windows)]` and `#[cfg(target_os = "macos")]` backends, on
+      #     a Linux runner — `asio_output/com.rs` and `wasapi_output/com.rs` are
+      #     not even compiled here, so their COM vtables remain unchecked. A
+      #     dedicated Windows miri leg is the honest follow-up.
+      #
+      # Scope creep here costs more than it buys: miri's runtime is roughly
+      # three orders of magnitude slower than native, and a whole-crate run
+      # would exceed any reasonable CI budget while checking mostly pure
+      # arithmetic.
+      - name: miri (dsp::graph2)
+        run: cargo miri test -p audio-engine --lib dsp::graph2
+
+      - name: miri (buffer)
+        run: cargo miri test -p audio-engine --lib buffer
+
+  # ── Coverage ───────────────────────────────────────────────────────────────
+  #
+  # JUSTIFICATION, stated because it is the strongest argument for the job:
+  # coverage would have caught, on day one, both defects that were invisible in
+  # this repository for its entire life —
+  #   * `tests/fidelity/fuzz_mutation.rs` (8 tests), `fuzz_expanded.rs` (6) and
+  #     `coverage_guided_fuzzing.rs` (9) were never registered as `[[test]]`
+  #     targets, and `tests/fidelity/` is not auto-discovered because it has no
+  #     `main.rs`. Those 23 tests were never compiled. Coverage of the module
+  #     they target would have read 0% and asked why.
+  #   * the nine `#[ignore]`d Opus conformance tests that sat unexecuted for the
+  #     same reason: a corpus no job ever provided.
+  # A line-coverage report makes "the code exists but nothing runs it" a number
+  # rather than a thing you have to know.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # Installed with `cargo install --locked`, like `cargo-audit` above, rather
+      # than through a third-party install action: one fewer action to SHA-pin
+      # and one fewer that executes arbitrary code.
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: coverage
+
+      # `--all-features` so the feature-gated codec and backend modules are
+      # instrumented; with `default` alone, `network-streaming`, `tag-write` and
+      # `fingerprint` would report as uncovered rather than untested.
+      #
+      # Benches are excluded: they are not tests, they run for minutes, and they
+      # would dominate the number with harness lines.
+      - name: cargo llvm-cov
+        run: |
+          cargo llvm-cov --workspace --release --all-features \
+            --ignore-filename-regex '(benches/|fuzz/)' \
+            --lcov --output-path codecov.lcov
+          wc -l < codecov.lcov
+
+      # Upload to Codecov only when the repository has a token configured. The
+      # LCOV file is uploaded either way, so a fork without a token still gets
+      # the artefact and can upload it elsewhere.
+      - name: Upload to Codecov
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: codecov.lcov
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # A silent upload failure is a coverage number nobody sees.
+          fail_ci_if_error: true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lcov
+          path: codecov.lcov
+          retention-days: 14
+          if-no-files-found: error
 
   # ── Docs ───────────────────────────────────────────────────────────────────
   docs:
     name: rustdoc
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # No `RUSTDOCFLAGS` deny here: intra-doc-link warnings are noisy across
       # 460 files and would block every PR. Broken *code* in a doc example is
@@ -349,7 +877,7 @@ jobs:
       - name: cargo doc
         run: cargo doc --workspace --no-deps
 
-  # ── Fuzz ───────────────────────────────────────────────────────────────────
+  # ── Fuzz (per push / per PR smoke) ─────────────────────────────────────────
   #
   # There was no fuzz job, so `cargo fuzz` was only ever run by hand. The two
   # targets that existed also had a shape problem this fixes:
@@ -363,39 +891,143 @@ jobs:
   #     in the shared `/tmp`.
   #   * playlist parsing (M3U / PLS / XSPF) — a hand-rolled parser on
   #     explicitly untrusted input — had NO target at all. It now does.
+  #
+  # AND: this job could not have run at all before `fuzz/Cargo.toml` gained its
+  # `[workspace]` table. `fuzz` was an orphan of the root workspace — the root
+  # `[workspace] members` list does not name it and the root manifest has no
+  # `exclude` — so cargo refused to operate in `fuzz/` and `cargo fuzz` aborted
+  # before libFuzzer started, on all three legs. Every run of this job to date
+  # has produced zero fuzz iterations.
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides `rust-toolchain.toml` (1.89). cargo-fuzz needs nightly for its
+      # sanitizer and `arbitrary` plumbing.
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
         target: [fuzz_codecs, fuzz_parsers, fuzz_playlists]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      # cargo-fuzz needs nightly for its sanitizer/arbitrary plumbing.
       - name: Install nightly
         run: |
           rustup toolchain install nightly --profile minimal
-          rustup default nightly
+          cargo +nightly install cargo-fuzz --locked
 
       - name: Install ALSA
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: fuzz-${{ matrix.target }}
 
       # A short bounded run: enough to smoke the target on every PR without
-      # turning CI into a fuzzing farm. Longer campaigns belong on a scheduled
-      # job, not a per-push one.
+      # turning CI into a fuzzing farm. Longer campaigns belong on the scheduled
+      # job below, not a per-push one.
       - name: cargo fuzz (60s smoke run)
         working-directory: fuzz
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=2560
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=2560
 
-      - uses: actions/upload-artifact@v4
+      # A crash reproducer found here must be committed as a regression under
+      # `fuzz/artifacts/` — libFuzzer writes it there and it is uploaded above.
+      # NOTE: `.gitignore` currently excludes `/fuzz/artifacts/` wholesale, so a
+      # reproducer cannot actually be committed until whoever owns `.gitignore`
+      # narrows that rule (e.g. `/fuzz/artifacts/*` plus `!/fuzz/artifacts/*/`
+      # for the `fuzz_target/crash-*` layout). Flagged in the PR template until
+      # then.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
-          retention-days: 7
+          retention-days: 14
+
+  # ── Fuzz (scheduled campaign) ──────────────────────────────────────────────
+  #
+  # Runs on the `schedule` trigger only — never on a push or a PR. libFuzzer's
+  # value is cumulative coverage across a corpus; a 60-second run from an empty
+  # seed set on every push re-discovers the same trivial inputs forever and
+  # never gets deep. This job is where the corpus actually grows.
+  fuzz-nightly:
+    name: fuzz nightly (${{ matrix.target }})
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    # 25 minutes of fuzzing per target, plus build time.
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_codecs, fuzz_parsers, fuzz_playlists]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: fuzz-${{ matrix.target }}
+
+      # The corpus is NOT committed: `.gitignore` excludes `/fuzz/corpus/`
+      # because it grows without bound. That means every scheduled run still
+      # starts from an empty seed set, and the artefact upload below is what
+      # makes the work recoverable — download the corpus from the most recent
+      # successful nightly run and restore it to `fuzz/corpus/` to resume from
+      # there. Commented here because the resume procedure is otherwise not
+      # discoverable from the workflow.
+      - name: cargo fuzz (25 minute campaign)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=1500 -rss_limit_mb=2560
+
+      # `tmin` re-minimises every input in the corpus down to a minimal
+      # reproducer. Worth running after a long campaign precisely because
+      # libFuzzer's own corpus accumulates redundant inputs, and a corpus full
+      # of non-minimal inputs is a corpus that wastes the next run's time. On a
+      # 60-second per-PR run there is nothing worth minimising; after 25 minutes
+      # there is.
+      - name: cargo fuzz tmin (minimise the accumulated corpus)
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          corpus="corpus/${{ matrix.target }}"
+          if [ ! -d "$corpus" ]; then
+            echo "::error::libFuzzer produced no corpus directory at $corpus"
+            exit 1
+          fi
+          echo "corpus inputs before tmin: $(find "$corpus" -type f | wc -l)"
+          cargo +nightly fuzz tmin ${{ matrix.target }} "$corpus"
+          echo "corpus inputs after tmin:  $(find "$corpus" -type f | wc -l)"
+
+      # Any crash reproducer goes here. Commit it under `fuzz/artifacts/` as a
+      # regression test — see the note in the `fuzz` job about `.gitignore`.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: fuzz-nightly-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+          retention-days: 30
+
+      # The corpus itself, so the next campaign can be resumed rather than
+      # restarted. Large, hence a separate artefact from the crash reproducer.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: error

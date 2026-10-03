@@ -5,6 +5,262 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-10-03
+
+The release where the project stops claiming things it cannot do.
+
+0.8.0 made the terminal UI a real player. This one is different in kind: a
+static audit of the whole tree found that a meaningful amount of what the
+repository *says* about itself was not true — a fuzz job that could never
+start, 23 tests that were never compiled, a C entry point whose documented
+contract segfaulted the host, a persistence layer nothing constructed — and
+that several subsystems were reachable only from their own tests. Almost
+everything here is either a fix for a defect that was found, or the removal of
+a claim. Only a little is new capability.
+
+Distribution note: **0.9.0 ships from GitHub, not crates.io.** See
+[Distribution](#distribution) below.
+
+### Fixed — memory safety and undefined behaviour
+
+- **`engine_spatial_health` could segfault a C host.** The doc comment
+  promised "Out-params are optional — pass NULL to skip", and the body then
+  dereferenced all nine output pointers unconditionally. A host following the
+  documented contract crashed. Every sibling query entry point
+  (`engine_correction_info`, `engine_aux_insert_state`) already guarded
+  correctly; this one was the outlier. Each out-param is now skipped when NULL,
+  and `ffi_spatial_health_accepts_null_out_params` covers the all-NULL,
+  mixed, and NULL-handle cases — the pre-existing test only ever passed a NULL
+  *handle*, so the crashing case was untested.
+- **A `dlclose` could unmap a library a live plugin was calling through.**
+  `PluginInstance` holds a by-value copy of the plugin vtable and a
+  `*const PluginHost` marked `#[allow(dead_code)]`, so it kept nothing alive.
+  The only remaining owner was a module-static cache that did
+  `cache.clear()` once it reached `MAX_CACHED_HOSTS` — unmapping every image
+  the active generation was still dispatching through. This is a SIGSEGV, not a
+  glitch, and `catch_unwind` cannot contain it. `HostedSlot` now holds an
+  `Arc<PluginHost>` for the instance's lifetime, making the instance's
+  lifetime a strict subset of the library's — the invariant the by-value
+  vtable silently assumed.
+- **Divide-by-zero and out-of-bounds read in the multichannel secondary path.**
+  `feed_secondary_slot_mc` divided by a caller-supplied `channels` with no
+  zero guard (its primary sibling did guard, two lines up), and clamped its
+  write count against the whole-buffer frame count rather than the frames
+  remaining after `start` — so a short secondary in the block-splitting loop
+  read past the end of the input. Both are reachable from a `pub fn`.
+
+### Fixed — the C ABI is now an ABI
+
+- **No panic can unwind into a host.** All 45 exports previously had a raw
+  `extern "C"` body with no `catch_unwind`, against a module doc claiming "No
+  panics across FFI". A panic now becomes this module's ordinary error
+  convention — `EngineStatus::Error`, a sentinel, or `NULL` — instead of
+  aborting the host process. Each export keeps its body in a private `*_impl`
+  behind a thin wrapper; the default panic hook still fires so a caught panic
+  is still reported rather than silently swallowed.
+- **`engine_abi_version()` / `engine_abi_compatible()` added.** There was no
+  way for a host to ask what it was linked against, which is exactly how a
+  surface stops being able to evolve. Version is packed
+  `(major << 16) | minor`, major 1.
+
+### Fixed — verification that did not verify
+
+This is the theme of the release. Each of these was a green checkmark over
+something that measured nothing.
+
+- **The fuzz CI job could never run.** `fuzz/` was neither a workspace member
+  nor excluded, and had no `[workspace]` table of its own, so Cargo refused to
+  operate in the directory the job pointed at — on all three matrix legs. All
+  fuzz coverage in CI was dead. `fuzz/Cargo.toml` now declares its own
+  workspace, which is what the canonical cargo-fuzz template does.
+- **23 tests in three files were never compiled.** `tests/fidelity/coverage_guided_fuzzing.rs`,
+  `fuzz_expanded.rs` and `fuzz_mutation.rs` carried real test code but were
+  never registered as `[[test]]` targets, and Cargo does not auto-discover
+  `tests/*/*.rs`. No error, no warning. `AGENTS.md` even instructed
+  contributors to run `cargo test --test fuzz_mutation`, which failed with "no
+  test target named 'fuzz_mutation'".
+- **`realtime_allocation.rs` could pass vacuously.** Its arm flag was a
+  process-global `AtomicBool` while its counters were thread-local, and libtest
+  runs a binary's tests concurrently — so one test's teardown could disarm
+  another test's measurement window mid-run, and the victim recorded nothing.
+  The failure mode could only ever be a false *pass*, in an instrument whose
+  entire job is to be trusted. The flag is now thread-local, and the file
+  gained `the_allocation_counter_would_actually_see_an_allocation`, which
+  allocates deliberately inside an armed window and requires the counter to
+  move — the self-test `lra_allocation.rs` already had.
+- **The project's own release gate was never invoked.**
+  `release-qualification` runs the qualification pipeline and exits non-zero
+  unless it passes; no CI job ran it. It gates now.
+- **Coverage measurement added.** It would have caught the three unregistered
+  test files and the dead conformance tests on day one — the cheapest possible
+  detector for exactly the failure mode this repository exhibited twice.
+- **Nine Opus RFC 8251 conformance tests now run** against a pinned, hash-
+  verified copy of the upstream test vectors. One (`rfc_conformance_vectors`)
+  still cannot: it needs a `vectors.txt` manifest that no upstream artefact
+  contains and whose template does not exist in-tree. Documented in `ci.yml`
+  rather than hidden behind a gate that would fail for unrelated reasons.
+
+### Added — committed golden bytes
+
+The headline claim of this project is bit-perfectness, and until now **not a
+single committed byte of expected output existed anywhere in the repository**.
+`golden_reference_vectors.rs` re-derived its own expectations inside the test —
+`assert_eq!(h[0], b0)` is the biquad difference equation restated, so a wrong
+RBJ coefficient design passed cleanly — and `deterministic_reference_vectors.rs`
+compares the engine against the engine's own oracle, which cannot catch a bug
+both share. A change that altered every output sample while preserving every
+invariant would have passed the whole suite.
+
+`tests/fidelity/golden_bit_exact.rs` closes that, with RBJ peaking
+coefficients computed by an implementation independent of this crate and
+committed as raw `f32` bit patterns (four cases across three sample rates),
+plus a measured centre-frequency response checked against the requested gain to
+0.01 dB, a zero-gain transparency check, and a bit-exact identity check.
+
+### Fixed — settings that were lost on every restart
+
+- **`DspStateStore` is now wired into the engine.** The type was fully
+  implemented and publicly exported since 0.2.0, and nothing ever constructed
+  one — so `dsp_state.json` was never written or read by any shipped binary,
+  and a user's limiter settings, EQ preset library and chosen output device and
+  backend were silently discarded on exit. Restore now happens *before* the
+  graph is built (so the plan is compiled from the restored values, not
+  mutated afterwards), with explicit-beats-remembered precedence field by
+  field; save runs on change (the store skips the write when nothing moved) and
+  on shutdown.
+- **`EngineHandle::config()` added.** The whole multichannel group, per-slot
+  trims, duck state, plugin slots and spatial scene settings were
+  **write-only**: a host could set channel trim and had no way to confirm what
+  the engine held, which forces every UI to shadow those values and drift.
+  `PlaybackInfo` now publishes the live `EngineConfig` on the same cadence and
+  behind the same `Arc` discipline as `EngineSettings`, so reading it never
+  contends with the engine tick.
+
+### Fixed — build and packaging
+
+- **`cargo publish` failed six ways** and no CI check would have noticed. Added
+  `description`, `keywords`, `categories` and `readme` to every manifest; added
+  the `version` key the three path dependencies were missing (the pattern was
+  already correct one line away, on `opus-decoder`); removed
+  `[workspace.package]`, which declared `version = "0.6.0"` and was inherited
+  by nothing at all — dead configuration that had been drifting since 0.6.0.
+- **`.cargo/config.toml` no longer hard-requires a linker that may not
+  exist.** It carried `rustflags = ["-C", "link-arg=-fuse-ld=lld"]` for
+  `x86_64-unknown-linux-gnu`, so any contributor without `ld.lld` got
+  `collect2: fatal error: cannot find 'ld'` with nothing pointing at the
+  committed config as the cause. It also set `jobs = 2`, named after one
+  contributor's laptop, silently throttling every other build — including CI,
+  where the workflow-level `RUSTFLAGS` override made the LLD flag inert
+  anyway. Both removed; the machine-independent aliases kept.
+- **`crates/tui` did not compile on older rustc.** `use super::{self as rows, …}`
+  — and the equivalent `use super as rows;` — is rejected by rustc 1.89 with
+  "no `super` in the root" and accepted only by a much later compiler, which
+  made the crate unbuildable at the dependency-implied floor. Replaced with a
+  `crate::`-rooted path import.
+- **The vendored `crates/opus-decoder` can no longer be silently replaced by
+  upstream.** It shares its name and version with the crate it forks, so
+  `cargo publish` would rewrite the path dependency to a bare `version =
+  "0.1.1"` and every consumer would receive the **unpatched upstream** —
+  reinstating the `celt/vq.rs` shift overflow this fork exists to fix, in a
+  build that compiles cleanly and only panics when fed Ogg Opus. `publish =
+  false` makes the substitution impossible.
+
+### Changed
+
+- **The `msrv` CI job could never have passed.** It installed Rust 1.85, which
+  the resolved graph does not permit: `lofty` → `ogg_pager` declares 1.89,
+  `ratatui`/`darling`/`instability` declare 1.88. The job was renamed
+  `toolchain-floor` and now does what it can honestly assert — that the pinned
+  toolchain builds the tree with `--locked`, that no manifest declares an
+  unverified `rust-version`, and (as a report, not a gate) what the real
+  dependency floor currently is. `rust-toolchain.toml` pins `stable`; see
+  [Known gaps](#known-gaps).
+- **CI grew from 9 jobs to 14.** Added `release-gate` (the project's own
+  qualification pipeline), `miri`, `coverage`, `benches`, and a nightly
+  `fuzz-nightly`. Every job now declares `timeout-minutes`; the workflow
+  declares `permissions: contents: read`; every checkout sets
+  `persist-credentials: false`; every action is pinned to a commit SHA.
+- **`realtime_budget` no longer runs in the cross-platform test matrix.** It is
+  a wall-clock bound whose own module doc records that a stricter form of its
+  assertion failed 6 runs in 25 on unmodified code. That reasoning is sound
+  for a dedicated runner and weaker on shared hosted Windows/macOS runners
+  executing six legs; it now runs only in the dedicated `perf` job.
+- **`deny.toml` and `.cargo/audit.toml` added.** `cargo-deny` and `cargo-audit`
+  were already running with no in-repo policy, so the enforced licence set and
+  advisory ignores lived in the actions' compiled-in defaults and were
+  unreviewable in a PR.
+- **The vendored decoder's lint suppressions are documented.** The host builds
+  it with `-D warnings`, and three lints are ones where "fixing" the finding
+  would make the fork worse — two would raise its MSRV, one diverges further
+  from the upstream it exists to track.
+- **A tag-triggered `release.yml`** builds all binaries on three platforms with
+  `--locked`, smoke-tests each via `cargo install --path`, verifies the tag
+  matches the lockstep crate versions, and uploads artefacts with provenance.
+
+### Known gaps
+
+Recorded rather than hidden, because each was considered and deliberately not
+fixed in this release.
+
+- **There is no MSRV.** The dependency floor is 1.89; the tree does not build
+  at 1.89 (it uses `#[allow(clippy::manual_is_multiple_of)]`, a lint from a
+  later clippy, and 1.89's clippy raises 18 extra warnings that `-D warnings`
+  turns into failures). `rust-toolchain.toml` pins `stable` and no manifest
+  declares `rust-version`, because an unverified floor is worse than none.
+  Making 1.89 real means fixing those 18 sites, dropping the unknown-lint
+  allow, and running the full suite on the floor.
+- **A `std::sync::Mutex` remains on the decode loop's output write path.**
+  `push_to_sink` calls `analyzer.update()`, which takes the analyzer's lock
+  once per block, and the analyzer is enabled by default; a UI polling
+  `snapshot()` at 60 Hz contends with the producer and clones 513 floats under
+  the lock. `ProfessionalMeters`, 100 lines away, already solves this with a
+  CAS entry guard and a lock-free triple-buffer publish. Fixing the analyzer
+  means moving `AnalyzerState` off the mutex onto that same pattern, which is
+  concurrency surgery that should not land in a release whose test suite is not
+  being run end to end. Not deferred for lack of a plan — deferred because
+  doing it unverified would be worse than the mutex.
+- **No repository remote is configured.** `git remote -v` is empty, so the
+  `repository` field in every manifest cannot be checked against it, as
+  `AGENTS.md` requires, and `v0.3.0`–`v0.6.0` and `v0.8.0` were never tagged.
+- **Host-supplied-file parsing still has `unwrap()` sites.** `src/spatial/bw64.rs`
+  (BW64/ADM chunk parsing) and `src/decode/tta/decoder.rs` (TTA header parsing)
+  use `try_into().unwrap()` in ~23 places. Each is preceded by a length check in
+  the code as written, but "is guarded today" is not the same as "cannot panic",
+  and a truncated file that reaches one would panic the library instead of
+  returning the `Bw64Error`/`DecodeError` those modules already define. Worth
+  converting; not worth converting without the parser-robustness suite run
+  alongside it.
+- **`src/eval/` has no unit tests.** `suites.rs` (682 lines), `qualification.rs`
+  (502) and `performance_matrix.rs` (399) are the code behind the release gate
+  that this release finally starts enforcing. The gate running is not the same
+  as the gate being tested.
+- **The vendored Opus fork still carries upstream's debug scaffolding** — 93
+  inert `// #region agent log` blocks, 22 with hardcoded `/Users/...` paths and
+  file-open calls in `celt::decode_frame`. It is all behind a hardcoded
+  `false`, so none of it executes and no invariant or performance claim is
+  affected, but it is unclean and one constant flip away from not being. It was
+  left alone deliberately: the only suite that could validate a change to that
+  decoder is the RFC 8251 conformance suite, which needs the upstream test
+  vectors. Recorded in `crates/opus-decoder/PATCHES.md`.
+
+### Distribution
+
+**0.9.0 is distributed from GitHub — source plus prebuilt binaries — not from
+crates.io.** Publishing the workspace would require two renames that are
+breaking for every downstream path, and a 0.x minor must not carry breaking
+changes:
+
+- `config` — the name is already owned on crates.io by `config-rs` (~107M
+  all-time downloads), so publishing would be impossible without squatting it.
+- `opus-decoder` — an in-tree fork sharing the upstream name and version, so
+  publishing would substitute the unpatched upstream for every consumer (see
+  Fixed above).
+
+Rather than rename, every affected crate declares `publish = false`.
+`plugin-abi` is genuinely standalone and remains publishable on its own, and
+CI dry-runs it as a packaging check. Revisit under product-scoped names
+(`shadow-config`, `shadow-opus-decoder`) in a major release.
+
 ## [0.8.0] — 2026-10-03
 
 The terminal UI stops being a control-panel sample and starts being a player.

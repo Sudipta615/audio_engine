@@ -1,0 +1,63 @@
+# The one toolchain this repository is built and tested with.
+#
+# WHY THIS FILE, AND WHY `stable`
+# --------------------------------
+# Before this file existed, CI hardcoded `rustup toolchain install 1.85` in the
+# `msrv` job while every other job installed `stable`, and no local developer
+# tool was pinned at all. Local and CI toolchains were unrelated by
+# construction: nothing tied the toolchain that produced a green test run to
+# the toolchain that produced a green build on a laptop.
+#
+# `stable` is what the workspace is actually written against, and saying so
+# beats pinning a number the code does not honour.
+#
+# There is deliberately **no `rust-version` in any manifest**, and that is a
+# recorded gap rather than an oversight. The floor imposed by dependencies is
+# 1.89 (`lofty 0.22.4` -> non-optional `ogg_pager 0.7.2` declares
+# `rust-version = "1.89"`; `ratatui 0.30.2`, `darling 0.24.1` and
+# `instability 0.3.14` declare 1.88.0). But 1.89 does not build this tree:
+#
+#   * the source uses `#[allow(clippy::manual_is_multiple_of)]`, a lint that
+#     does not exist before a much later clippy, so 1.89 warns "unknown lint";
+#   * 1.89's clippy raises 18 additional warnings the current toolchain does
+#     not (mostly `collapsible_if` and `needless_range_loop`, several inside
+#     the vendored `crates/opus-decoder`), which CI's `-D warnings` turns into
+#     a hard failure.
+#
+# Declaring 1.89 while building on `stable` would be a claim nothing checks.
+# Declaring it *and* building on it is a real MSRV project — fixing those 18
+# sites, dropping the unknown-lint allow, and running the full suite on the
+# floor — which is worth doing but is not something to smuggle into a release.
+# Until then this file records the toolchain and the reason, and the number
+# that dependency resolution actually requires is recorded above.
+#
+# Jobs that deliberately want something else (`nightly` for fuzzing and miri)
+# select it with the `RUSTUP_TOOLCHAIN` environment variable or a
+# `+toolchain` argument, both of which take precedence over this file. That is
+# deliberate: the override is visible in the workflow diff rather than implied.
+
+[toolchain]
+channel = "stable"
+# `minimal` skips `rust-docs` and the extra std sources, which is most of the
+# download. `rustfmt` and `clippy` are named here because the `lint` job needs
+# both on whichever toolchain rustup resolves, and CI should never depend on a
+# component that happens to be preinstalled on a runner image.
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+
+# The standard libraries for every platform CI builds, so a `cargo check` for
+# another target does not have to download a toolchain mid-job. This mirrors
+# the `test` job's matrix exactly:
+#
+#   ubuntu-latest  -> x86_64-unknown-linux-gnu
+#   macos-latest   -> aarch64-apple-darwin  (Apple Silicon runners)
+#   windows-latest -> x86_64-pc-windows-msvc
+#
+# These are `targets`, not full toolchains: rustup installs only the `std` for
+# each, which is small. Adding a platform here means adding it to the `test`
+# matrix too — a `targets` entry nobody builds against is only download time.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

@@ -1,21 +1,42 @@
-# Custom Cargo Configuration tuned for Low-End Systems
-# Hardware Profile: Intel Core i3 (4 threads), 8 GB RAM, 1 TB Mechanical HDD
-# Primary Goal: Prevent Out-Of-Memory (OOM) freezing, stop HDD swap thrashing,
-#               and keep the OS and IDE fully responsive during builds.
-
-[build]
-# Limit concurrent compilation jobs to 2 (default is 4 logical cores).
-# - Reserves 2 CPU threads so the desktop environment, browser, and IDE never freeze.
-# - Cuts peak compiler RAM usage by ~50%, preventing Linux from swapping onto the HDD.
-jobs = 2
-
-[target.x86_64-unknown-linux-gnu]
-rustflags = [
-    # Use the bundled LLD linker instead of GNU ld. LLD is significantly faster
-    # and consumes a fraction of the RAM during linking.
-    "-C", "link-arg=-fuse-ld=lld",
-]
-
+# Cargo configuration for this repository.
+#
+# ── Why this file is nearly empty ────────────────────────────────────────────
+#
+# It used to begin:
+#
+#     # Custom Cargo Configuration tuned for Low-End Systems
+#     # Hardware Profile: Intel Core i3 (4 threads), 8 GB RAM, 1 TB Mechanical HDD
+#     [build]
+#     jobs = 2
+#     [target.x86_64-unknown-linux-gnu]
+#     rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+#
+# Both halves were removed in 0.9.0, and neither was harmless:
+#
+# `jobs = 2` named one contributor's laptop in a file that applied to the whole
+# workspace — so every other contributor and every CI runner silently built at
+# a third of the available parallelism. A machine-specific build setting
+# belongs in a developer's own `~/.cargo/config.toml`, not in the repository.
+#
+# `rustflags = ["-C", "link-arg=-fuse-ld=lld"]` was worse than a preference: it
+# is an unconditional hard requirement that `ld.lld` be installed and on PATH.
+# A contributor without LLD got `collect2: fatal error: cannot find 'ld'` and
+# no indication that a committed config file was the cause. It only ever
+# appeared to work in practice because the build cache meant nothing actually
+# relinked. It was also silently inert in CI, where the workflow-level
+# `RUSTFLAGS: -D warnings` environment variable overrides `build.rustflags`
+# entirely — so the flag the repo mandated was the one flag CI never applied.
+#
+# If you want either behaviour locally, put it in `~/.cargo/config.toml`:
+#
+#     [build]
+#     jobs = 4
+#
+#     [target.x86_64-unknown-linux-gnu]
+#     rustflags = ["-C", "link-arg=-fuse-ld=lld"]   # requires `ld.lld` on PATH
+#
+# The aliases below are kept because they are machine-independent and encode
+# real intent (skip linking, limit test parallelism on small machines).
 
 [term]
 progress.when = "auto"
@@ -26,9 +47,6 @@ c = "check --workspace"
 
 # Workspace check for library and binaries only (skips dev-dependencies/benches)
 check-fast = "check --workspace --bins --lib"
-
-# Workspace build respecting jobs = 2
-b = "build"
 
 # Test execution with limited worker threads (prevents concurrent test harness OOM)
 t = "test -- --test-threads=2"

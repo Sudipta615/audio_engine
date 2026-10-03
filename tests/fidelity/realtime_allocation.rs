@@ -24,7 +24,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use engine::dsp::graph2::prod::DspGraph;
 use engine::dsp::graph2::prod::Graph2Engine;
@@ -67,18 +66,33 @@ thread_local! {
     /// Heap allocations performed on THIS thread while the measurement
     /// window is armed.
     static THREAD_ALLOCS: Cell<usize> = const { Cell::new(0) };
-}
 
-/// Set while the audio loop is being measured; the allocator only records
-/// allocations during steady-state processing, not pipeline construction or
-/// warm-up.
-static ARMED: AtomicBool = AtomicBool::new(false);
+    /// Set while the audio loop is being measured; the allocator only records
+    /// allocations during steady-state processing, not pipeline construction or
+    /// warm-up.
+    ///
+    /// This is thread-local **by necessity**, and it was process-global until
+    /// 0.9.0. libtest runs a binary's tests on many threads concurrently, so a
+    /// global flag let one test's teardown disarm another test's measurement
+    /// window mid-run. The counters above are thread-local, so the victim test
+    /// simply recorded nothing and passed vacuously — the assertions could only
+    /// ever produce a false PASS, never a false failure, which is the worst
+    /// possible failure mode for an instrument whose entire job is to be
+    /// trusted.
+    ///
+    /// Thread-local is also the more accurate scope. The property under test is
+    /// "the *audio* thread allocates nothing"; a background control thread that
+    /// happens to be running (the generation-publish loops in the swap tests)
+    /// is explicitly allowed to allocate, and a process-global flag counted it
+    /// against the audio path.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
 
 struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(|a| a.get()) {
             THREAD_ALLOCS.with(|c| c.set(c.get() + 1));
         }
         System.alloc(layout)
@@ -89,7 +103,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.with(|a| a.get()) {
             THREAD_ALLOCS.with(|c| c.set(c.get() + 1));
         }
         System.realloc(ptr, layout, new_size)
@@ -194,7 +208,7 @@ fn run_full_chain_no_alloc(mode: config::PrecisionMode) {
     pipeline.process_block(&mut left, &mut right);
     pipeline.process_final_limiter_block(&mut left, &mut right);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // 10k blocks × 128 samples = 1.28M samples ≈ 27 s of audio at 48 kHz per
@@ -208,12 +222,55 @@ fn run_full_chain_no_alloc(mode: config::PrecisionMode) {
         pipeline.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
         allocations, 0,
         "steady-state full-chain processing ({mode:?}) allocated on the audio path"
+    );
+}
+
+#[test]
+fn the_allocation_counter_would_actually_see_an_allocation() {
+    // The instrument proves itself before it is trusted.
+    //
+    // Every other test in this file asserts `allocations == 0`. If the
+    // counting hook were silently broken — the `#[global_allocator]` not
+    // installed, the thread-local not observed, the arm flag never set —
+    // then all ~40 of those assertions would pass while measuring nothing,
+    // and the file would be worse than useless: it would be a green checkmark
+    // on a claim the project is built on. So allocate deliberately, inside an
+    // armed window, and require the counter to move.
+    THREAD_ALLOCS.with(|c| c.set(0));
+    ARMED.with(|a| a.set(true));
+
+    // A heap allocation that cannot be elided: built at runtime length.
+    let n = 1_000 + vec![0u8; 7].len();
+    let v: Vec<u8> = Vec::with_capacity(n);
+    std::hint::black_box(&v);
+    let boxed: Box<u64> = Box::new(0xDEAD_BEEF);
+    std::hint::black_box(&boxed);
+
+    ARMED.with(|a| a.set(false));
+    let allocations = THREAD_ALLOCS.with(|c| c.get());
+
+    assert!(
+        allocations >= 2,
+        "the allocation counter saw {allocations} allocations while armed; \
+         expected at least 2 (one Vec, one Box). The instrument is not \
+         observing, so every zero-allocation assertion in this file is vacuous."
+    );
+
+    // And it must be quiet again once disarmed, so an armed window is what
+    // opened the gate rather than the counter counting unconditionally.
+    let before = THREAD_ALLOCS.with(|c| c.get());
+    let noise: Vec<u8> = Vec::with_capacity(4_096);
+    std::hint::black_box(&noise);
+    let after = THREAD_ALLOCS.with(|c| c.get());
+    assert_eq!(
+        before, after,
+        "allocations were counted with the window disarmed"
     );
 }
 
@@ -298,7 +355,7 @@ fn run_graph_plan_no_alloc(mode: config::PrecisionMode) {
     graph.process_block(&mut left, &mut right);
     graph.process_final_limiter_block(&mut left, &mut right);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -309,7 +366,7 @@ fn run_graph_plan_no_alloc(mode: config::PrecisionMode) {
         graph.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let _ = std::fs::remove_file(&ir_path);
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
@@ -354,7 +411,7 @@ fn realtime_graph_plan_multichannel_does_not_allocate() {
 
     graph.process_block_multichannel(&mut interleaved, 6);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -365,7 +422,7 @@ fn realtime_graph_plan_multichannel_does_not_allocate() {
         graph.process_block_multichannel(&mut interleaved, 6);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -436,7 +493,7 @@ fn realtime_graph_swap_does_not_allocate_on_audio_thread() {
         }
     });
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -447,7 +504,7 @@ fn realtime_graph_swap_does_not_allocate_on_audio_thread() {
         graph.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
     ctl.join().expect("control thread");
 
@@ -470,7 +527,7 @@ fn realtime_resampler_non_passthrough_does_not_allocate() {
         AudioResampler::<f32>::new(ResamplerQuality::HighQuality, 44_100.0, 48_000.0)
             .expect("44.1 -> 48 kHz resampler");
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for i in 0..40_000 {
@@ -481,7 +538,7 @@ fn realtime_resampler_non_passthrough_does_not_allocate() {
     resampler.flush();
     while resampler.read().is_some() {}
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -535,7 +592,7 @@ fn realtime_spatial_panner_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..10_000 {
@@ -544,7 +601,7 @@ fn realtime_spatial_panner_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -597,7 +654,7 @@ fn realtime_spatial_vbap_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..10_000 {
@@ -605,7 +662,7 @@ fn realtime_spatial_vbap_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -668,7 +725,7 @@ fn realtime_spatial_object_behavior_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..10_000 {
@@ -676,7 +733,7 @@ fn realtime_spatial_object_behavior_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -730,7 +787,7 @@ fn realtime_spatial_hybrid_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..10_000 {
@@ -738,7 +795,7 @@ fn realtime_spatial_hybrid_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -778,7 +835,7 @@ fn realtime_ambisonic_renderer_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // Sweep the listener yaw every block to exercise the per-frame bus
@@ -793,7 +850,7 @@ fn realtime_ambisonic_renderer_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -868,7 +925,7 @@ fn realtime_spatial_room_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..10_000 {
@@ -876,7 +933,7 @@ fn realtime_spatial_room_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -967,7 +1024,7 @@ fn realtime_spatial_binaural_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // Sweep the listener yaw every block to exercise the per-frame head
@@ -982,7 +1039,7 @@ fn realtime_spatial_binaural_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1006,7 +1063,7 @@ fn realtime_head_tracker_does_not_allocate() {
     });
     tracker.push(HeadSample::new(0.0, Quat::IDENTITY));
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // A 10k-sample jittery stream (the IMU callback rate is independent of
@@ -1019,7 +1076,7 @@ fn realtime_head_tracker_does_not_allocate() {
         assert!(q.is_finite());
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1058,7 +1115,7 @@ fn realtime_hoa_renderer_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // Sweep the listener yaw every block: the order-2 rotation matrices are
@@ -1073,7 +1130,7 @@ fn realtime_hoa_renderer_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1108,7 +1165,7 @@ fn realtime_spatial_node_does_not_allocate() {
     left.fill(0.0);
     right.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // A block-rate listener sweep exercises the per-frame cue updates and
@@ -1122,7 +1179,7 @@ fn realtime_spatial_node_does_not_allocate() {
         graph.process_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1157,7 +1214,7 @@ fn realtime_spatial_listener_motion_does_not_allocate() {
     left.fill(0.0);
     right.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // A per-block pose target sweep drives the glide every block: the
@@ -1181,7 +1238,7 @@ fn realtime_spatial_listener_motion_does_not_allocate() {
         graph.process_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1258,7 +1315,7 @@ fn realtime_hrtf_dataset_path_does_not_allocate() {
         .unwrap();
     out.fill(0.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -1271,7 +1328,7 @@ fn realtime_hrtf_dataset_path_does_not_allocate() {
             .unwrap();
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1336,7 +1393,7 @@ fn graph2_rt_executor_does_not_allocate() {
         ex.render_block(&mut out);
     }
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     // Steady state, with a mid-loop plan publish to exercise the adopt.
@@ -1344,14 +1401,14 @@ fn graph2_rt_executor_does_not_allocate() {
         if block == 5_000 {
             // Publishing is control-side work; the adopt at the block
             // boundary must be allocation-free audio-side.
-            ARMED.store(false, Ordering::Relaxed);
+            ARMED.with(|a| a.set(false));
             ex.publish(RtPlan::build(&g, &order, BLOCK, 48_000.0, Some(&scenes), None).unwrap());
-            ARMED.store(true, Ordering::Relaxed);
+            ARMED.with(|a| a.set(true));
         }
         ex.render_block(&mut out);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1419,7 +1476,7 @@ fn realtime_graph2_prod_stereo_does_not_allocate() {
     g2.process_block(&mut left, &mut right);
     g2.process_final_limiter_block(&mut left, &mut right);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -1430,7 +1487,7 @@ fn realtime_graph2_prod_stereo_does_not_allocate() {
         g2.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let _ = std::fs::remove_file(&ir_path);
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
@@ -1462,7 +1519,7 @@ fn realtime_graph2_prod_multichannel_does_not_allocate() {
 
     g2.process_block_multichannel(&mut interleaved, 6);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -1473,7 +1530,7 @@ fn realtime_graph2_prod_multichannel_does_not_allocate() {
         g2.process_block_multichannel(&mut interleaved, 6);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1525,7 +1582,7 @@ fn realtime_graph2_prod_swap_does_not_allocate_on_audio_thread() {
         }
     });
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -1536,7 +1593,7 @@ fn realtime_graph2_prod_swap_does_not_allocate_on_audio_thread() {
         g2.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
     ctl.join().expect("control thread");
 
@@ -1584,11 +1641,11 @@ fn realtime_plugin_host_step_does_not_allocate() {
     graph.process_block(&mut l, &mut r);
 
     THREAD_ALLOCS.with(|c| c.set(0));
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     for _ in 0..16 {
         graph.process_block(&mut l, &mut r);
     }
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1662,12 +1719,12 @@ fn realtime_spatial_cue_overlay_does_not_allocate() {
     // arming the allocator.
     graph.process_block(&mut lo, &mut ro);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
     for _ in 0..1_000 {
         graph.process_block(&mut lo, &mut ro);
     }
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
 
     assert_eq!(
@@ -1732,7 +1789,7 @@ fn hybrid_spatial_renderer_allocates_zero_bytes() {
                 .process_hybrid_block(&scene, &inputs, frames, &mut out)
                 .expect("warmup");
 
-            ARMED.store(true, Ordering::Relaxed);
+            ARMED.with(|a| a.set(true));
             THREAD_ALLOCS.with(|c| c.set(0));
 
             for _ in 0..100 {
@@ -1741,7 +1798,7 @@ fn hybrid_spatial_renderer_allocates_zero_bytes() {
                     .expect("process");
             }
 
-            ARMED.store(false, Ordering::Relaxed);
+            ARMED.with(|a| a.set(false));
             let allocs = THREAD_ALLOCS.with(|c| c.get());
 
             assert_eq!(
@@ -1769,14 +1826,14 @@ fn professional_meters_allocates_zero_bytes() {
             // Warm up
             meters.process_interleaved(&buf, channels);
 
-            ARMED.store(true, Ordering::Relaxed);
+            ARMED.with(|a| a.set(true));
             THREAD_ALLOCS.with(|c| c.set(0));
 
             for _ in 0..100 {
                 meters.process_interleaved(&buf, channels);
             }
 
-            ARMED.store(false, Ordering::Relaxed);
+            ARMED.with(|a| a.set(false));
             let allocs = THREAD_ALLOCS.with(|c| c.get());
 
             assert_eq!(
@@ -1806,14 +1863,14 @@ fn hoa_decoder_order9_allocates_zero_bytes() {
     // Warmup
     decoder.decode(&bus, 1, &mut out);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..100 {
         decoder.decode(&bus, 1, &mut out);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1855,14 +1912,14 @@ fn spherical_hrtf_interpolation_allocates_zero_bytes() {
     // Warmup
     ds.interpolate_direction(query, Ear::Left, &mut scratch);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..100 {
         ds.interpolate_direction(query, Ear::Left, &mut scratch);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1891,7 +1948,7 @@ fn constant_spread_panning_allocates_zero_bytes() {
         &speakers,
     );
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..100 {
@@ -1904,7 +1961,7 @@ fn constant_spread_panning_allocates_zero_bytes() {
         );
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1934,14 +1991,14 @@ fn frequency_dependent_occlusion_allocates_zero_bytes() {
     // Warmup
     let _ = state.process(0.5, &coeffs);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..1000 {
         let _ = state.process(0.5, &coeffs);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1959,14 +2016,14 @@ fn nearfield_wavefront_curvature_allocates_zero_bytes() {
     // Warmup
     state.update_wavefront(0.3, 0.0875, 0.5, 48_000.0);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..1000 {
         state.update_wavefront(0.3, 0.0875, 0.5, 48_000.0);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -1987,14 +2044,14 @@ fn psychoacoustic_bass_allocates_zero_bytes() {
     // Warmup
     processor.process_block(&mut block);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..100 {
         processor.process_block(&mut block);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2013,14 +2070,14 @@ fn drift_controller_allocates_zero_bytes() {
     // Warmup
     ctrl.update(4100);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for i in 0..1000 {
         ctrl.update(4100 + (i % 5));
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2042,14 +2099,14 @@ fn automation_track_render_block_allocates_zero_bytes() {
     // Warmup
     track.render_block(0, &mut buf);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for i in 0..1000 {
         track.render_block((i * 128) % 1000, &mut buf);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2080,7 +2137,7 @@ fn modulation_processors_allocate_zero_bytes() {
     env.render_block(&mut out_env);
     follower.process_block(&audio, &mut out_fol);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..500 {
@@ -2090,7 +2147,7 @@ fn modulation_processors_allocate_zero_bytes() {
         let _ = matrix.evaluate_param_offset(1, |_| 0.5);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2126,7 +2183,7 @@ fn creative_fx_allocate_zero_bytes() {
     ring_mod.process_plane(&mut left);
     saturator.process_plane(&mut left);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..500 {
@@ -2139,7 +2196,7 @@ fn creative_fx_allocate_zero_bytes() {
         saturator.process_plane(&mut left);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2158,14 +2215,14 @@ fn analysis_engine_allocates_zero_bytes() {
     // Warmup
     let _ = engine.process_block(&samples);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for _ in 0..200 {
         let _ = engine.process_block(&samples);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocs = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocs, 0,
@@ -2233,7 +2290,7 @@ fn realtime_plan_driven_generation_executes_without_allocating() {
     let mut right = [0.0f32; 128];
     engine.process_block(&mut left, &mut right); // warm up (drains the swap)
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -2244,7 +2301,7 @@ fn realtime_plan_driven_generation_executes_without_allocating() {
         engine.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
     assert_eq!(
         allocations, 0,
@@ -2316,7 +2373,7 @@ fn realtime_plan_driven_swap_does_not_allocate_on_audio_thread() {
     let mut right = [0.0f32; 128];
     engine.process_block(&mut left, &mut right);
 
-    ARMED.store(true, Ordering::Relaxed);
+    ARMED.with(|a| a.set(true));
     THREAD_ALLOCS.with(|c| c.set(0));
 
     for block in 0..10_000 {
@@ -2327,7 +2384,7 @@ fn realtime_plan_driven_swap_does_not_allocate_on_audio_thread() {
         engine.process_final_limiter_block(&mut left, &mut right);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    ARMED.with(|a| a.set(false));
     let allocations = THREAD_ALLOCS.with(|c| c.get());
     ctl.join().expect("control thread");
 

@@ -11,6 +11,34 @@
     clippy::int_plus_one,
     clippy::unnecessary_cast
 )]
+// Added by Shadow Desktop 0.9.0.
+//
+// This crate is a vendored *fork* of Rusopus, and the host workspace builds it
+// with `-D warnings` (see the `lint` CI job). Upstream code therefore has to
+// satisfy clippy lints that upstream never agreed to, and three of them are
+// lints where "fixing" the finding would make the fork worse rather than
+// better:
+//
+//   * `collapsible_if` — collapsing `if let Some(x) = … { if cond { … } }`
+//     into `if let Some(x) = … && cond { … }` (let chains) requires a
+//     toolchain floor newer than the one this decoder supports, and diverges
+//     further from the upstream source it exists to track.
+//   * `needless_range_loop` — the flagged loops are transposed-buffer walks
+//     where the index is genuinely used for more than one plane.
+//   * `manual_is_multiple_of` — the suggested `x.is_multiple_of(n)` is a
+//     stabilised API that would *raise* this crate's MSRV. Keeping `x % n` is
+//     the correct trade for a vendored library.
+//
+// The alternative — mechanically rewriting upstream source until clippy is
+// quiet — grows the fork's diff against upstream for no functional gain and
+// makes every future re-vendor a merge conflict. See `PATCHES.md` at the root
+// of this crate for the fork's actual deltas; lint parity is deliberately not
+// one of them.
+#![allow(
+    clippy::collapsible_if,
+    clippy::needless_range_loop,
+    clippy::manual_is_multiple_of
+)]
 
 macro_rules! debug_trace {
     ($($arg:tt)*) => {};

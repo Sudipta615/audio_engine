@@ -191,6 +191,28 @@ pub struct PlaybackInfo {
     /// when a host asks for it, which is a UI polling at 30–60 Hz, not the
     /// engine tick.
     pub settings: Arc<EngineSettings>,
+
+    /// The live [`EngineConfig`], published on the same cadence as
+    /// [`Self::settings`] and for the same reasons.
+    ///
+    /// Added in 0.9.0. [`EngineSettings`] is a *curated* read-back: it covers
+    /// the controls a UI needs to draw, and until 0.9.0 it was the only one.
+    /// That left a specific, silent hole — the multichannel group
+    /// (`channel_mix`, `channel_policy`, `channel_trim`, `channel_routing`,
+    /// `channel_eq`, `lfe`, `bass_management`) plus per-slot trims, duck
+    /// state and plugin parameters were all **write-only**. A host could set
+    /// channel trim and had no way whatsoever to confirm what the engine
+    /// actually held, which forces every UI to shadow those values and drift
+    /// the moment the engine clamped or rejected one.
+    ///
+    /// Rather than grow [`EngineSettings`] without bound, the whole
+    /// configuration is published verbatim: one accessor, complete coverage,
+    /// and nothing to keep in sync as settings are added. The cost is a
+    /// control-side clone of `EngineConfig` on a tick that processed a
+    /// command — the same place [`Self::settings`] is already refreshed, so
+    /// no new cadence and no new allocation on an idle tick (the publish is
+    /// skipped entirely when the config compares equal).
+    pub config: Arc<config::EngineConfig>,
 }
 
 /// Spatial master output telemetry (with listener pose). Mirrored from the [`crate::dsp::graph2::prod::SpatialNode`]
@@ -371,6 +393,7 @@ impl Default for PlaybackInfo {
             node_diagnostics: Vec::new(),
             diagnostic_events: Vec::new(),
             settings: Arc::new(EngineSettings::default()),
+            config: Arc::new(config::EngineConfig::default()),
         }
     }
 }

@@ -58,7 +58,7 @@ impl AudioEngine {
 
     /// Shared constructor body.
     fn new_inner(
-        config: EngineConfig,
+        mut config: EngineConfig,
         output_buffer: Arc<FixedFrameBuffer>,
         sample_sink: Box<dyn SampleSink>,
     ) -> Result<Self, EngineError> {
@@ -94,6 +94,34 @@ impl AudioEngine {
         let (output_event_tx, output_event_rx) = channel::bounded(64);
         let output_sample_rate = DEFAULT_SAMPLE_RATE;
         let configured_endpoints = config.endpoints.clone();
+        // Restore the hand-tuned DSP state (limiter, EQ preset library, last
+        // output device/backend) over the configured defaults BEFORE the graph
+        // is built, so the restored values are the ones the plan is compiled
+        // from rather than a later mutation. Added in 0.9.0 — the store existed
+        // and was exported since 0.2.0 but nothing ever constructed one, so
+        // these settings were lost on every restart.
+        //
+        // Precedence is explicit-beats-remembered, field by field: a value the
+        // host (or a `--config` file) actually chose wins, and a remembered
+        // value only fills in where the caller left the default. Comparing
+        // against the *default* rather than "is it set" is what makes that
+        // work for the limiter, whose config carries a full struct of values
+        // rather than an `Option`.
+        let mut dsp_persistence = crate::engine::dsp_persistence::DspStateStore::new();
+        if let Some(state) = dsp_persistence.restore() {
+            if config.output_device.is_none() {
+                config.output_device = state.output_device.clone();
+            }
+            if config.output_backend == config::AudioBackend::Auto {
+                config.output_backend = state.output_backend;
+            }
+            if config.limiter == config::LimiterConfig::default() {
+                config.limiter = state.limiter.clone();
+            }
+            if config.eq.presets.is_empty() {
+                config.eq.presets = state.eq_presets.clone();
+            }
+        }
         let mut graph = Graph2Engine::from_config(&config, output_sample_rate as f32);
         // Restore the last session's active spatial scene (screen,
         // room, listener, enable) over the configured defaults. Best-effort
@@ -155,6 +183,7 @@ impl AudioEngine {
             recovery: RecoveryState::default(),
             scratch: EngineScratch::default(),
             spatial_persistence,
+            dsp_persistence,
             lanes: Vec::new(),
             #[cfg(feature = "audio-output")]
             endpoints: Vec::new(),

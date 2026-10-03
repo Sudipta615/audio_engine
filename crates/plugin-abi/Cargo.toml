@@ -1,10 +1,19 @@
 [package]
 name = "plugin-abi"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
 description = "Shadow Desktop plugin ABI: versioned C-ABI vtables for pure-Rust effect plugins"
+readme = "../../README.md"
+documentation = "https://docs.rs/plugin-abi"
+keywords = ["audio", "dsp", "plugin", "abi", "c-abi"]
+categories = ["multimedia::audio", "api-bindings"]
+# The one crate in this workspace that IS publishable: it is standalone
+# (optional `serde` + `libloading` only) and carries no path dependencies,
+# so it can be released independently of the engine. CI dry-runs
+# `cargo publish -p plugin-abi` as a packaging check.
+
 
 [features]
 default = ["host"]

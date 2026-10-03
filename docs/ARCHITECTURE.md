@@ -5,6 +5,8 @@ authoritative engineering contract, see [`ENGINE_SPEC.md`](ENGINE_SPEC.md). For 
 flow through the DSP chain, see [`SIGNAL_FLOW.md`](SIGNAL_FLOW.md). For
 runnable embedding examples (Rust `EngineHandle` + C FFI), see
 [`EMBEDDING.md`](EMBEDDING.md).
+[`HISTORY.md`](HISTORY.md) holds the archived development narrative; it is
+deliberately not here.
 
 ## Module map
 
@@ -21,9 +23,12 @@ src/
 │   └── tests.rs              #   queue-semantics unit tests
 ├── sink.rs                   # SampleSink trait — where processed audio goes
 ├── audio_io.rs               # Async file/URI I/O helpers (memory-mapped + async)
-├── diagnostics.rs            # Typed diagnostics: DiagnosticKind (EngineFault /
-│                             #   TrackLoad / Decode / Output / BitPerfect /
-│                             #   Configuration) + BitPerfectCause + Diagnostic
+├── diagnostics.rs            # Typed diagnostics: DiagnosticKind (15 variants —
+│                             #   Internal / Decoder / Output / Resampler / Stream /
+│                             #   Endpoint / BitPerfect / Configuration / Spatial /
+│                             #   Loudness / Dsp / Clock / Plugin / Graph / Security)
+│                             #   + BitPerfectCause + Diagnostic. Every variant has a
+│                             #   stable machine-readable code used across FFI/JSON.
 ├── paths.rs                  # App-data directory resolution (etcetera)
 ├── dsp_utils.rs              # Small shared DSP helpers
 ├── buffer.rs                 # The `buffer` module façade: declares the
@@ -50,7 +55,7 @@ src/
 │                             #   cross-version compare (mod.rs — CheckResult /
 │                             #   ComponentReport / EvaluationReport /
 │                             #   VersionComparison; run_quality() entry)
-├── profile/                  # Phase 3 deterministic AudioProfile layer
+├── profile/                  # Deterministic AudioProfile layer
 │                             #   (perceptual analysis, off the audio path):
 │                             #   mod.rs — versioned AudioProfile + 7
 │                             #   sub-profiles (Loudness/Dynamics/Spectral /
@@ -79,7 +84,7 @@ src/
 │   ├── recovery.rs           # Stream recovery (device hotplug, exclusive-mode falls)
 │   ├── dsd_state.rs          # DSD transport state (native / DoP / PCM fallback)
 │   ├── loudness_state.rs     # Background EBU R128 scan state
-│   ├── spatial_persistence.rs # Phase 21: auto-save/restore of the active
+│   ├── spatial_persistence.rs # Auto-save/restore of the active
 │   │                         #   spatial scene (SpatialNode surface →
 │   │                         #   SpatialConfig, atomic writes, lifecycle hooks)
 │   ├── volume.rs             # Volume control modes (software / hardware)
@@ -87,9 +92,11 @@ src/
 │   ├── helpers.rs            # Shared helpers (event emission, playback info writes)
 │   ├── telemetry.rs          # EngineTelemetry — PlaybackInfo publication cadence
 │   ├── buffers.rs            # EngineScratch — preallocated hot-path buffers
+│   ├── offline.rs             # OfflineRenderer — deterministic render of the real
+│   │                         #   production chain into a buffer, no device/realtime thread
 │   ├── decode_loop/          # Decode-and-process hot loop (common.rs +
 │   │                         #   single.rs + crossfade.rs + mod.rs)
-│   ├── lanes.rs              # Multi-track lane registry (Phase 4 S6): an
+│   ├── lanes.rs              # Multi-track lane registry: an
 │   │                         #   independent decoder+resampler per bus slot
 │   │                         #   ≥ 2, fed as secondaries each block
 │   └── commands/             # Command handlers, organized by concern
@@ -97,14 +104,14 @@ src/
 │       ├── playback.rs       # play / pause / stop / seek / speed / pitch
 │       ├── lifecycle.rs      # open / prepare-next / recover / tag write-back
 │       ├── playlist.rs       # enqueue / next / previous / shuffle / repeat /
-│       │                      #   load / save playlist file
+│       │                     #   load / save playlist file
 │       ├── lanes.rs          # add/remove track, track gain/pan, duck tracks
 │       ├── eq.rs             # parametric + graphic EQ, shelves, preamp
 │       ├── dsp.rs            # dither, crossfeed, compressor, limiter, bit-perfect
 │       ├── output.rs         # backend / device / profiles / volume modes
 │       ├── multichannel.rs   # channel mix / trim / routing / LFE / bass mgmt
 │       ├── capture.rs        # WASAPI loopback capture start/stop
-│       └── correction.rs     # Phase-7 correction: enable/depth/IR load/MeasureRoom
+│       └── correction.rs     # Correction: enable/depth/IR load/MeasureRoom
 │
 ├── decode/                   # ── Decoding ──
 │   ├── mod.rs                # Format routing, metadata/loudness extractors
@@ -129,61 +136,24 @@ src/
 │   └── fingerprint.rs        # Chromaprint/AcoustID (`fingerprint` feature)
 │
 ├── dsp/                      # ── Signal processing ──
-│   ├── aelog/                # Deterministic recording & replay (Phase 27,
-│   │                         #   v3.29; Phase 30, v3.32: render inputs):
-│   │                         #   versioned .aelog render sessions — mod.rs
-│   │                         #   (SessionHeader / RecordedCommand —
-│   │                         #   timeline mutations + InputAudio chunks
-│   │                         #   (clip-addressed v3.35; multi-channel
-│   │                         #   channel-major planes v3.36) +
-│   │                         #   master-stamped SetListenerPosition / Aelog
-│   │                         #   + JSON string/file round-trips), record.rs
-│   │                         #   (AelogRecorder — logs every timeline
-│   │                         #   mutation + record_audio_input /
-│   │                         #   record_clip_audio (Phase 33, v3.35) /
-│   │                         #   record_audio_input_channels /
-│   │                         #   record_clip_audio_channels (Phase 34,
-│   │                         #   v3.36) / record_listener_position /
-│   │                         #   record_baked_scene (Phase 35, v3.37),
-│   │                         #   replay.rs (replay_events — identical fired
-│   │                         #   stream; replay_render — byte-identical
-│   │                         #   golden capture against a Graph 2.0
-│   │                         #   executor, re-feeding the recorded audio
-│   │                         #   tracks, re-attaching baked-scene swaps,
-│   │                         #   and driving acoustic nodes from the
-│   │                         #   listener trajectory (Phase 36, v3.38);
-│   │                         #   ReplayOutcome exposes audio_input +
-│   │                         #   clip_tracks (per-clip tracks, Phase 33,
-│   │                         #   channel-major v3.36) + listener_motion +
-│   │                         #   scene_swaps (Phase 35)). cache.rs
-│   │                         #   (Phase 31,
-│   │                         #   v3.33: AelogCache — golden captures keyed
-│   │                         #   by a deterministic hash (log_hash ×
-│   │                         #   graph_fingerprint × sink); v3.42.0 names
-│   │                         #   each entry by its **content address** —
-│   │                         #   SHA-256 of the canonical render-identity
-│   │                         #   JSON — so a synced cache directory is
-│   │                         #   valid on any machine, and bounds the dir
-│   │                         #   by **LRU eviction** (with_budget, touched
-│   │                         #   stamp bumped on each hit);
-│   │                         #   lookup/insert/render_cached, atomic
-│   │                         #   temp-file writes, corrupt entries degrade
-│   │                         #   to misses; log_hash (v3.41.1) covers only
-│   │                         #   render-relevant content — sample rate,
-│   │                         #   block cadence, commands — so the label
-│   │                         #   and format version never split a key and
-│   │                         #   re-labelled sessions reuse the golden
-│   │                         #   render). CLI: bin/aelog_replay (engine
-│   │                         #   replay recording.aelog) gained a --cache
-│   │                         #   flag (v3.43.0): with --graph graph.json it
-│   │                         #   renders through the content-addressed cache
-│   │                         #   and reports cache: HIT/MISS, so repeated
-│   │                         #   runs of the same session skip re-rendering
+│   ├── aelog/                # Deterministic record & replay of render sessions —
+│   │                         #   versioned .aelog files (timeline mutations +
+│   │                         #   clip-addressed, channel-major InputAudio chunks +
+│   │                         #   master-stamped listener poses + baked-scene swaps),
+│   │                         #   record/replay/cache (replay_render is byte-identical
+│   │                         #   golden capture against a Graph 2.0 executor), and a
+│   │                         #   content-addressed AelogCache — SHA-256 over the
+│   │                         #   canonical render-identity JSON, so a synced cache
+│   │                         #   directory is valid on any machine, LRU-bounded by
+│   │                         #   with_budget; corrupt entries degrade to misses).
+│   │                         #   CLI: bin/aelog_replay with --graph/--cache (HIT/MISS).
+│   │                         #   Development history: HISTORY.md
 │   ├── pipeline/             # DspPipeline — reference chain; bit-exact
 │   │                         #   oracle for the graph equivalence suite
 │   │                         #   (mod.rs + controls/process/format/tests)
-│   ├── correction/           # Room & headphone correction (Phase 7):
-│   │                         #   sweep.rs (ESS measurement + deconvolution),
+│   ├── correction/           # Room & headphone correction:
+│   │                         #   sweep.rs (ESS measurement + deconvolution +
+│   │                         #   THD separation + SNR estimation),
 │   │                         #   ir.rs (WAV import + conditioning), phase.rs
 │   │                         #   (min/linear/hybrid rendering), derive.rs
 │   │                         #   (smoothed regularized inverse) — all
@@ -202,7 +172,9 @@ src/
 │   ├── multiband_compressor.rs # 3-band multiband compressor
 │   ├── convolution.rs        # FFT partitioned convolution engine
 │   ├── crossfade.rs          # Track mixer (gapless / crossfade blend)
-│   ├── timestretch.rs        # WSOLA time-stretch / pitch-shift
+│   ├── timestretch/          # WSOLA time-stretch / pitch-shift (mod.rs wiring,
+│   │                         #   stretcher.rs, transient.rs, phase_vocoder.rs,
+│   │                         #   config_types.rs, tests.rs)
 │   ├── gain.rs               # Ramped gain / fade processors
 │   ├── stereo.rs             # Mid-side stereo enhancer
 │   ├── channel_trim.rs       # Per-channel trim / routing / bass mgmt / LFE
@@ -210,12 +182,12 @@ src/
 │   ├── device_profile.rs     # Per-device DSP defaults
 │   ├── analyzer.rs           # Real-time peak/RMS/spectrum analyzer
 │   ├── float.rs              # AudioFloat numeric helpers
-│   ├── modulation/           # Unified modulation system (Phase 4):
+│   ├── modulation/           # Unified modulation system:
 │   │                         #   lfo.rs (Sine/Tri/Saw/Square/S&H, tempo-sync),
 │   │                         #   envelope.rs (ADSR 4-stage generator),
 │   │                         #   follower.rs (peak & RMS envelope follower),
 │   │                         #   matrix.rs (ModulationMatrix routing)
-│   ├── analysis/             # Spectral & psychoacoustic analysis (Phase 4):
+│   ├── analysis/             # Spectral & psychoacoustic analysis:
 │   │                         #   spectral.rs (centroid, spread, flux, rolloff, flatness),
 │   │                         #   temporal.rs (crest factor, dynamic range, transients),
 │   │                         #   harmonic.rs (harmonicity, tonality estimation),
@@ -223,146 +195,63 @@ src/
 │   ├── simd/                 # Hierarchical vectorization architecture (§8.2, Item 29):
 │   │                         #   AVX-512, AVX2/FMA, SSE2, ARM NEON, and Scalar tiers
 │   │                         #   with bit-exact fallbacks, dynamic detection, and runtime dispatch
-│   └── graph2/               # Graph 2.0 (Phase 25, v3.27): general-purpose
-│   │                         #   audio graph topology — nodes with explicit
-│   │                         #   typed ports (node.rs: PortSpec/SignalType/
-│   │                         #   NodeKind/NodeCapabilities), first-class
-│   │                         #   edges (edge.rs), validation + cycle
-│   │                         #   detection with cycle-path reporting
-│   │                         #   (validate.rs), deterministic topological
-│   │                         #   scheduling (sort.rs: Kahn's, ascending-id
-│   │                         #   tie-break), builder/query/compile + serde
-│   │                         #   round-trip + to_dot inspection (mod.rs),
-│   │                         #   and an offline executor rendering any
-│   │                         #   topology block-by-block (exec.rs:
-│   │                         #   Source/Sink/Gain/Delay/Mix/Split;
-│   │                         #   set_gain_step for sample-accurate parameter
-│   │                         #   changes; latency.rs (Phase 28, v3.30:
-│   │                         #   node_latency taps + LatencyReport upstream
-│   │                         #   propagation + compensate — automatic delay
-│   │                         #   alignment splicing Delay nodes onto faster
-│   │                         #   branches while preserving node ids). Phase
-│   │                         #   29 (v3.31): NodeKind::Acoustic renders a
-│   │                         #   BakedScene room response from a source
-│   │                         #   position (add_acoustic builder;
-│   │                         #   OfflineExecutor::set_baked_scene; direct
-│   │                         #   pass-through + per-path excess-delay taps;
-│   │                         #   zero pipeline latency; Vec3 now serde;
-│   │                         #   Phase 36 v3.38: set_listener_position
-│   │                         #   overrides the lookup so the replayed
-│   │                         #   listener trajectory drives the node;
-│   │                         #   Phase 37 v3.39: scene: Option<String> on
-│   │                         #   the node selects a named scene from
-│   │                         #   set_scene/remove_scene — per-listener
-│   │                         #   bakes rendered and mixed in one graph;
-│   │                         #   Phase 38 v3.40: per-path spectral filtering
-│   │                         #   — each non-direct path is a min-phase FIR
-│   │                         #   (material spectrum / diffraction corner)
-│   │                         #   convolved against a fixed raw history ring;
-│   │                         #   kernels recompile on acoustic_epoch bump
-│   │                         #   while the room keeps ringing). Phase
-│   │                         #   30 (v3.32): NodeKind::Buffer — audio-input
-│   │                         #   source (embedded clip one-shot/looping, or
-│   │                         #   OfflineExecutor::set_external_input track).
-│   │                         #   Phase 33 (v3.35): NodeParams::Buffer gains
-│   │                         #   clip: Option<String> — add_buffer_clip /
-│   │                         #   OfflineExecutor::set_external_clip route
-│   │                         #   per-clip tracks only to the nodes bearing
-│   │                         #   that address (multi-input graphs). Phase
-│   │                         #   34 (v3.36): Buffer samples are channel-
-│   │                         #   major planes — add_buffer_channels /
-│   │                         #   add_buffer_clip_channels expose one mono
-│   │                         #   output port per channel (lockstep cursor,
-│   │                         #   no upmix); external tracks multi-channel.
-│   │                         #   Phase 32 (v3.34): NodeKind::Convolution —
-│   │                         #   FIR convolver reporting kernel.len() taps,
-│   │                         #   and NodeKind::HRTF — mono-in/stereo-out
-│   │                         #   binaural filter reporting the longer
-│   │                         #   per-ear IR (both ears share that pipeline
-│   │                         #   delay); streaming overlap-add pipeline in
-│   │                         #   exec.rs so the delay never drifts — both
-│   │                         #   compensate exactly like Delay. Phase 40
-│   │                         #   (v3.44.0): Convolution kernels ≥ 512 taps
-│   │                         #   render through the realtime
-│   │                         #   dsp::convolution partitioned-FFT engine
-│   │                         #   (FftConvState — fast long IRs), with an
-│   │                         #   extra N−B+1 front delay absorbing the
-│   │                         #   engine's partition latency so the reported
-│   │                         #   kernel.len() offset and compensation hold;
-│   │                         #   short kernels keep the exact direct path.
-│   │                         #   Phase 41 (v3.45.0): NodeKind::Resampler —
-│   │                         #   mono rate-conversion node reporting
-│   │                         #   quality taps (add_resampler /
-│   │                         #   add_resampler_with_quality,
-│   │                         #   RESAMPLER_DEFAULT_QUALITY=32), the last
-│   │                         #   hook the v3.30 latency pass documented:
-│   │                         #   node_latency = quality, capabilities.taps,
-│   │                         #   compensate aligns it like Delay;
-│   │                         #   exec renders a bandlimited windowed-sinc
-│   │                         #   interpolator (ratio ≥ 1 onto the fixed
-│   │                         #   frame grid) with a quality-zero pipe so
-│   │                         #   reported == actual delay. Phase 42
-│   │                         #   (v3.46.0): HRTF nodes get a source seam —
-│   │                         #   HrtfSource::Inline (classic tabs) or
-│   │                         #   Dataset{az,el,taps} reading measured
-│   │                         #   per-ear HRIRs from an executor-attached
-│   │                         #   HrtfDataset (set_hrtf_dataset;
-│   │                         #   add_hrtf_dataset[_with_taps];
-│   │                         #   bilinear_interpolate in run_hrtf,
-│   │                         #   padded to reported taps) so graph
-│   │                         #   binaural branches carry real
-│   │                         #   head-related responses and compensate
-│   │                         #   like Delay(taps). Phase 45 (v3.50.0):
-│   │                         #   exec/ split by concern (mod.rs wiring,
-│   │                         #   offline.rs run_* ops, ops.rs shared
-│   │                         #   node-processing kernels used by BOTH
-│   │                         #   executors, buffers.rs pipeline state +
-│   │                         #   allocation-free *_into forms) and a new
-│   │                         #   rt/ realtime executor — RtPlan: immutable
-│   │                         #   preallocated snapshot (per-edge planes,
-│   │                         #   fixed scratch, adjacency, node state,
-│   │                         #   control-side IR/scene resolution);
-│   │                         #   RtExecutor: enum-dispatched per block,
-│   │                         #   zero-allocation audio path, plans adopted
-│   │                         #   at block boundaries via atomic-pointer
-│   │                         #   publish/swap/retire (Phase-2 discipline);
-│   │                         #   sort.rs multi-edge fix. The
-│   │                         #   topology, not an authored chain, defines
-│   │                         #   the signal flow. Phase 46 (v3.51.0):
-│   │                         #   NodeKind::Prod(ProdStage) — the 17
-│   │                         #   production stages as topology kinds with
-│   │                         #   per-stage capabilities + arena-slot
-│   │                         #   mapping. Phase 47 (v3.52.0): prod/ —
-│   │                         #   the production engine ON Graph 2.0.
-│   │                         #   Phase 48 (v4.0.0): the legacy public
-│   │                         #   dsp::graph module is REMOVED — its arena,
-│   │                         #   plans, nodes, and control machinery
-│   │                         #   moved to prod/arena/ (crate-private
-│   │                         #   single node implementation, re-exported
-│   │                         #   through dsp::graph2::prod), the
-│   │                         #   hand-authored PlanSet::compile() is
-│   │                         #   deleted (lowering.rs is the ONLY plan
-│   │                         #   source), and the Phase-47 shadow mode
-│   │                         #   + graph2_shadow_verify flag are gone.
-│   │                         #   prod/ is now: topology.rs (the canonical
-│   │                         #   chain as a real Graph2, validated +
-│   │                         #   topologically compiled), lowering.rs
-│   │                         #   (compiled order → the production
-│   │                         #   PlanSet — the single plan source),
-│   │                         #   mod.rs (Graph2Engine — the production
-│   │                         #   engine shell: one node implementation,
-│   │                         #   lowered plan source; with_graph accessor
-│   │                         #   seam), controls.rs (the mirrored queued
-│   │                         #   mutators), control.rs
-│   │                         #   (Graph2ControlHandle), process.rs (the 9
-│   │                         #   block entries), arena/ (the former
-│   │                         #   dsp::graph: DspGraph arena split by
-│   │                         #   concern — construction/access/controls/
-│   │                         #   lifecycle/process/limiter/report/plan/
-│   │                         #   swap + nodes/ one file per stage).
-│   │                         #   AudioEngine runs Graph2Engine
-│   │                         #   end-to-end
-│   ├── timeline/              # Timeline & scheduler (Phase 26, v3.28):
+│   └── graph2/               # Graph 2.0 — the typed-port audio graph. Nodes carry
+│   │                         #   explicit typed ports (node.rs: PortSpec / SignalType /
+│   │                         #   NodeKind / NodeCapabilities — ProdStage has 18
+│   │                         #   production-stage variants), edges are first class
+│   │                         #   (edge.rs), validation detects cycles and reports the
+│   │                         #   offending path (validate.rs), scheduling is a
+│   │                         #   deterministic topological sort (sort.rs: Kahn's,
+│   │                         #   ascending-id tie-break), and mod.rs provides the
+│   │                         #   builder/query/compile surface with serde round-trip and
+│   │                         #   to_dot inspection.
+│   │                         #   LATENCY — latency.rs: node_latency taps + LatencyReport
+│   │                         #   upstream propagation + compensate, which splices Delay
+│   │                         #   nodes onto faster branches while preserving node ids.
+│   │                         #   NODE KINDS — Source / Sink / Gain / Delay / Mix / Split
+│   │                         #   with set_gain_step for sample-accurate parameter
+│   │                         #   changes; Buffer (embedded clip one-shot/looping or an
+│   │                         #   externally-installed track, clip-addressed and
+│   │                         #   channel-major planes with one mono port per channel);
+│   │                         #   Convolution (FIR reporting kernel.len() taps, >= 512
+│   │                         #   taps routed through the realtime partitioned-FFT
+│   │                         #   engine with an N−B+1 front delay so the reported offset
+│   │                         #   and its compensation hold); HRTF (mono-in/stereo-out,
+│   │                         #   reporting the longer per-ear IR); Resampler (mono rate
+│   │                         #   conversion reporting quality taps, rendered as a
+│   │                         #   bandlimited windowed-sinc interpolator so reported delay
+│   │                         #   equals actual); Acoustic (renders a BakedScene room
+│   │                         #   response from a source position, direct pass-through plus
+│   │                         #   per-path excess-delay taps, per-path min-phase spectral
+│   │                         #   FIRs recompiled on acoustic_epoch bump, and a
+│   │                         #   scene: Option<String> selector for named per-listener
+│   │                         #   bakes in one graph).
+│   │                         #   EXECUTORS — exec/ (offline; mod.rs wiring, offline.rs
+│   │                         #   run_* entries, ops.rs the shared node kernels used by
+│   │                         #   BOTH executors, buffers.rs pipeline state plus
+│   │                         #   allocation-free *_into forms) and rt/ (RtPlan: immutable
+│   │                         #   preallocated snapshot — per-edge planes, fixed scratch,
+│   │                         #   adjacency, node state, control-side IR/scene resolution;
+│   │                         #   RtExecutor: enum-dispatched per block, zero-allocation
+│   │                         #   audio path, plans adopted at block boundaries by
+│   │                         #   atomic-pointer publish/swap/retire).
+│   │                         #   PROD — the production engine ON Graph 2.0. topology.rs
+│   │                         #   (the canonical chain as a real Graph2, validated +
+│   │                         #   topologically compiled), lowering.rs (compiled order →
+│   │                         #   the production PlanSet — the ONLY plan source; the
+│   │                         #   hand-authored PlanSet::compile() is deleted),
+│   │                         #   mod.rs (Graph2Engine — one node implementation, lowered
+│   │                         #   plan source, with_graph accessor seam), controls.rs
+│   │                         #   (mirrored queued mutators), control.rs
+│   │                         #   (Graph2ControlHandle), process.rs (the block entries), and
+│   │                         #   arena/ — the node arena, crate-private and re-exported
+│   │                         #   through dsp::graph2::prod, split by concern
+│   │                         #   (construction/access/controls/lifecycle/process/
+│   │                         #   limiter/report/plan/swap) with nodes/ one file per
+│   │                         #   stage. AudioEngine runs Graph2Engine end-to-end.
+│   │                         #   The topology, not an authored chain, defines the flow.
+│   │                         #   (Historical development narrative: HISTORY.md)
+│   ├── timeline/              # Timeline & scheduler:
 │   │                         #   clock.rs (AudioClock — playhead + monotonic
 │   │                         #   master, transport state, loop region, tempo
 │   │                         #   ramp, bars/beats/ticks + conversions),
@@ -373,8 +262,8 @@ src/
 │   │                         #   Host), automation.rs (CurveBeats — a
 │   │                         #   tempo-mapped piecewise-linear control curve
 │   │                         #   in beats, evaluate(sample, &TempoMap) for
-│   │                         #   musical automation; Phase 39 v3.41),
-│   │                         #   curve.rs (Phase 4: sample-accurate
+│   │                         #   musical automation),
+│   │                         #   curve.rs (sample-accurate
 │   │                         #   AutomationTrack with Step/Linear/Exponential/
 │   │                         #   SCurve interpolation),
 │   │                         #   mod.rs (Timeline scheduler —
@@ -383,15 +272,14 @@ src/
 │   │                         #   timeline regions). Drives a compiled Graph
 │   │                         #   2.0 graph: the transport owns rendering
 │
-│   ├── fx/                   # ── Creative sound-design DSP layer (Phase 4) ──
+│   ├── fx/                   # ── Creative sound-design DSP layer ──
 │   │   ├── delay.rs          # CombFilter (feedback/feedforward) & PingPongDelay
 │   │   ├── modulation.rs     # Chorus, Flanger, Phaser, RingModulator
 │   │   ├── distortion.rs     # Saturator (Tape, Tube, Soft/Hard Clip, Wavefolder)
 │   │   └── mod.rs            # Facade and public re-exports
 │
-├── spatial/                  # ── Spatial audio (Phases 8–24, opt-in) ──
-│   ├── acoustic/             # Acoustic world simulation + baking (Phases
-│   │                         #   23–24, v3.25–v3.26): material.rs
+├── spatial/                  # ── Spatial audio (opt-in) ──
+│   ├── acoustic/             # Acoustic world simulation + baking: material.rs
 │   │                         #   (per-octave-band MaterialSpectrum
 │   │                         #   absorption/reflection/transmission + material
 │   │                         #   presets), geometry.rs (AcousticRoom with per-
@@ -404,22 +292,20 @@ src/
 │   │                         #   bake.rs (BakedScene position-dependent
 │   │                         #   response cache + AcousticBaker; renderers
 │   │                         #   consume via set_baked / listener_images —
-│   │                         #   cache, not a new model; Phase 35, v3.37:
-│   │                         #   deterministic serde — BTreeMap cache as
-│   │                         #   ordered entries, −1.0 low-pass-infinity
-│   │                         #   sentinel, solver world skipped — for
-│   │                         #   aelog scene-swap logs; Phase 38, v3.40:
+│   │                         #   cache, not a new model. The cache is
+│   │                         #   deterministic serde (a BTreeMap cache as
+│   │                         #   ordered entries, a −1.0 low-pass-infinity
+│   │                         #   sentinel, the solver world skipped) so it
+│   │                         #   can be logged as an aelog scene swap;
 │   │                         #   spectral_taps(obj, ir_len) renders one
 │   │                         #   (excess, min-phase FIR kernel) per
 │   │                         #   non-direct path — material spectrum or
 │   │                         #   diffraction corner → FIR via the correction
-│   │                         #   magnitude→IR synthesizer; flat → single-tap;
-│   │                         #   Phase 42, v3.48: AirAbsorption model shapes
-│   │                         #   kernels per path distance when enabled;
-│   │                         #   Phase 50, v4.2.0: the family's own
-│   │                         #   magnitude (one/two-pole, exponential)
-│   │                         #   + listener_images composes the air corner
-│   │                         #   into each realtime tap corner)
+│   │                         #   magnitude→IR synthesizer, flat paths
+│   │                         #   reducing to a single tap; AirAbsorption
+│   │                         #   shapes kernels per path distance when
+│   │                         #   enabled; listener_images composes the air
+│   │                         #   corner into each realtime tap corner)
 
 │   ├── math.rs               # Vec3 / Quat + the single documented coordinate
 │   │                         #   system (+X right, +Y front, +Z up; metres /
@@ -434,9 +320,10 @@ src/
 │   │                         #   7.1.4 / custom), LayoutCalibration
 │   ├── level.rs              # DistanceModel (Linear/Inverse/InverseSquare/
 │   │                         #   InverseReference), AirAbsorption +
-│   │                         #   AirRolloffModel (Phase 50: magnitude
-│   │                         #   families + corner_hz/compose_corner_hz
-│   │                         #   realtime agreement mapping)
+│   │                         #   AirRolloffModel (magnitude families +
+│   │                         #   corner_hz/compose_corner_hz, the shared
+│   │                         #   mapping between the control-thread model
+│   │                         #   and the realtime path)
 │   ├── directivity.rs        # Directivity (omni/cardioid/supercardioid/
 │   │                         #   custom 2° curve) + the shared listener-angle
 │   │                         #   transform (source orientation → curve)
@@ -453,7 +340,8 @@ src/
 │   │                         #   every pan speaker (√N diffuse compensation),
 │   │                         #   decorrelated per speaker via delay rings
 │   │                         #   (AmbisonicFieldMixer)
-│   ├── ambisonic.rs          # Ambisonics/HOA core (Phase 16 → order 3):
+│   ├── ambisonic/            # Ambisonics/HOA core (mod.rs + basis.rs + encode.rs +
+│   │                         #   decoder.rs + rotation.rs + hoa.rs; order 1 → 3):
 │   │                         #   exact order-N SH basis (sh_n, channel_count
 │   │                         #   — order-1 FOA pinned + order-2 U/V/T/R/S +
 │   │                         #   order-3 ACN 9–15 per the Furse–Malham table,
@@ -464,26 +352,28 @@ src/
 │   │                         #   max-rE weights), AmbisonicDecoder
 │   │                         #   (per-speaker matrix), AmbisonicRenderer::
 │   │                         #   with_order (any supported order → any layout)
-│   ├── room.rs               # Room acoustics: Room (box + absorption +
+│   ├── room/                 # Room acoustics (mod.rs + early.rs + late.rs +
+│   │                         #   tests.rs). Room (box + absorption +
 │   │                         #   order + RT60), image-source enumeration,
 │   │                         #   EarlyReflections (per-object delay rings +
 │   │                         #   tap smoothing + the binaural ring
-│   │                         #   primitives + v3.47 per-(object,image)
+│   │                         #   primitives + per-(object,image)
 │   │                         #   spectral reflection low-pass), RoomLateField
 │   │                         #   (Schroeder tail encoding into the
 │   │                         #   ambisonic bus)
-│   ├── hrtf.rs               # Binaural head model: Woodworth ITD (reflective
+│   ├── hrtf/                 # Binaural head model (mod.rs + profile.rs + corpus.rs +
+│   │                         #   dataset.rs + interpolate.rs + decompose.rs +
+│   │                         #   quality.rs). Woodworth ITD (reflective
 │   │                         #   fold — correct for 0–360° azimuths),
 │   │                         #   Duda-Martens head-shadow shelf (α = 1.05 +
 │   │                         #   0.95·sinφ, first-order, DC=1), fractional-
 │   │                         #   delay ring read, ElevationNotch (pinna
 │   │                         #   notch biquad, exact passthrough at 0°),
-│   │                         #   HrtfDataset (Phase 18: azimuth × elevation
-│   │                         #   IR grid + bilinear interpolation with 360°
-│   │                         #   wrap + synthetic generator for testing;
-│   │                         #   Phase 20: from_corpus loads measured
-│   │                         #   SOFA-style corpora — resample, normalize,
-│   │                         #   JSON I/O)
+│   │                         #   HrtfDataset (azimuth × elevation IR grid +
+│   │                         #   bilinear interpolation with 360° wrap +
+│   │                         #   a synthetic generator for testing;
+│   │                         #   from_corpus loads measured SOFA-style
+│   │                         #   corpora — resample, normalize, JSON I/O)
 │   ├── binaural.rs           # BinauralRenderer — the whole hybrid scene
 │   │                         #   through the head model: objects (per-ear
 │   │                         #   ITD + shadow, spread blurs cues; FIR
@@ -496,7 +386,7 @@ src/
 │   │                         #   — nlerp interpolation + one-pole
 │   │                         #   smoothing + optional rate limit, the
 │   │                         #   same discipline extended to position
-│   │                         #   (Phase 51 listener motion); host applies
+│   │                         #   (listener motion); host applies
 │   │                         #   the result to the listener per block
 │   ├── automation.rs         # Spatial automation: CurveScalar / CurveVec3 /
 │   │                         #   CurveQuat positional-seconds curves + a
@@ -560,10 +450,29 @@ src/
 │                             #   averaging, regularized FIR synthesis & OutputCalibration export
 │
 ├── network_audio/            # ── Professional Network Audio (AES67 / RTP / PTP) (§10.4, Item 33) ──
+│   │                         #   LIBRARY ONLY — no engine caller anywhere in src/.
+│   │                         #   Not a playback feature; see README Known limitations.
 │   ├── rtp.rs                # RFC 3550 RTP packet builder/parser, L16 & L24 codecs
 │   ├── aes67.rs              # AES67 profiles, RFC 4566 SDP generation & parsing
 │   ├── clock.rs              # IEEE 1588-2008 PTP clock, delay/offset/PPM drift estimation
 │   └── session.rs            # RFC 2974 SAP announcer/listener & AdaptiveJitterBuffer (PLC)
+│
+├── standards/                # ── ITU-R / EBU / SMPTE conformance implementations ──
+│   ├── adm.rs                # ADM (ITU-R BS.2076-2) scene model + converter seam
+│   ├── channel_layout.rs     # Standard channel-layout descriptors
+│   ├── loudness.rs           # EBU R128 / ITU-R BS.1770 constants and helpers
+│   ├── metadata.rs           # Standard metadata field mappings
+│   ├── spatial.rs            # Spatial scene standardisation helpers
+│   └── true_peak.rs          # ITU-R BS.1770-4 true-peak definitions
+│
+├── state/                    # ── Persisted state ──
+│   └── mod.rs                # State store seams shared by DSP + spatial persistence
+│
+├── diagnostics/              # ── Typed diagnostics (submodules of `diagnostics.rs`) ──
+│   ├── events.rs             # Diagnostic event plumbing into EngineEvent
+│   └── health.rs             # Health aggregation across subsystems
+│
+├── governance.rs             # Policy / quality-profile governance layer
 │
 ├── output/                   # ── Output backends ──
 │   ├── mod.rs                # Module wiring + re-exports
@@ -575,10 +484,10 @@ src/
 │   ├── device_match.rs       # Device-name matching heuristics
 │   ├── format_converter.rs   # Sample-format conversion (f32 → i16/i24/i32/u16)
 │   ├── rate_policy.rs        # Output sample-rate policy helpers
-│   ├── endpoint.rs           # Multi-endpoint routing matrix (Phase 5b): per-
+│   ├── endpoint.rs           # Multi-endpoint routing matrix: per-
 │   │                         #   endpoint ring + nominal-ratio resampler +
 │   │                         #   rubato Slip drift trim + final limiter
-│   ├── drift.rs              # Adaptive endpoint clock drift correction & ASRC (Phase 4):
+│   ├── drift.rs              # Adaptive endpoint clock drift correction & ASRC:
 │   │                         #   dual-mode PI loop filter, 2-pole jitter filter,
 │   │                         #   anti-windup, slew limiter, loss-of-clock detector
 │   ├── cpal_output/          # cpal shared-mode fallback (all platforms)
@@ -676,16 +585,23 @@ those entries silently dropped.
 
 ## Optional features
 
-| Feature | What it adds |
-|---|---|
-| `wasapi-native` | Native WASAPI exclusive output **and** loopback capture (Windows) |
-| `asio-native` | Native ASIO output with native-DSD transport (Windows) |
-| `tag-write` | EBU R128 / ReplayGain tag write-back via `lofty` |
-| `fingerprint` | Chromaprint/AcoustID fingerprinting |
-| `resample` | Rubato sinc resampler |
-| `codec-*` | Per-codec Symphonia/pure-Rust decoders |
-| `audio-output` | Output backends (on by default) |
-| `network-streaming` | HTTP(S) Range-request streaming via `ureq` |
-| `c-ffi` | Stable C FFI surface |
-| `sofa-import` | NetCDF-3 classic SOFA → `HrtfCorpus` (nc4/HDF5 refused) |
-| `codec-dsd` | Accepted no-op for API compatibility (DSD compiled unconditionally) |
+`default = ["audio-output", "resample", "all-codecs", "sofa-import"]`.
+
+| Feature | Default? | What it adds |
+|---|---|---|
+| `audio-output` | ✅ **required** | The output backends. **Not merely default** — `src/lib.rs` carries a `compile_error!` without it, because `output::output` / `output::capabilities` and every per-OS backend reach `cpal` unconditionally. Implies `resample`. |
+| `resample` | ✅ | Rubato sinc resampler (`audio-output` implies it) |
+| `all-codecs` | ✅ | Every `codec-*` feature below, in one switch |
+| `sofa-import` | ✅ | NetCDF-3 classic SOFA → `HrtfCorpus` (nc4/HDF5 refused with a typed error) |
+| `codec-dsd` | ✅ (via `all-codecs`) | Accepted no-op for API compatibility — DSD compiles unconditionally |
+| `wasapi-native` | ❌ | Native WASAPI exclusive output **and** loopback capture (Windows) |
+| `asio-native` | ❌ | Native ASIO output with native-DSD transport (Windows) |
+| `asio` | ❌ | Routes cpal's own ASIO host instead of the native backend |
+| `pipewire` | ❌ | Native PipeWire pro-audio backend (Linux) |
+| `jack` | ❌ | Native JACK pro-audio backend (Linux/Unix) |
+| `plugin-dylib` | ❌ | The `libloading`-based dynamic plugin loader. The static-registry path (`static:<uid>` sources) works without it. |
+| `c-ffi` | ❌ | The stable C FFI surface (`src/ffi.rs`) |
+| `tag-write` | ❌ | EBU R128 / ReplayGain tag write-back via `lofty` |
+| `fingerprint` | ❌ | Chromaprint/AcoustID fingerprinting |
+| `network-streaming` | ❌ | **Non-functional by design.** Compiles `audio_io::NetworkByteSource` (a real `Range`-capable byte source on `ureq`), but nothing constructs one and `Decoder` is not streaming end to end. A remote `http(s)` URI is refused with an actionable error. Kept because the byte source is a reasonable foundation for the streaming work. |
+| `codec-*` | — | Per-codec Symphonia / pure-Rust decoders. `codec-musepack` is an **empty placeholder** — no decoder is wired in. |

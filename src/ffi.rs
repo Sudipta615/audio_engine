@@ -109,6 +109,71 @@ pub enum EngineStatus {
     EngineNotRunning = -4,
 }
 
+/// Run an FFI body so a Rust panic cannot unwind into the host.
+///
+/// A panic that escapes an `extern "C"` function is undefined behaviour by the
+/// ABI contract, and since Rust 1.71 it aborts the process. That is a poor
+/// failure mode for a *library*: one malformed host argument, one poisoned
+/// mutex, or one arithmetic precondition would take the entire host
+/// application down with a message aimed at nobody.
+///
+/// Every export in this module therefore keeps its real body in a private
+/// `*_impl` function and is exposed as a thin wrapper that catches unwinding
+/// and converts it into this module's ordinary error convention —
+/// [`EngineStatus::Error`] for a status-returning entry point, a sentinel for
+/// a value-returning one, and `NULL` for a handle factory. No export has a
+/// half-applied side effect a panic could leave behind, because every one of
+/// them either forwards a command to the engine or reads an atomically
+/// published snapshot; both are atomic with respect to the caller.
+///
+/// The default panic hook still runs, so a caught panic is still reported on
+/// stderr. That is deliberate: swallowing the message entirely would turn a
+/// host bug into silence.
+fn ffi_boundary<R>(body: impl FnOnce() -> R + std::panic::UnwindSafe, fallback: R) -> R {
+    match std::panic::catch_unwind(body) {
+        Ok(value) => value,
+        Err(_) => fallback,
+    }
+}
+
+/// ABI version of this FFI surface, as `(major << 16) | minor`.
+///
+/// A C host should call this before anything else and refuse to run against a
+/// surface whose major version it was not built for. The major component
+/// changes when an existing entry point changes meaning, a struct layout
+/// changes, or an entry point is removed; the minor component changes only
+/// when entry points are *added*, which is backward compatible.
+///
+/// `major` is 1: the surface introduced in 0.9.0. Before 0.9.0 there was no
+/// way to ask, so a 0.8-or-earlier host talking to a 0.9 library had no way to
+/// detect the additions — which is exactly the problem this entry point exists
+/// to stop recurring.
+pub const ENGINE_ABI_MAJOR: u32 = 1;
+/// ABI minor version: bumped when entry points are *added*.
+pub const ENGINE_ABI_MINOR: u32 = 0;
+/// Packed as `(major << 16) | minor`.
+pub const ENGINE_ABI_VERSION: u32 = (ENGINE_ABI_MAJOR << 16) | ENGINE_ABI_MINOR;
+
+/// Report [`ENGINE_ABI_VERSION`].
+#[no_mangle]
+pub extern "C" fn engine_abi_version() -> u32 {
+    ENGINE_ABI_VERSION
+}
+
+/// Report whether a host built against `host_version` can use this library.
+///
+/// Returns 1 when the major versions match and the library's minor version is
+/// at least the host's, 0 otherwise. A host should treat 0 as "refuse to
+/// start" rather than "best effort".
+#[no_mangle]
+pub extern "C" fn engine_abi_compatible(host_version: u32) -> i32 {
+    let host_major = host_version >> 16;
+    let host_minor = host_version & 0xFFFF;
+    let our_major = ENGINE_ABI_VERSION >> 16;
+    let our_minor = ENGINE_ABI_VERSION & 0xFFFF;
+    i32::from(host_major == our_major && our_minor >= host_minor)
+}
+
 /// Backend selection constants for `engine_create`.
 ///
 /// These are plain `u32` constants, NOT a Rust enum. A `#[repr(u32)]` enum
@@ -162,6 +227,14 @@ fn backend_from_id(id: u32) -> Option<config::AudioBackend> {
 /// caller must call `engine_destroy` to release resources.
 #[no_mangle]
 pub extern "C" fn engine_create(backend: u32) -> *mut EngineHandleFFI {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_create_impl(backend)),
+        std::ptr::null_mut(),
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_create_impl(backend: u32) -> *mut EngineHandleFFI {
     let output_backend = match backend_from_id(backend) {
         Some(b) => b,
         None => {
@@ -214,6 +287,14 @@ pub extern "C" fn engine_create(backend: u32) -> *mut EngineHandleFFI {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_destroy(engine: *mut EngineHandleFFI) {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_destroy_impl(engine)),
+        (),
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_destroy_impl(engine: *mut EngineHandleFFI) {
     if engine.is_null() {
         return;
     }
@@ -251,6 +332,14 @@ pub extern "C" fn engine_destroy(engine: *mut EngineHandleFFI) {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_play(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_play_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_play_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -262,6 +351,14 @@ pub extern "C" fn engine_play(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_pause(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_pause_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_pause_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -273,6 +370,14 @@ pub extern "C" fn engine_pause(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_stop(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_stop_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_stop_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -284,6 +389,14 @@ pub extern "C" fn engine_stop(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_seek(handle: *mut EngineHandleFFI, position_secs: f32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_seek_impl(handle, position_secs)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_seek_impl(handle: *mut EngineHandleFFI, position_secs: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -295,6 +408,14 @@ pub extern "C" fn engine_seek(handle: *mut EngineHandleFFI, position_secs: f32) 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_volume(handle: *mut EngineHandleFFI, volume: f32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_volume_impl(handle, volume)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_volume_impl(handle: *mut EngineHandleFFI, volume: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -306,6 +427,14 @@ pub extern "C" fn engine_set_volume(handle: *mut EngineHandleFFI, volume: f32) -
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_speed(handle: *mut EngineHandleFFI, speed: f32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_speed_impl(handle, speed)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_speed_impl(handle: *mut EngineHandleFFI, speed: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -318,6 +447,14 @@ pub extern "C" fn engine_set_speed(handle: *mut EngineHandleFFI, speed: f32) -> 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_volume_db(handle: *mut EngineHandleFFI, db: f32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_volume_db_impl(handle, db)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_volume_db_impl(handle: *mut EngineHandleFFI, db: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -332,6 +469,14 @@ pub extern "C" fn engine_set_volume_db(handle: *mut EngineHandleFFI, db: f32) ->
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_open_file(handle: *mut EngineHandleFFI, path: *const c_char) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_open_file_impl(handle, path)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_open_file_impl(handle: *mut EngineHandleFFI, path: *const c_char) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -352,6 +497,14 @@ pub extern "C" fn engine_open_file(handle: *mut EngineHandleFFI, path: *const c_
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_open_uri(handle: *mut EngineHandleFFI, uri: *const c_char) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_open_uri_impl(handle, uri)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_open_uri_impl(handle: *mut EngineHandleFFI, uri: *const c_char) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -372,6 +525,14 @@ pub extern "C" fn engine_open_uri(handle: *mut EngineHandleFFI, uri: *const c_ch
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_enqueue_file(handle: *mut EngineHandleFFI, path: *const c_char) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_enqueue_file_impl(handle, path)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_enqueue_file_impl(handle: *mut EngineHandleFFI, path: *const c_char) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -392,6 +553,14 @@ pub extern "C" fn engine_enqueue_file(handle: *mut EngineHandleFFI, path: *const
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_next(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_next_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_next_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -404,6 +573,14 @@ pub extern "C" fn engine_next(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_previous(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_previous_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_previous_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -416,6 +593,14 @@ pub extern "C" fn engine_previous(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_clear_playlist(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_clear_playlist_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_clear_playlist_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -430,6 +615,14 @@ pub extern "C" fn engine_clear_playlist(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_position_secs(handle: *mut EngineHandleFFI) -> f32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_position_secs_impl(handle)),
+        -1.0,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_position_secs_impl(handle: *mut EngineHandleFFI) -> f32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return -1.0,
@@ -441,6 +634,14 @@ pub extern "C" fn engine_position_secs(handle: *mut EngineHandleFFI) -> f32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_duration_secs(handle: *mut EngineHandleFFI) -> f32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_duration_secs_impl(handle)),
+        -1.0,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_duration_secs_impl(handle: *mut EngineHandleFFI) -> f32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return -1.0,
@@ -452,6 +653,14 @@ pub extern "C" fn engine_duration_secs(handle: *mut EngineHandleFFI) -> f32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_playback_state(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_playback_state_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_playback_state_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -468,6 +677,14 @@ pub extern "C" fn engine_playback_state(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_playlist_len(handle: *mut EngineHandleFFI) -> i64 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_playlist_len_impl(handle)),
+        -1,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_playlist_len_impl(handle: *mut EngineHandleFFI) -> i64 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return -1,
@@ -488,6 +705,14 @@ pub extern "C" fn engine_set_aux_insert(
     enabled: i32,
     wet_mix: f32,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_aux_insert_impl(handle, enabled, wet_mix)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_aux_insert_impl(handle: *mut EngineHandleFFI, enabled: i32, wet_mix: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -505,6 +730,18 @@ pub extern "C" fn engine_set_aux_insert(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_aux_insert_state(
+    handle: *mut EngineHandleFFI,
+    enabled: *mut i32,
+    wet_mix: *mut f32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_aux_insert_state_impl(handle, enabled, wet_mix)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_aux_insert_state_impl(
     handle: *mut EngineHandleFFI,
     enabled: *mut i32,
     wet_mix: *mut f32,
@@ -531,6 +768,14 @@ pub extern "C" fn engine_aux_insert_state(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_correction_enabled(handle: *mut EngineHandleFFI, enabled: i32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_correction_enabled_impl(handle, enabled)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_correction_enabled_impl(handle: *mut EngineHandleFFI, enabled: i32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -544,6 +789,14 @@ pub extern "C" fn engine_set_correction_enabled(handle: *mut EngineHandleFFI, en
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_correction_depth(handle: *mut EngineHandleFFI, depth: f32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_correction_depth_impl(handle, depth)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_correction_depth_impl(handle: *mut EngineHandleFFI, depth: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -565,6 +818,14 @@ pub extern "C" fn engine_load_correction_ir(
     handle: *mut EngineHandleFFI,
     path: *const c_char,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_load_correction_ir_impl(handle, path)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_load_correction_ir_impl(handle: *mut EngineHandleFFI, path: *const c_char) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -588,6 +849,32 @@ pub extern "C" fn engine_load_correction_ir(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_correction_info(
+    handle: *mut EngineHandleFFI,
+    enabled: *mut i32,
+    depth: *mut f32,
+    ir_len_samples: *mut i64,
+    latency_ms: *mut f32,
+    max_gain_db: *mut f32,
+    phase_mode: *mut i32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_correction_info_impl(
+                handle,
+                enabled,
+                depth,
+                ir_len_samples,
+                latency_ms,
+                max_gain_db,
+                phase_mode,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_correction_info_impl(
     handle: *mut EngineHandleFFI,
     enabled: *mut i32,
     depth: *mut f32,
@@ -642,6 +929,38 @@ pub extern "C" fn engine_correction_info(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_spatial_info(
+    handle: *mut EngineHandleFFI,
+    enabled: *mut i32,
+    voice_active: *mut i32,
+    voice_full_voices: *mut i32,
+    voice_degraded_voices: *mut i32,
+    voice_dropped_voices: *mut i32,
+    peak_db_l: *mut f32,
+    peak_db_r: *mut f32,
+    rms_db_l: *mut f32,
+    rms_db_r: *mut f32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_spatial_info_impl(
+                handle,
+                enabled,
+                voice_active,
+                voice_full_voices,
+                voice_degraded_voices,
+                voice_dropped_voices,
+                peak_db_l,
+                peak_db_r,
+                rms_db_l,
+                rms_db_r,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_spatial_info_impl(
     handle: *mut EngineHandleFFI,
     enabled: *mut i32,
     voice_active: *mut i32,
@@ -711,6 +1030,26 @@ pub extern "C" fn engine_spatial_listener_pose(
     pos_y: *mut f32,
     pos_z: *mut f32,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_spatial_listener_pose_impl(
+                handle, yaw_deg, pitch_deg, roll_deg, pos_x, pos_y, pos_z,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_spatial_listener_pose_impl(
+    handle: *mut EngineHandleFFI,
+    yaw_deg: *mut f32,
+    pitch_deg: *mut f32,
+    roll_deg: *mut f32,
+    pos_x: *mut f32,
+    pos_y: *mut f32,
+    pos_z: *mut f32,
+) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -757,6 +1096,25 @@ pub extern "C" fn engine_set_spatial_listener_pose(
     py: f32,
     pz: f32,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_set_spatial_listener_pose_impl(handle, qx, qy, qz, qw, px, py, pz)
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_listener_pose_impl(
+    handle: *mut EngineHandleFFI,
+    qx: f32,
+    qy: f32,
+    qz: f32,
+    qw: f32,
+    px: f32,
+    py: f32,
+    pz: f32,
+) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -787,6 +1145,20 @@ pub extern "C" fn engine_set_spatial_listener_pose(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_spatial_listener_tracking(
+    handle: *mut EngineHandleFFI,
+    smoothing_ms: f32,
+    max_angular_rate_deg_s: f32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_set_spatial_listener_tracking_impl(handle, smoothing_ms, max_angular_rate_deg_s)
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_listener_tracking_impl(
     handle: *mut EngineHandleFFI,
     smoothing_ms: f32,
     max_angular_rate_deg_s: f32,
@@ -827,6 +1199,38 @@ pub extern "C" fn engine_spatial_health(
     direct_reflected_ratio_db: *mut f32,
     active_sources: *mut i32,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_spatial_health_impl(
+                handle,
+                status,
+                localization,
+                reflection_dominance,
+                occlusion,
+                phase_risk,
+                voice_pressure,
+                correlation,
+                direct_reflected_ratio_db,
+                active_sources,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_spatial_health_impl(
+    handle: *mut EngineHandleFFI,
+    status: *mut i32,
+    localization: *mut i32,
+    reflection_dominance: *mut i32,
+    occlusion: *mut i32,
+    phase_risk: *mut i32,
+    voice_pressure: *mut i32,
+    correlation: *mut f32,
+    direct_reflected_ratio_db: *mut f32,
+    active_sources: *mut i32,
+) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -840,39 +1244,75 @@ pub extern "C" fn engine_spatial_health(
             crate::spatial::health::HealthLevel::Poor => 3,
         }
     };
-    unsafe {
-        // A not-yet-published report reads as a coherent inactive set.
-        *status = health.as_ref().map(|h| level_code(h.status)).unwrap_or(0);
-        *localization = health
+    // Every out-param is optional, exactly as documented above: a NULL
+    // out-param is skipped rather than treated as an error, and a
+    // not-yet-published report reads as a coherent inactive set. The sibling
+    // query entry points (`engine_correction_info`, `engine_aux_insert_state`)
+    // honour the same contract.
+    macro_rules! put {
+        ($out:expr, $value:expr) => {
+            if !$out.is_null() {
+                unsafe { *$out = $value };
+            }
+        };
+    }
+    put!(
+        status,
+        health.as_ref().map(|h| level_code(h.status)).unwrap_or(0)
+    );
+    put!(
+        localization,
+        health
             .as_ref()
             .map(|h| level_code(h.localization.level))
-            .unwrap_or(0);
-        *reflection_dominance = health
+            .unwrap_or(0)
+    );
+    put!(
+        reflection_dominance,
+        health
             .as_ref()
             .map(|h| level_code(h.reflection_dominance.level))
-            .unwrap_or(0);
-        *occlusion = health
+            .unwrap_or(0)
+    );
+    put!(
+        occlusion,
+        health
             .as_ref()
             .map(|h| level_code(h.occlusion.level))
-            .unwrap_or(0);
-        *phase_risk = health
+            .unwrap_or(0)
+    );
+    put!(
+        phase_risk,
+        health
             .as_ref()
             .map(|h| level_code(h.phase_risk.level))
-            .unwrap_or(0);
-        *voice_pressure = health
+            .unwrap_or(0)
+    );
+    put!(
+        voice_pressure,
+        health
             .as_ref()
             .map(|h| level_code(h.voice_pressure.level))
-            .unwrap_or(0);
-        *correlation = health.as_ref().map(|h| h.stereo_correlation).unwrap_or(0.0);
-        *direct_reflected_ratio_db = health
+            .unwrap_or(0)
+    );
+    put!(
+        correlation,
+        health.as_ref().map(|h| h.stereo_correlation).unwrap_or(0.0)
+    );
+    put!(
+        direct_reflected_ratio_db,
+        health
             .as_ref()
             .map(|h| h.direct_reflected_ratio_db)
-            .unwrap_or(f32::INFINITY);
-        *active_sources = health
+            .unwrap_or(f32::INFINITY)
+    );
+    put!(
+        active_sources,
+        health
             .as_ref()
             .map(|h| h.active_sources as i32)
-            .unwrap_or(0);
-    }
+            .unwrap_or(0)
+    );
     EngineStatus::Ok as i32
 }
 
@@ -882,6 +1322,14 @@ pub extern "C" fn engine_spatial_health(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_spatial_quality(handle: *mut EngineHandleFFI, quality: i32) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_spatial_quality_impl(handle, quality)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_quality_impl(handle: *mut EngineHandleFFI, quality: i32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -906,6 +1354,22 @@ pub extern "C" fn engine_set_spatial_quality(handle: *mut EngineHandleFFI, quali
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_spatial_voice(
+    handle: *mut EngineHandleFFI,
+    enabled: i32,
+    capacity: i32,
+    full_quality_capacity: i32,
+    policy: i32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_set_spatial_voice_impl(handle, enabled, capacity, full_quality_capacity, policy)
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_voice_impl(
     handle: *mut EngineHandleFFI,
     enabled: i32,
     capacity: i32,
@@ -944,6 +1408,32 @@ pub extern "C" fn engine_set_spatial_voice(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_set_spatial_automation(
+    handle: *mut EngineHandleFFI,
+    object: i32,
+    kind: i32,
+    times: *const f32,
+    values: *const f32,
+    points_count: i32,
+    time_secs: f32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_set_spatial_automation_impl(
+                handle,
+                object,
+                kind,
+                times,
+                values,
+                points_count,
+                time_secs,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_automation_impl(
     handle: *mut EngineHandleFFI,
     object: i32,
     kind: i32,
@@ -1014,6 +1504,14 @@ pub extern "C" fn engine_set_spatial_automation_time(
     handle: *mut EngineHandleFFI,
     seconds: f32,
 ) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_set_spatial_automation_time_impl(handle, seconds)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_set_spatial_automation_time_impl(handle: *mut EngineHandleFFI, seconds: f32) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -1028,6 +1526,17 @@ pub extern "C" fn engine_set_spatial_automation_time(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_trigger_spatial_cue(
+    handle: *mut EngineHandleFFI,
+    name: *const std::os::raw::c_char,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_trigger_spatial_cue_impl(handle, name)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_trigger_spatial_cue_impl(
     handle: *mut EngineHandleFFI,
     name: *const std::os::raw::c_char,
 ) -> i32 {
@@ -1051,6 +1560,14 @@ pub extern "C" fn engine_trigger_spatial_cue(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_stop_spatial_cue(handle: *mut EngineHandleFFI, target: usize) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_stop_spatial_cue_impl(handle, target)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_stop_spatial_cue_impl(handle: *mut EngineHandleFFI, target: usize) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -1068,6 +1585,21 @@ pub extern "C" fn engine_stop_spatial_cue(handle: *mut EngineHandleFFI, target: 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_spatial_render_cost(
+    handle: *mut EngineHandleFFI,
+    cost_units: *mut f32,
+    utilization: *mut f32,
+    tail_blocks: *mut f32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_spatial_render_cost_impl(handle, cost_units, utilization, tail_blocks)
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_spatial_render_cost_impl(
     handle: *mut EngineHandleFFI,
     cost_units: *mut f32,
     utilization: *mut f32,
@@ -1097,6 +1629,14 @@ pub extern "C" fn engine_spatial_render_cost(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_stop_all_spatial_cues(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_stop_all_spatial_cues_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_stop_all_spatial_cues_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -1116,6 +1656,32 @@ pub extern "C" fn engine_stop_all_spatial_cues(handle: *mut EngineHandleFFI) -> 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_upsert_endpoint(
+    handle: *mut EngineHandleFFI,
+    id: *const c_char,
+    device: *const c_char,
+    backend: u32,
+    gain: f32,
+    enabled: i32,
+    drift_correction: i32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_upsert_endpoint_impl(
+                handle,
+                id,
+                device,
+                backend,
+                gain,
+                enabled,
+                drift_correction,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_upsert_endpoint_impl(
     handle: *mut EngineHandleFFI,
     id: *const c_char,
     device: *const c_char,
@@ -1163,6 +1729,14 @@ pub extern "C" fn engine_upsert_endpoint(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_remove_endpoint(handle: *mut EngineHandleFFI, id: *const c_char) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_remove_endpoint_impl(handle, id)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_remove_endpoint_impl(handle: *mut EngineHandleFFI, id: *const c_char) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -1183,6 +1757,14 @@ pub extern "C" fn engine_remove_endpoint(handle: *mut EngineHandleFFI, id: *cons
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_clear_endpoints(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_clear_endpoints_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_clear_endpoints_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return EngineStatus::InvalidHandle as i32,
@@ -1197,6 +1779,14 @@ pub extern "C" fn engine_clear_endpoints(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_endpoint_count(handle: *mut EngineHandleFFI) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_endpoint_count_impl(handle)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_endpoint_count_impl(handle: *mut EngineHandleFFI) -> i32 {
     let h = match unsafe { handle.as_ref() } {
         Some(h) => h,
         None => return -1,
@@ -1211,6 +1801,19 @@ pub extern "C" fn engine_endpoint_count(handle: *mut EngineHandleFFI) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_endpoint_id(
+    handle: *mut EngineHandleFFI,
+    index: i32,
+    buf: *mut c_char,
+    buf_len: usize,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| engine_endpoint_id_impl(handle, index, buf, buf_len)),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_endpoint_id_impl(
     handle: *mut EngineHandleFFI,
     index: i32,
     buf: *mut c_char,
@@ -1252,6 +1855,34 @@ pub extern "C" fn engine_endpoint_id(
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_endpoint_info(
+    handle: *mut EngineHandleFFI,
+    index: i32,
+    enabled: *mut i32,
+    gain: *mut f32,
+    written_frames: *mut u64,
+    dropped_frames: *mut u64,
+    available_frames: *mut usize,
+    transport_error_count: *mut u64,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_endpoint_info_impl(
+                handle,
+                index,
+                enabled,
+                gain,
+                written_frames,
+                dropped_frames,
+                available_frames,
+                transport_error_count,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_endpoint_info_impl(
     handle: *mut EngineHandleFFI,
     index: i32,
     enabled: *mut i32,
@@ -1352,6 +1983,30 @@ fn bit_perfect_cause_code(c: crate::BitPerfectCause) -> i32 {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn engine_diagnostics_info(
+    handle: *mut EngineHandleFFI,
+    engine_error_kind: *mut i32,
+    engine_error_message: *mut c_char,
+    engine_error_message_len: usize,
+    bit_perfect_cause: *mut i32,
+    diagnostic_count: *mut i32,
+) -> i32 {
+    ffi_boundary(
+        std::panic::AssertUnwindSafe(|| {
+            engine_diagnostics_info_impl(
+                handle,
+                engine_error_kind,
+                engine_error_message,
+                engine_error_message_len,
+                bit_perfect_cause,
+                diagnostic_count,
+            )
+        }),
+        EngineStatus::Error as i32,
+    )
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::too_many_arguments)]
+fn engine_diagnostics_info_impl(
     handle: *mut EngineHandleFFI,
     engine_error_kind: *mut i32,
     engine_error_message: *mut c_char,
@@ -1892,6 +2547,127 @@ mod tests {
             10
         );
 
+        shutdown(&mut ffi);
+    }
+
+    #[test]
+    fn ffi_abi_version_is_self_describing() {
+        // A host must be able to ask what it is talking to before it calls
+        // anything else, and must be able to refuse a surface it was not
+        // built for.
+        assert_eq!(engine_abi_version(), ENGINE_ABI_VERSION);
+        assert_eq!(
+            ENGINE_ABI_VERSION >> 16,
+            1,
+            "0.9.0 introduces major ABI version 1"
+        );
+
+        // Exact match is compatible.
+        assert_eq!(engine_abi_compatible(ENGINE_ABI_VERSION), 1);
+        // An older host on the same major is compatible: 0.9 only added.
+        assert_eq!(engine_abi_compatible(1 << 16), 1);
+        // A newer host on the same major is NOT — we cannot know what it
+        // expects, so we must not pretend to.
+        assert_eq!(engine_abi_compatible((1 << 16) | 99), 0);
+        // A different major is never compatible, in either direction.
+        assert_eq!(engine_abi_compatible(0), 0);
+        assert_eq!(engine_abi_compatible(2 << 16), 0);
+    }
+
+    #[test]
+    fn ffi_boundary_converts_panic_to_status() {
+        // The wrapper must turn a panic into this module's ordinary error
+        // convention rather than letting it abort the host process.
+        assert_eq!(
+            ffi_boundary(
+                std::panic::AssertUnwindSafe(|| panic!("deliberate FFI boundary test")),
+                EngineStatus::Error as i32
+            ),
+            EngineStatus::Error as i32
+        );
+        // A non-panicking body passes its value straight through.
+        assert_eq!(ffi_boundary(|| 7i32, -1), 7);
+        assert_eq!(ffi_boundary(|| -1.0f32, -2.0), -1.0);
+        // A pointer-returning entry point: the fallback is a real sentinel,
+        // and a panicking body must yield it rather than propagating.
+        let sentinel = std::ptr::without_provenance_mut::<u8>(1);
+        assert_eq!(ffi_boundary(|| sentinel, std::ptr::null_mut()), sentinel);
+        assert_eq!(
+            ffi_boundary(
+                || -> *mut u8 { panic!("deliberate pointer boundary test") },
+                sentinel
+            ),
+            sentinel
+        );
+        assert_eq!(
+            ffi_boundary(
+                || -> *mut EngineHandleFFI { panic!("handle factory boundary test") },
+                std::ptr::null_mut()
+            ),
+            std::ptr::null_mut()
+        );
+    }
+
+    #[test]
+    fn ffi_spatial_health_accepts_null_out_params() {
+        // The doc comment promises "Out-params are optional — pass NULL to
+        // skip". This is the call a C host makes when it only wants, say, the
+        // status code, and it used to dereference all nine pointers
+        // unconditionally — a host-process segfault, not an error return.
+        let (mut ffi, ptr) = ffi_with_engine(EngineConfig::default());
+
+        // Every out-param NULL: still Ok, nothing written.
+        assert_eq!(
+            engine_spatial_health(
+                ptr,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            EngineStatus::Ok as i32
+        );
+
+        // Mixed: the requested out-param is written, the NULL ones skipped.
+        let mut status = 99i32;
+        assert_eq!(
+            engine_spatial_health(
+                ptr,
+                &mut status,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            EngineStatus::Ok as i32
+        );
+        assert_eq!(status, 0, "pre-publish report reads as Inactive");
+
+        // A NULL *handle* still outranks the out-params.
+        assert_eq!(
+            engine_spatial_health(
+                std::ptr::null_mut(),
+                &mut status,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            EngineStatus::InvalidHandle as i32
+        );
         shutdown(&mut ffi);
     }
 

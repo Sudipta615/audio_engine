@@ -1058,6 +1058,25 @@ impl EngineHandle {
         s
     }
 
+    /// Read back the live [`EngineConfig`].
+    ///
+    /// Added in 0.9.0. [`Self::settings`] is a curated read-back covering the
+    /// controls a UI draws; this returns the engine's configuration verbatim.
+    /// Use it for anything `settings` does not carry — the whole multichannel
+    /// group (`channel_mix`, `channel_policy`, `channel_trim`,
+    /// `channel_routing`, `channel_eq`, `lfe`, `bass_management`), per-slot
+    /// trims and duck state, plugin slots, spatial scene and room settings,
+    /// output profiles — all of which were write-only before 0.9.0.
+    ///
+    /// Lock-free and cheap to call: the config is published on the same
+    /// `ArcSwap` cadence as [`Self::settings`] and behind its own `Arc`, so
+    /// reading it on a UI thread never contends with the engine tick. The
+    /// returned value is a clone, so it is a consistent point-in-time
+    /// snapshot rather than a live view.
+    pub fn config(&self) -> config::EngineConfig {
+        (*self.playback_info.load().config).clone()
+    }
+
     /// Fetch an atomic, lock-free snapshot of current [`PlaybackInfo`].
     pub fn playback_info(&self) -> PlaybackInfo {
         (**self.playback_info.load()).clone()

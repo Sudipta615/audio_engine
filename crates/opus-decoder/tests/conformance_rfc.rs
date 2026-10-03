@@ -1,4 +1,14 @@
-#![allow(unused_variables, unused_assignments, clippy::collapsible_if)]
+// Lint parity with the host workspace is deliberately not a goal for this
+// vendored fork; see `src/lib.rs` for why each of these is suppressed
+// rather than fixed.
+#![allow(
+    unused_variables,
+    unused_assignments,
+    clippy::collapsible_if,
+    clippy::needless_range_loop,
+    clippy::manual_is_multiple_of,
+    clippy::chunks_exact_to_as_chunks
+)]
 
 #[path = "../src/compare.rs"]
 mod compare;

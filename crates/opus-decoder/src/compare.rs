@@ -7,6 +7,9 @@
 //! differences can happen between builds/platforms (especially in CELT), while
 //! still being considered acceptable by the reference test harness.
 
+// Lint parity with the host workspace is deliberately not a goal for this
+// vendored fork; `x.is_multiple_of(n)` would raise this crate's MSRV.
+#![allow(clippy::manual_is_multiple_of)]
 #![allow(
     dead_code,
     clippy::too_many_arguments,

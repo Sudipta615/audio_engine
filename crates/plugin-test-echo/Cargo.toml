@@ -1,13 +1,19 @@
 [package]
 name = "plugin-test-echo"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Sudipta615/ultimate-engine"
 description = "Reference plugin for the Shadow Desktop plugin ABI: delay+gain, C-ABI vtable, no-panic audio path"
+readme = "../../README.md"
+keywords = ["audio", "dsp", "plugin"]
+categories = ["multimedia::audio"]
+# A test fixture, not a distributed artifact.
+publish = false
+
 
 [dependencies]
-plugin-abi = { path = "../plugin-abi", default-features = false }
+plugin-abi = { path = "../plugin-abi", version = "0.9.0", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

@@ -1,8 +1,9 @@
 # Shadow Desktop Audio Engine — Owner's Guide & Architectural Map
 
-**Version:** 0.2.0 (engine + config in lockstep)
+**Version:** 0.9.0 (engine + config + plugin-abi + plugin-test-echo + engine-tui in lockstep)
 **License:** Apache-2.0
-**Language:** 100% pure Rust (no C/C++ components)
+**Language:** Rust, with no C/C++ codec SDKs. (Linux `alsa` binds the C `libasound`;
+the WASAPI/ASIO backends are COM FFI and CoreAudio is ObjC FFI — OS audio APIs, not codecs.)
 **Audience:** the project owner and directors — people who need a reliable mental
 model of the entire engine, without needing to read Rust code.
 
@@ -223,12 +224,12 @@ still present:
 
 ## 1.8 Current maturity level
 
-- Version 3.49.0, semantic versioning (API-stable, backward-compatible
-  additions since 3.0).
-- ~52,000 lines of Rust in the engine crate, plus the config crate.
-- **58 test files** (55 dedicated fidelity/measurement suites + 3 headless
-  integration tests) containing roughly **1,300 test functions**, plus 4
-  benchmark suites.
+- Version 0.9.0, semantic versioning (pre-1.0: the API is explicitly
+  unstable; see `AGENTS.md`).
+- 187,544 lines of Rust across the six workspace members (`src/` + `crates/`,
+  excluding `fuzz/` and `tests/`).
+- **98 test files** (95 explicitly registered `[[test]]` suites + 3 that Cargo
+  auto-discovers from `tests/*.rs`), plus 5 benchmark harnesses.
 - All phases in the design history are marked **Done**; the feature set is
   broad and internally consistent.
 - Mature enough that the honest recommendation in Section 16 is: **yes — this
@@ -772,20 +773,33 @@ Repository (Cargo workspace: two crates, one project)
         └── aelog_replay.rs       deterministic replay tool
 
 benches/   Criterion benchmarks (dsp, pipeline, graph plan, spatial)
-tests/     headless integration tests + 55 fidelity suites
+tests/     headless integration tests + 95 registered [[test]] suites
 ```
 
-## 4.1 The two crates
+## 4.1 The workspace members
 
-- **`engine`** (workspace root) — the whole engine: `src/` plus tests/benches.
+Six members, five of which ship in version lockstep:
+
+- **`audio-engine`** (workspace root, library target named `engine`) — the whole
+  engine: `src/` plus tests/benches.
 - **`config`** (`crates/config/`) — a small companion crate holding every
   configuration *type*: `EngineConfig` and its ~30 sub-configs (EQ, limiter,
   aux, spatial, endpoints…), validation, presets, and the versioned envelope.
   It has almost no dependencies (only serde + serde_json), so hosts can parse
   config files without linking the whole engine.
+- **`plugin-abi`** (`crates/plugin-abi/`) — the Rust-native plugin specification:
+  C-ABI vtables, a safe host facade, a dlopen loader, and a static registry.
+- **`plugin-test-echo`** (`crates/plugin-test-echo/`) — the reference delay+gain
+  plugin (cdylib + rlib), used by the host tests.
+- **`engine-tui`** (`crates/tui/`) — the terminal UI binary. A member rather than
+  a module so `ratatui`/`crossterm` never enter a library integrator's tree.
+- **`opus-decoder`** (`crates/opus-decoder/`) — the vendored RFC 8251 Opus decoder,
+  an in-tree fork of the crates.io 0.1.1 that fixes a debug-build shift overflow in
+  `celt/vq.rs`. It sits on its **own 0.1.x line** and does not move in lockstep.
 
-The two crates **must stay at the same version** (a release rule in
-`AGENTS.md`), because the engine's public API exposes config types directly.
+The five non-`opus-decoder` crates **must stay at the same version** (a release rule
+in `AGENTS.md`), because the engine's public API exposes config types directly and
+its plugin ABI has a version field.
 
 ## 4.2 Dependencies (who relies on whom)
 
@@ -794,7 +808,7 @@ config  (tiny, dependency-free-ish)
    ▲
 engine — everything depends on config's types
    ├── decode uses buffer, source, dsp (analyzer/loudness)
-   ├── engine core uses decode, dsp::graph, output, buffer, playlist, sink
+   ├── engine core uses decode, dsp::graph2::prod, output, buffer, playlist, sink
    ├── output uses buffer (rings)
    ├── spatial uses buffer, dsp::convolution (nothing from output)
    ├── dsp::graph2/timeline/aelog use spatial::math (Vec3 serde) and each other
@@ -879,7 +893,7 @@ orchestra (mix bus/DSP), and knows exactly where they are. **Inputs.**
 Commands, decoded blocks. **Processing.** Dual-decoder handoff (gapless /
 crossfade / fade / stop), seek with fades, lane feeding, analyzer taps,
 endpoint fan-out. **Outputs.** Processed blocks into rings. **Depends on.**
-decode, dsp::graph, output, playlist. **Used by.** tick. **Runtime.** tick
+decode, dsp::graph2::prod, output, playlist. **Used by.** tick. **Runtime.** tick
 thread. **Performance.** The single most CPU-heavy loop; must stay within
 real-time budget per block. **User effect.** The position you see, the
 seamlessness of track changes. **Limitations.** — **Location.**
@@ -1157,8 +1171,10 @@ queues. **Location.** `src/commands.rs`, `src/engine/commands/`.
 **Purpose.** Let C, C++, Python, C#, Node.js, and anything C-callable drive
 the whole engine. **Mental model.** A translated control panel: every Rust
 function gets a C twin. **Inputs.** C calls through an opaque handle.
-**Processing.** `engine_create/destroy` + ~50 functions (transport, DSP,
-playlist, endpoints, aux insert, spatial health, diagnostics, capture).
+**Processing.** `engine_create/destroy` + 47 exported functions (transport,
+sources, queue, aux insert, correction IR, spatial scene/pose/quality/voice/cue,
+endpoints, diagnostics). **Not** the whole Rust surface: EQ band control, crossfade
+configuration, channel routing, and event subscription are Rust-only.
 **Outputs.** Status codes (0 = OK); NULL/invalid handles are safe; no
 panics cross the boundary. **Used by.** non-Rust hosts. **Limitations.**
 Feature-gated (`c-ffi`); the surface is stable but additions need version
@@ -1177,8 +1193,9 @@ sort (Kahn's, stable tie-break), latency analysis + automatic delay
 compensation, serde round-trip, Graphviz export. **Outputs.**
 `OfflineExecutor` rendering blocks; `LatencyReport`; compensated graphs.
 **Depends on.** spatial::math (Vec3 serde), convolution. **Used by.** aelog
-replay, latency suite, tests. **Runtime.** offline only — the realtime
-`dsp::graph` is untouched. **Location.** `src/dsp/graph2/`.
+replay, latency suite, tests. **Runtime.** the offline executor is offline only;
+the same topology is also lowered onto the realtime arena by `prod/`. **Location.**
+`src/dsp/graph2/`.
 
 ## 5.27 Timeline, tempo, automation (offline)
 
@@ -1533,13 +1550,18 @@ without a single product being damaged:
   batch boundary: the old order finishes its current batch, then the new one
   takes over — no partially-processed batch is ever dropped.
 
-## 7.2 Technically (the production graph, `dsp::graph`)
+## 7.2 Technically (the production graph, `dsp::graph2::prod` + `prod::arena`)
 
 - **Node arena.** A fixed array of typed graph nodes (`GraphNode`), each with
   capability metadata (latency/tail/bit-perfect behavior).
-- **Compiled plans.** `PlanSet::compile()` produces the canonical stage
-  order as an ordered list of `(node, channel scope)` steps. The plan is the
-  single source of truth for the chain; the audio path only *reads* it.
+- **Compiled plans.** The plan is **lowered** from the Graph 2.0 topology:
+  `prod/lowering.rs` takes the topologically compiled execution order and
+  produces the production `PlanSet` as an ordered list of `(node, channel scope)`
+  steps. It is the *only* plan source — the hand-authored `PlanSet::compile()`
+  that used to exist has been deleted. The audio path only *reads* the plan.
+- **The topology, not an authored chain.** `prod/topology.rs` expresses the
+  canonical playback chain as a real Graph 2.0 graph (18 `ProdStage` kinds), so
+  the stage order is validated and topologically sorted rather than hand-listed.
 - **Two plans.** `Normal` (stereo) and `NormalMc` (multichannel, prepends the
   routing/trim step). Bit-perfect/DoP bypass isn't even a plan — the entry
   points return before any stage runs.
@@ -1552,12 +1574,12 @@ without a single product being damaged:
 - **Control queues.** Each node has an SPSC control queue; commands (e.g.
   `SetEqBand`, `SetAuxInsert`) drain at block boundaries and apply for the
   next block — sample-accurate boundaries, zero locks.
-- **Validation & ordering.** Stage order is fixed by the plan (not derived
-  per run); disabled stages are skipped, never reordered. In the *offline*
-  Graph 2.0 world, ordering is derived by topological sort and validated
-  (cycle detection etc.) — different regime, same discipline.
+- **Validation & ordering.** Stage order is derived once by topological sort
+  over the topology (with cycle detection), then lowered; disabled stages are
+  skipped, never reordered. The general-purpose offline executor derives its
+  ordering the same way, per graph.
 
-### The canonical plan order (from `plan.rs` — code wins over README)
+### The canonical plan order (from `prod/lowering.rs` — code wins over README)
 
 ```
 (stereo)      mix → aux → correction → eq → dynamics → convolution →
@@ -1903,7 +1925,7 @@ measurement discipline*, not a checkbox:
 
 | Layer | What it covers | Where |
 |---|---|---|
-| Unit tests | Individual modules (filters, math, config, codecs, spatial math) | `#[cfg(test)]` inside `src/` (~1,300 test functions total across src+tests) |
+| Unit tests | Individual modules (filters, math, config, codecs, spatial math) | `#[cfg(test)]` inside `src/` (test *function* counts are deliberately not asserted in prose — run `cargo test --workspace` for the live number; what is documented and verified is the **98 test files / 95 registered suites**) |
 | Headless integration | Engine lifecycle end-to-end without hardware | `tests/headless_playback.rs`, `decoder_from_memory.rs`, `memory_and_hotplug.rs` |
 | Fidelity suites (55) | DSP/spatial/acoustic correctness with committed thresholds | `tests/fidelity/` (each a `[[test]]` entry in Cargo.toml) |
 | Golden reference vectors | Frozen input→output captures | `golden_reference_vectors.rs`, `golden_corpus_expansion.rs` |
@@ -1917,12 +1939,13 @@ measurement discipline*, not a checkbox:
 | Spatial suites | panner, VBAP, objects, hybrid, ambisonic, HOA, room, binaural, tracking, node, HRTF IR, scene, acoustic world/bake | `spatial_*.rs`, `acoustic_*.rs` |
 | Graph 2.0 / timeline / latency | topology, scheduling, compensation, resampler/HRTF/convolver taps | `graph_topology.rs`, `timeline_scheduler.rs`, `latency_alignment.rs`, `convolver_taps.rs` |
 | Output profiles / format | device profiles, EQ response, resampler quality | `output_profiles.rs`, `eq_*.rs`, `resampler_*.rs`, `dither_measurement.rs`, `limiter_*.rs` |
-| Benchmarks | Criterion: DSP, pipeline, graph plan, spatial | `benches/` (4 harnesses) |
+| Benchmarks | Criterion: DSP, pipeline, graph plan, spatial, performance budget | `benches/` (5 harnesses) |
 
 > **Doc discrepancy note (resolved):** the README previously claimed "42
-> integration/fidelity test files… over 860 tests"; it has been corrected to
-> match the verified counts — 58 test files (55 fidelity suites + 3 headless)
-> containing roughly 1,300 test functions.
+> integration/fidelity test files… over 860 tests"; it has been corrected, and the
+> README and this guide now agree — **98 test files (95 registered `[[test]]`
+> suites + 3 auto-discovered)**. Test *function* counts are deliberately not
+> asserted in prose; run the suite.
 
 ## 11.3 Deterministic replay & reproducibility
 
@@ -2270,7 +2293,7 @@ development to product development? Yes — clearly.** The evidence:
 - The feature surface is broad, coherent, and internally consistent; every
   design phase is marked Done.
 - The real-time guarantees are machine-verified; the fidelity surface is
-  pinned by ~1,300 tests and golden vectors; the API is versioned and
+  pinned by the fidelity suites and the golden-bit-exact golden vectors; the API is versioned and
   stable (semver discipline with lockstep config crate, CHANGELOG, tags).
 - The risk profile of *adding features* now exceeds the risk of *building
   products on what exists*: each new capability carries realtime-safety,
@@ -2448,7 +2471,8 @@ Engine
 ├── Analysis: analyzer · loudness · profile · fingerprint · eval
 ├── Offline lab: graph2 · timeline · aelog · cache
 ├── Persistence: config (versioned) · scene files · caches
-└── Testing: 58 test files (~1,300 tests) · 4 benches · CI matrix
+└── Testing: 98 test files (95 registered suites + 3 auto-discovered) · 5
+    benches · CI matrix
 ```
 
 ## What makes it unusual (the top characteristics)
@@ -2466,15 +2490,23 @@ Engine
    downgrade reporting everywhere.
 8. Multi-device output with per-endpoint clock-drift correction (ppm).
 9. Independent spatial layer: content vs reproduction separated; same
-   scene → any layout or binaural.
+   scene → any layout or binaural. **In the production graph the spatial stage
+   renders stereo (2-plane) blocks only** — a multichannel master passes through
+   it bit-exact and unprocessed.
 10. Real head model (Woodworth ITD + Duda-Martens + pinna) + measured
     HRTF datasets + SOFA import (NetCDF-3).
 11. Acoustic simulation separated from rendering, with position-cached
     baking.
-12. 100% pure Rust (no native codec SDKs; safe OS bindings only).
+12. No native codec SDKs. (Linux `alsa` binds the C `libasound`; WASAPI/ASIO
+    are COM FFI and CoreAudio is ObjC FFI — OS audio APIs, not codecs. The DSP
+    path itself has no unsafe FFI; its `unsafe` is confined to `src/dsp/simd/`
+    `std::arch` intrinsics behind runtime detection.)
 13. Double-precision Quality mode with documented exceptions.
 14. Honest partial support (typed rejections, no silent downmixes).
-15. Stable C FFI covering advanced features.
+15. Stable C FFI (optional `c-ffi`, 47 entry points) covering transport,
+    queue, aux insert, correction IR, spatial control, endpoints and
+    diagnostics. It is a documented **subset** — EQ band control, crossfade
+    configuration, channel routing and event subscription are Rust-only.
 
 ## Known limitations (genuine ones only)
 
@@ -2607,9 +2639,13 @@ signals, realtime rules, completeness checklist).
   resample (`resample`).
 - Binaries: `audio-engine-cli`, `replaygain-scanner` (requires
   `tag-write`), `aelog-replay`.
-- Tests: `tests/` (headless integration), `tests/fidelity/` (55 named
-  `[[test]]` suites, each registered in Cargo.toml), in-crate unit tests.
-- Benchmarks: `benches/` (4 Criterion harnesses, `harness = false`).
+- Tests: `tests/` (headless integration), `tests/fidelity/` (95 named
+  `[[test]]` suites, each registered in Cargo.toml — Cargo auto-discovers
+  `tests/*.rs` but NOT `tests/*/*.rs`, so the explicit registration is what makes
+  them build), plus in-crate unit tests.
+- Benchmarks: `benches/` (5 Criterion harnesses, `harness = false`:
+  `dsp_bench`, `pipeline_bench`, `graph_plan_bench`, `spatial_bench`,
+  `performance_budget`).
 
 ## 19.2 Core public types
 
@@ -2806,10 +2842,12 @@ green.
   compatibility baggage, cleanup candidates for a major version.
 - Old `Room` (single absorption) vs `AcousticRoom` (per-wall spectra) —
   a convergence seam documented in code.
-- `acoustic_taps` broadband reduction is test-only after the v3.40 per-path
-  spectral filtering.
+- `acoustic_taps` broadband reduction is test-only after the per-path
+  spectral filtering landed.
 - README/ARCHITECTURE module maps lag the actual tree (e.g. `profile/`
-  not in the top-level map); keep the maps in sync going forward.
+  not in the top-level map); keep the maps in sync going forward. *(Corrected
+  in the 0.9.0 documentation pass — treat this entry as a standing rule, not a
+  current defect.)*
 
 ---
 

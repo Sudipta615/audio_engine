@@ -174,6 +174,20 @@ pub struct AudioEngine {
     /// Auto-save/restore of the active spatial scene. Control
     /// thread only: restores at construction, writes on change + shutdown.
     pub(crate) spatial_persistence: spatial_persistence::SpatialPersistence,
+    /// Auto-save/restore of the hand-tuned DSP settings: saved EQ presets,
+    /// limiter parameters, and the last output device/backend.
+    ///
+    /// Wired in 0.9.0. [`crate::engine::dsp_persistence::DspStateStore`] was
+    /// fully implemented and publicly exported since 0.2.0 but the engine
+    /// never constructed one, so `dsp_state.json` was never written or read
+    /// by anything: a user's limiter settings, EQ preset library and chosen
+    /// output device were silently lost on restart. Spatial persistence was
+    /// wired; this was the same idea that got left on the floor.
+    ///
+    /// Control thread only, exactly like `spatial_persistence`: restores at
+    /// construction, writes on change (the store skips the write when nothing
+    /// moved, so the steady path is a field compare rather than disk I/O).
+    pub(crate) dsp_persistence: dsp_persistence::DspStateStore,
     /// Multi-track lane registry: independent streams mixed
     /// onto bus slots ≥ 2. Control side adds/removes; the decode loop feeds
     /// active lanes at every block boundary.

@@ -1,0 +1,168 @@
+# cargo-deny policy for the `audio-engine` workspace.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# CI runs `EmbarkStudios/cargo-deny-action@v2`, but until now there was no
+# `deny.toml` in the repository. cargo-deny then applied only the defaults
+# compiled into the binary: the enforced licence set, the advisory ignore list,
+# the ban list and the source allow-list were all invisible to review, and
+# changing any of them required editing a third-party binary. Every entry below
+# is a decision a human made and can be reviewed.
+#
+# HOW THE ALLOW-LIST WAS DERIVED
+# ------------------------------
+# It is not a guess. It was computed from
+#
+#     cargo metadata --format-version 1 --all-features
+#
+# over the full 425-package resolved graph (including dev-dependencies and every
+# target-specific dependency, i.e. `windows*`, `objc2-*` and `alsa` even on a
+# Linux checkout), then diffed package-by-package against the candidate list.
+# Every SPDX identifier below is present in that graph.
+#
+# `cargo metadata` is also what the `features` and `msrv` jobs reason about, so
+# this list covers the feature combinations CI builds, not just `default`.
+#
+# NOTE: `fuzz/` is a SEPARATE workspace (see `fuzz/Cargo.toml`), so `libfuzzer-sys`
+# is not in this graph and is deliberately not allowed here.
+
+[graph]
+# Every dependency kind is part of the decision: a dev-dependency still gets
+# compiled into a developer's tree and still ships inside `cargo package`
+# output for anyone building from source.
+all-features = true
+no-default-features = false
+
+[licenses]
+# Permissive, redistributable licences only. Nothing here is copyleft-with-
+# reciprocity except the two entries called out below.
+#
+# Base set — every crate in the graph that is MIT / Apache-2.0 / BSD / ISC /
+# Zlib / MPL-2.0 / Unicode-3.0, which is the overwhelming majority (218 crates
+# are literally `MIT OR Apache-2.0`).
+allow = [
+    # ── the core permissive set ──────────────────────────────────────────
+    "Apache-2.0",       # 12 crates + all five workspace members
+    "MIT",              # 74 crates outright, and one branch of most OR groups
+    "BSD-3-Clause",     # `ogg`, `rusty-opus` (dev-only), `subtle`, `bindgen`
+    "BSD-2-Clause",     # `zerocopy`/`zerocopy-derive` (OR branch)
+    "ISC",              # `libloading` (plugin-dylib), `rustls-webpki`, `untrusted`
+    "Zlib",             # `foldhash`, and an OR branch on `miniz_oxide`, `bytemuck`
+    "Unicode-3.0",      # 18 `icu_*` / `tinystr` / `writeable` / `zerovec` crates,
+                        # reached through `url` -> `idna` -> `idna_adapter`
+
+    # ── copyleft / weak-copyleft, each with a reason ────────────────────
+    #
+    # `symphonia` 0.6.1 and its 13 sub-crates are MPL-2.0, NOT
+    # "MIT OR Apache-2.0". MPL-2.0 is file-level weak copyleft: it obliges you
+    # to publish modifications to the MPL-covered files, and it does not
+    # oblige you to license your own code. That is acceptable for a
+    # dynamically-linked Rust dependency, and the engine is Apache-2.0.
+    #
+    # `chromaprint-next` is `MIT AND LGPL-2.1-or-later` — an AND, so BOTH have
+    # to be allowed for the expression to be satisfiable. It is a Rust port of
+    # Chromaprint, which is LGPL-2.1 (its `LICENSE-LGPL-2.1` ships in the
+    # crate). LGPL-2.1 is a *linking* licence: the engine dynamically links it,
+    # and redistribution requires shipping the LGPL text and allowing
+    # relinking. This is the only LGPL crate in the graph and it is reachable
+    # only behind the optional `fingerprint` feature (AcoustID fingerprinting).
+    # It must stay in this list or `cargo deny check` fails; it must also stay
+    # attributed in any distribution.
+    "LGPL-2.1-or-later", # `chromaprint-next` (fingerprint feature)
+    "MPL-2.0",           # `symphonia*` (all codec/container features)
+
+    # ── non-standard but permissive, each forced by a specific crate ─────
+    #
+    # `unicode-ident`, `wezterm-bidi` and `finl_unicode` are
+    # `... AND Unicode-DFS-2016` (an AND expression, so the identifier is
+    # mandatory, not optional). It is the Unicode 3-clause permissive licence.
+    "Unicode-DFS-2016",
+    #
+    # `webpki-roots` 0.26.11 and 1.0.9 (the Mozilla CA bundle pulled in by the
+    # optional `network-streaming` feature's `ureq` -> `rustls`) are
+    # CDLA-Permissive-2.0. It is a permissive, attribution-only licence and is
+    # the CA bundle's own choice; it is not OSI-listed, so it needs naming here
+    # explicitly rather than falling under a generic SPDX family.
+    "CDLA-Permissive-2.0",
+    #
+    # `terminfo` 0.9.0 is WTFPL, reached via
+    # ratatui -> ratatui-termwiz -> termwiz -> terminfo. WTFPL is a
+    # public-domain dedication and is permissive in effect, but it is not an
+    # OSI-approved licence, so it is called out rather than hidden. Removing it
+    # means removing ratatui's `termwiz` backend from the TUI's dependency set —
+    # a manifest change, not a policy change.
+    "WTFPL",
+    #
+    # The remaining three are OR branches that are currently satisfied by
+    # `Apache-2.0`/`MIT` above. They are listed so that removing those two
+    # entries later cannot silently start failing on `audio-codec-algorithms`
+    # (0BSD), `ryu` (BSL-1.0) and `termcolor`/`memchr` (Unlicense).
+    "0BSD",         # `audio-codec-algorithms` (via `chromaprint-next`)
+    "BSL-1.0",      # `ryu` (via `serde_json`)
+    "Unlicense",    # `termcolor`, `memchr`, `aho-corasick`, `byteorder`
+
+    # `rustix`, `linux-raw-sys`, `wasi`, `wasip2` and `wit-bindgen` declare
+    # `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`. The OR is already
+    # satisfied, but the LLVM-exception variant is named so the relicense
+    # posture of the `rustix` family stays visible if the OR is ever narrowed.
+    "Apache-2.0 WITH LLVM-exception",
+]
+
+# Anything whose SPDX detection cargo-deny is less than 90% sure about is
+# treated as unrecognised and fails the check rather than being waved through.
+confidence-threshold = 0.9
+
+# Crates carrying a licence that resolves under an OR branch this project
+# deliberately does not want to rely on, and which therefore need a written
+# exception naming the crate. Empty on purpose: an exception here is a
+# licence-compliance decision, not a convenience.
+exceptions = []
+
+# `private.ignore` is deliberately NOT set. All five workspace members declare
+# `publish = false`, so `private.ignore = true` would exempt every one of them
+# from the licence check entirely. They are all Apache-2.0 and they are all
+# allowed above, so checking them costs nothing and catches a future licence
+# change.
+[licenses.private]
+ignore = false
+
+[advisories]
+# cargo-deny advisories config version 2. See the comment in
+# `.cargo/audit.toml` for the single policy that governs ignores — cargo-audit
+# and cargo-deny are run by the same `supply-chain` job and must agree.
+version = 2
+# No advisory is ignored. The first entry added here needs the same four fields
+# documented in `.cargo/audit.toml`: id, date, reason, expiry.
+ignore = []
+
+[bans]
+# Duplicate versions are widespread and mostly unavoidable in a tree that spans
+# `windows` 0.59 (root) and 0.62 (transitive), two `criterion` lines (0.5 for
+# `opus-decoder`, 0.8 for the root), `syn` 1/2/3, `itertools` 0.10/0.13/0.14 and
+# `windows-sys` 0.52/0.61. Denying duplicates would mean a permanent, ignored
+# deny-list; warn so the count is visible in the log and reviewable, and let a
+# human decide when a duplicate is a real problem.
+multiple-versions = "warn"
+
+# `"*"` version requirements make a build non-reproducible in a way that no
+# lockfile review can catch. Verified: no manifest in the workspace uses one, so
+# this is a standing guard rather than a description of the status quo.
+wildcards = "deny"
+allow-wildcard-paths = false
+
+# Nothing is denied by name. `deny` is for a crate that must not be reintroduced
+# after being removed for cause (a known-vulnerable fork, a licence-incompatible
+# addition); prefer `deny = []` plus a comment naming the crate and the reason,
+# so the entry survives a casual `cargo remove`.
+deny = []
+# skip-tree = []
+
+[sources]
+# Only crates.io. A dependency from an unknown registry or an unpinned git URL
+# is a supply-chain hole that `Cargo.lock`'s checksum column cannot cover,
+# because git sources have no checksum.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

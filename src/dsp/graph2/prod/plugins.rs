@@ -75,6 +75,13 @@ pub fn resolve_host(source: &str) -> Option<Arc<PluginHost>> {
 
     let mut cache = cache().lock().ok()?;
     if cache.len() >= MAX_CACHED_HOSTS {
+        // The cache is a *lookup accelerator*, not the owner of anything that
+        // matters: every live `PluginInstance` holds its own
+        // `Arc<PluginHost>` (see `HostedSlot`), so dropping these entries
+        // unloads no image that is still being called through. The entry
+        // returned just below is re-inserted immediately, so the steady-state
+        // effect is that the least-recently-inserted source is reloaded if it
+        // is asked for again.
         cache.clear();
     }
     cache.insert(source.to_string(), host.clone());

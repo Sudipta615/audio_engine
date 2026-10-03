@@ -3,6 +3,8 @@
 This document traces one block of audio samples from file to speaker, plus
 the analysis and capture side-paths. See [`ARCHITECTURE.md`](ARCHITECTURE.md)
 for the module-level view.
+For the archived development narrative behind the side-paths below, see
+[`HISTORY.md`](HISTORY.md).
 
 ## Playback path
 
@@ -42,7 +44,7 @@ file / URI / memory
 │  └────────────────┬──────────────┘           │
 │                   ▼                          │
 │  ┌────────────────┴──────────────┐           │
-│  │ Room/headphone correction     │  Phase 7: per-channel IR bank,
+│  │ Room/headphone correction     │  per-channel IR bank,
 │  │ (CorrectionNode)              │  skipped when disabled (bit-exact)
 │  └────────────────┬──────────────┘           │
 │                   ▼                          │
@@ -152,7 +154,7 @@ loopback thread ──▶ capture ring (FixedFrameBuffer)
 Capture is independent of playback state — you can record system audio while
 the engine is idle or playing through a different endpoint.
 
-### Additional endpoints (multi-endpoint routing matrix, v3.7.0)
+### Additional endpoints (multi-endpoint routing matrix)
 
 ```
 master stereo block (output domain, primary rate)
@@ -179,8 +181,7 @@ device's actual crystal (offset reported in ppm) instead of its nominal
 clock. Same-rate endpoints reuse the master's already-limited block
 untouched.
 
-### Acoustic world simulation (opt-in, v3.25.0)
-
+### Acoustic world simulation
 A **simulation-side** layer that computes how sound propagates through a
 space, separate from rendering. Controlling/acoustic geometry is described
 with frequency-dependent materials:
@@ -202,8 +203,7 @@ order-1 box yields one direct + six image-source reflections whose
 material-filtered transmission path plus wedge diffraction around their
 jambs.
 
-### Acoustic baking (opt-in, v3.26.0)
-
+### Acoustic baking
 For **static** scenes the solve above is identical block after block — so it
 is baked once and cached, then consumed at audio time:
 
@@ -216,16 +216,17 @@ BakedScene — position → response cache (0.5 m cells)
         ▼
 BasicPanner / VbapRenderer / BinauralRenderer (set_baked)
         │  object in baked cell?  ──yes──▶ cached taps (no solve)
-        └──no──▶ live AcousticWorld::solve fallback (Phase 23)
+        └──no──▶ live AcousticWorld::solve fallback
 ```
 
 Baking is control/offline-path; render-time is a `HashMap` read plus a flat
 copy into the fixed `ListenerImage` buffer — no solving, allocation, or
-locks. With no bake attached the renderers are bit-identical to v3.25; each
+locks. With no bake attached the renderers are bit-identical to the
+simulation-side path; each
 baked reflection also keeps its full per-band material spectrum for offline
 frequency-domain renderers.
 
-**Spectral reflections (v3.47.0).** Each `ListenerImage` now also carries a
+**Spectral reflections.** Each `ListenerImage` also carries a
 `lowpass_hz` corner derived from the path's per-band material spectrum (or
 its collapsed diffraction corner). The realtime renderers realise it as a
 **one-pole low-pass per reflected image** (`EarlyReflections`
@@ -233,10 +234,10 @@ per-(object,image) state, applied in `object_frame` and — for the binaural
 fractional-delay path — through `filter_reflection`), so baked reflections
 are spectrally coloured exactly as the offline `Acoustic` node renders
 (which does the same model with a minimum-phase FIR). Live-solve images
-carry ∞ and stay strict passthrough — bit-identical to v3.46; a spectrally
+carry ∞ and stay strict passthrough — bit-identical to the flat case; a spectrally
 flat (near-Nyquist) material collapses to ∞ before the runtime.
 
-### Graph 2.0 — general-purpose topology (offline, v3.27.0)
+### Graph 2.0 — general-purpose topology (offline)
 
 Alongside the fixed-chain realtime graph, a new topology model makes the
 graph itself the center of rendering: nodes declare **explicit typed ports**
@@ -266,10 +267,10 @@ Source ──▶ Split(2) ──▶ Gain(0.5) ──▶ Mix ──▶ Sink
 
 The whole topology serializes to JSON and back to an identical render, and
 exports a Graphviz `digraph` for inspection. Offline-first by design (like
-the acoustic layer); since Phase 48 the production hot path itself runs on
+the acoustic layer); the production hot path itself runs on
 plans lowered from this topology (see Graph 2.0 `prod`).
 
-### Timeline & scheduler — time as a render primitive (offline, v3.28.0)
+### Timeline & scheduler — time as a render primitive (offline)
 
 A deterministic **clock + event queue** drives a compiled Graph 2.0 graph:
 musical time (BPM, bars/beats/ticks, tempo changes/ramps, looping,
@@ -303,7 +304,7 @@ tl.schedule(EventTime::Beat(1.0), EventPayload::SetGain { node: gain.0, gain: 2.
 Like the acoustic and Graph 2.0 layers, the timeline is control/offline-path
 and heap-happy by design; it adds nothing to any realtime audio thread.
 
-### Musical automation — tempo-mapped control curves (offline, v3.41.0)
+### Musical automation — tempo-mapped control curves (offline)
 
 A control curve **authored in beats** (`CurveBeats`) drives a Gain node
 **over time**, evaluated against a `TempoMap`; the executor sweeps the gain
@@ -326,7 +327,7 @@ executor so a recorded session renders the exact sweep (golden-cache
 covered). `CurveBeats` is the musical counterpart to spatial's
 positional-seconds `CurveScalar`.
 
-### Aelog — deterministic recording & replay (offline, v3.29.0)
+### Aelog — deterministic recording & replay (offline)
 
 The whole render session can be recorded into a replayable log and
 re-executed to reproduce **byte-identical** output — the golden-render
@@ -349,7 +350,7 @@ against a fresh timeline, so the outcome is a pure function of the log. The
 Recording and replay are control/offline-path by design; nothing here
 touches a realtime audio thread.
 
-### Graph-wide latency & alignment (offline, v3.30.0)
+### Graph-wide latency & alignment (offline)
 
 Latency is a graph-wide concept in Graph 2.0: nodes declare taps and the
 latency pass propagates, reports, and **auto-compensates** parallel branches
@@ -374,14 +375,14 @@ compensate(graph) → edited Graph2
 The pass is control/offline-path; compensation edits the topology the
 offline executor renders, and never touches a realtime audio thread.
 
-### Acoustic world as graph nodes (offline, v3.31.0)
+### Acoustic world as graph nodes (offline)
 
 The acoustic world is a graph-routable primitive: an `Acoustic` node
 renders the baked room response of a source position from the scene attached
 to the executor — reflections become ordinary taps in the topology.
 
 ```
-AcousticBaker → BakedScene (v3.26)
+AcousticBaker → BakedScene
         │  OfflineExecutor::set_baked_scene
         ▼
 Source ──▶ Acoustic{position} ──┐            (direct pass-through +
@@ -395,7 +396,7 @@ the direct path adds **zero pipeline latency** (the tail is wet content, so
 `analyze`/`compensate` treat the room as latency-free). Baking and the node's
 control hooks are offline-path.
 
-#### Per-path spectral filtering (offline, v3.40.0)
+#### Per-path spectral filtering (offline)
 
 The collapsed broadband tap on each reflection/diffraction path is replaced
 by a real per-path **minimum-phase FIR** synthesised from the path's material
@@ -405,7 +406,7 @@ against a fixed-depth raw **input-history ring** at the path's excess delay
 commute and the ring is kernel-independent. On a scene swap or listener drive
 only the kernels recompile (executor `acoustic_epoch`), while the ring keeps
 the room ringing from the continuous session input. A flat path reduces to a
-single gain tap — byte-identical to the pre-v3.40 renderer — and the render
+single gain tap — byte-identical to the flat-spectrum renderer — and the render
 stays **zero algorithmic latency** (minimum-phase filters add none).
 
 ```
@@ -419,7 +420,7 @@ Source ──▶ Acoustic{position, scene?}
    (kernels recompile on acoustic_epoch; ring never drops session history)
 ```
 
-#### Distance air absorption on kernels (offline, v3.48.0)
+#### Distance air absorption on kernels (offline)
 
 [`BakedScene`] carries an [`AirAbsorption`] model; when enabled, each
 non-direct kernel is composed with a per-path, distance-dependent HF roll-off
@@ -427,11 +428,10 @@ non-direct kernel is composed with a per-path, distance-dependent HF roll-off
 two-pole or exponential per `rolloff_model`, `f_air =
 AirAbsorption::cutoff_hz(path.distance)`) so a farther reflection darkens with
 travel distance while staying equal at DC. Disabled by default → kernels
-bit-identical to v3.47; older scene logs `#[serde(default)]` load with air
+bit-identical to the un-air-absorbed case; older scene logs `#[serde(default)]` load with air
 off.
 
-#### Acoustic agreement: realtime distance colour (v4.2.0, Phase 50)
-
+#### Acoustic agreement: realtime distance colour
 The realtime renderers now agree with those kernels on distance colour.
 `AirAbsorption::corner_hz` maps each magnitude family to its −3 dB-equivalent
 one-pole corner, and `compose_corner_hz` folds that air corner into a
@@ -452,11 +452,11 @@ model enabled:
   like the direct and reflection paths.
 
 Disabled (the default) = every corner, tap, and rendered sample is
-bit-identical to v4.0.0; the new suite `tests/fidelity/acoustic_agreement.rs`
+bit-identical to the model-side renderer; the suite `tests/fidelity/acoustic_agreement.rs`
 pins the agreement, the monotonic darkening, the disabled-exact golden
 renders, and the late-field roll-off ratio.
 
-### Animated acoustic worlds in aelog (offline, v3.37.0)
+### Animated acoustic worlds in aelog (offline)
 
 A baked-scene **swap** is a recorded command, so an animated world replays
 its geometry timeline deterministically. The scene embeds in the aelog JSON
@@ -479,7 +479,7 @@ Aelog ──▶ replay_events(log)
 Identical sessions hash identically (the scene is part of the key), so the
 aelog-hash golden-render cache treats scene swaps like any other command.
 
-### Listener-driven acoustic nodes (offline, v3.38.0)
+### Listener-driven acoustic nodes (offline)
 
 The replayed listener trajectory **drives** the `Acoustic` nodes: each
 `SetListenerPosition` retargets the cached room-response lookup, so a
@@ -499,7 +499,7 @@ Aelog ──▶ replay_render(log, graph)
 Listener motion is a render input (alongside scene swaps and audio), so
 replaying a session reproduces the moving-listener render byte-exactly.
 
-### Per-listener baked scenes (offline, v3.39.0)
+### Per-listener baked scenes (offline)
 
 An `Acoustic` node can name a scene from the executor's registry, so one
 graph renders **distinct room responses for several listeners** and mixes
@@ -519,20 +519,20 @@ Nodes with `scene: None` (plain `add_acoustic`) keep using the active
 global scene — backward compatible. The locator drive selects the
 *position*; the scene id selects the *room*.
 
-### Aelog render inputs — audio & listener motion (offline, v3.32.0)
+### Aelog render inputs — audio & listener motion (offline)
 
 The log captures every input a render consumes, so a spatial session
 replays exactly: audio fed into the graph and the listener's motion join
-the timeline commands as first-class recorded commands. Since v3.35.0
-audio inputs are **clip-addressed**: each chunk carries an optional clip
+the timeline commands as first-class recorded commands. Audio inputs are
+**clip-addressed**: each chunk carries an optional clip
 name, and a multi-input graph mixes several recorded tracks, each routed
-only to the `Buffer` nodes bearing its address. Since v3.36.0 chunks are
+only to the `Buffer` nodes bearing its address. Chunks are
 **channel-major planes** (`chunk[0]` = channel 0, …) — a Buffer node
 exposes one mono output port per channel, so stereo/spatial sessions
 replay per-channel exactly.
 
 ```
-Buffer nodes (Graph 2.0, Phase 30; multi-channel Phase 34)
+Buffer nodes (Graph 2.0; single- and multi-channel)
    │  unaddressed node ← executor's global external track
    │  clip-addressed node ← its per-clip track (set_external_clip)
    │  N output ports = N channel planes (one mono port per channel)
@@ -562,7 +562,7 @@ order, positions carry the master at record time — so a combined session
 (audio + trajectory + a beat-timed `SetGain`) replays to the identical
 render. Recording and replay stay control/offline-path.
 
-### Aelog render cache (offline, v3.33.0)
+### Aelog render cache (offline)
 
 Because a golden render is a pure function of `(log, graph, sink)`, an
 identical session never needs to be rendered twice — captures are cached
@@ -571,7 +571,7 @@ under a deterministic hash and reused:
 ```
 recording.aelog ──▶ log_hash()  ──┐
 graph           ──▶ graph_fingerprint() ──┼─▶ key (SHA-256 content address
-sink id         ──────────────────┘           of the render identity; v3.42)
+sink id         ──────────────────┘           of the render identity
         │
         ▼
 AelogCache (file store under the app data dir)
@@ -585,10 +585,10 @@ hash; the graph fingerprint + sink keep same-log-different-graph renders
 separate (never a wrong cross-graph capture). Corrupt or missing entries
 are misses, writes are atomic, and the whole cache is control/offline-path.
 
-### HRTF & convolver taps in the latency pass (offline, v3.34.0)
+### HRTF & convolver taps in the latency pass (offline)
 
 Convolution and binaural branches now report and compensate exactly like
-`Delay` nodes — the v3.30 pass extends to the engine's two signature
+`Delay` nodes — the latency pass extends to the engine's two signature
 heavy operations:
 
 ```
@@ -598,14 +598,14 @@ NodeKind::Convolution { kernel }      node_latency = kernel.len()
 NodeKind::HRTF { left, right, source } node_latency = max(len)     (Inline)
    mono in ──▶ left ear  (delay = max)  both ears share the pipeline
            └──▶ right ear (delay = max)  delay → the pair stays aligned
-                                             OR (v3.46.0, Dataset source)
+                                             OR (Dataset source)
    reads measured per-ear HRIRs from the executor HrtfDataset via
    bilinear_interpolate(az,el,ear); node_latency = taps, padded to
    exactly taps → real head-related responses that compensate like Delay
 NodeKind::Resampler { ratio, quality } node_latency = quality
    mono in ─▶ windowed-sinc resample    out[k] = resamp(x)[k - quality]
           by ratio on the fixed grid    (reported taps = real delay)
-        (v3.45.0: the last tap hook the v3.30 pass named)
+        (the last tap hook the latency pass named)
 
   Split ──┬─▶ Convolution(300) ──┐           Split ──┬─▶ Conv(300) ──────┐
           │                      ├─▶ Mix  ──▶      │                     ├─▶ Mix
@@ -620,7 +620,7 @@ timeline `SetGain` still lands on the compensated graph. Both nodes are
 offline render primitives — the realtime `dsp::convolution` engine stays
 the hot-path partitioned counterpart.
 
-### Partitioned-FFT convolution for long IRs (offline, v3.44.0)
+### Partitioned-FFT convolution for long IRs (offline)
 
 Long kernels now render **fast** through that realtime engine instead of
 the exact O(N·M) direct path, while keeping the timing contract above
@@ -645,8 +645,7 @@ The engine is the same one the production arena
 (`graph2::prod::arena`) uses, so the Graph 2.0 offline executor and the
 production hot path agree on long IRs.
 
-### Spatial rendering (opt-in, v3.11.0 → v3.19.0)
-
+### Spatial rendering
 ```
 SpatialScene (world space: listener + objects + beds + fields)
         │  per-block object / bed / field audio planes + scene
@@ -668,7 +667,7 @@ interleaved multichannel PCM (frames × layout channels)
         ▼
 output domain ──▶ existing ring / endpoint path
 
-Ambisonic bus path (opt-in, v3.15.0 → order-3 in v3.20.0)
+Ambisonic bus path (opt-in, order 1 → order 3)
         │  bus planes [W, Y, Z, X] or order-2 [W,Y,Z,X,U,V,T,R,S] or
         │  order-3 +ACN 9–15 (world orientation, exact SN3D SH basis)
         ▼
@@ -678,7 +677,7 @@ AmbisonicRenderer (order ≤ 3): per-frame listener rotation (exact
         ▼
 interleaved multichannel PCM
 
-Binaural path (opt-in, v3.17.0 → spectral HRTFs in v3.19.0 → measured corpus loading in v3.21.0)
+Binaural path (opt-in, incl. spectral HRTFs and measured corpus loading)
         │  full hybrid scene (objects + beds + fields + room)
         ▼
 BinauralRenderer (stereo/headphone layout, exactly 2 ears)
@@ -698,7 +697,7 @@ BinauralRenderer (stereo/headphone layout, exactly 2 ears)
         ▼
 interleaved stereo PCM (L, R ears)
 
-Head tracking (opt-in, v3.18.0) — the VR/AR seam, control-side only
+Head tracking (opt-in) — the VR/AR seam, control-side only
         │  IMU / VR rig ── HeadSample(time, quat) ──> HeadTracker
         │        nlerp across the last two samples → one-pole smoothing
         │        (smoothing_ms) → optional rate limit (deg/s)
@@ -707,7 +706,7 @@ listener.orientation ──> scene ──> any renderer (unchanged)
         │  world-fixed sources keep their world position as the head turns;
         │  the host calls tracker.sample(now) once per render block
 
-SpatialNode in the production graph (opt-in, v3.19.0)
+SpatialNode in the production graph (opt-in)
         │  stereo master planes [L, R] + node controls (enable / screen /
         │  room / listener) drained at the block boundary
         ▼
@@ -717,7 +716,7 @@ SpatialNode plan step: binaural head model (+ room) on the front pair
         ▼
 master planes ──> limiter / output
 
-Scene files (opt-in, v3.19.0) — content only, renderer-independent
+Scene files (opt-in) — content only, renderer-independent
         │  SpatialScene ──to_config──> config::SpatialSceneConfig
         │     (listener quaternion, objects, beds by role names, fields,
         │      room) ──save_scene_json──> JSON on disk

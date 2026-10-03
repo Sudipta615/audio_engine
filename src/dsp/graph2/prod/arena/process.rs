@@ -424,11 +424,24 @@ impl DspGraph {
         if mix.inputs.len() <= slot {
             return;
         }
+        // `channels` arrives verbatim from the caller's interleaved stream.
+        // A zero-channel secondary is not a meaningful input, but it used to
+        // divide by zero here and then underflow at `channels - 1` below —
+        // a panic on the DSP thread, reachable from a public `pub fn`. Clamp
+        // to at least one channel, matching what the stereo sibling and the
+        // primary path in `process_block_multichannel_streams` already do.
+        let channels = channels.max(1);
         let ch = channels.min(mix.inputs[slot].planes.len());
         mix.inputs[slot].channels = ch;
         let available = interleaved.len() / channels;
         for (plane_idx, plane) in mix.inputs[slot].planes.iter_mut().take(ch).enumerate() {
-            let got = plane.len().min(k).min(available);
+            // `got` must be bounded by the frames actually remaining *after*
+            // `start`, not by the whole-buffer frame count: in the block
+            // splitting loop `start` reaches `MAX_AUDIO_BLOCK_FRAMES`, and a
+            // shorter secondary (which the doc comment explicitly permits)
+            // would otherwise index `(start + got - 1) * channels + c` past
+            // the end of `interleaved`.
+            let got = plane.len().min(k).min(available.saturating_sub(start));
             for dst in 0..got {
                 plane[dst] = interleaved[(start + dst) * channels + plane_idx.min(channels - 1)];
             }

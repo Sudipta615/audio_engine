@@ -5,7 +5,14 @@
 //! vocabulary every panel speaks, while these are the only place that knows
 //! what the Volume panel is made of.
 
-use super::{self as rows, Kind, Panel, Row};
+// `self as rows` (and the equivalent `use super as rows;`) is rejected by
+// rustc 1.89 with "no `super` in the root", and only accepted from a much
+// later compiler — which made this file, and therefore the whole `engine-tui`
+// crate, unbuildable at the workspace's declared MSRV. Importing the module
+// through a `crate::`-rooted path instead is an ordinary path import that
+// every supported toolchain accepts, and it reads the same at the use sites.
+use super::{Kind, Panel, Row};
+use crate::app::rows;
 use crate::app::App;
 use crate::app::{rate_policy_label, state_word};
 use crate::labels::Cycle;

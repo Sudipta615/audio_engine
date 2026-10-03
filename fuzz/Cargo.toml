@@ -30,3 +30,32 @@ name = "fuzz_playlists"
 path = "fuzz_targets/fuzz_playlists.rs"
 test = false
 doc = false
+
+# `fuzz` is its own workspace root, and this table is what makes it one.
+#
+# Without it, `fuzz/` was an *orphan* directory: the root manifest's
+# `[workspace] members` is an explicit list that does not name `fuzz`, and the
+# root manifest has no `exclude`. Cargo therefore refused to operate in this
+# directory at all —
+#
+#     error: current package believes it's in a workspace when it's not:
+#     current:   .../fuzz/Cargo.toml
+#     workspace: .../Cargo.toml
+#
+# — and `cargo fuzz run` aborted before libFuzzer was ever started. That is why
+# the `fuzz` CI job had never produced a single fuzz iteration on any of its
+# three matrix legs: the coverage was structurally impossible, not merely slow.
+#
+# This is verbatim what `cargo fuzz init` generates, and it is the fix: an
+# empty `[workspace]` in a package manifest declares that manifest to be a
+# workspace root, so `cargo fuzz` can build here.
+#
+# Consequences worth knowing:
+#   * `fuzz/` gets its own `Cargo.lock` and `fuzz/target/`. `fuzz/target/` is
+#     already in `.gitignore`; `fuzz/Cargo.lock` is not, and is owned by whoever
+#     maintains `.gitignore`.
+#   * The root `cargo deny` / `cargo audit` / `cargo test --workspace` runs no
+#     longer see `libfuzzer-sys` (Apache-2.0 OR MIT), so `deny.toml` does not
+#     need to allow it. Nothing in the root workspace depends on `fuzz/` either.
+[workspace]
+members = ["."]

@@ -1,0 +1,48 @@
+# cargo-audit policy for the `audio-engine` workspace.
+#
+# cargo-audit reads this file automatically from `.cargo/audit.toml`; the
+# `supply-chain` CI job runs it with no `--config` override, so this IS the
+# policy in force. Until this file existed, the enforced advisory-ignore list
+# lived nowhere in the repository.
+#
+# ── Policy for adding an ignore entry ──────────────────────────────────────
+#
+# An ignore is a claim that a known vulnerability does not apply to us. It is
+# never a "we will fix it later" marker — an unfixed vulnerability belongs in
+# the tracker, and the job stays red until it is fixed. Entries are therefore
+# only permitted when the advisory provably cannot reach this code, and every
+# entry must carry all four of these fields:
+#
+#   id       the exact RUSTSEC-YYYY-NNNN identifier. Never a bare crate name;
+#            never a URL in place of the id.
+#   date     the ISO-8601 date the entry was added, so the age of the carve-out
+#            is greppable and a reviewer can see what was true when.
+#   reason   the argument, in one or two sentences, naming the specific code
+#            path that is not reachable — e.g. "the advisory is in the HTTP/2
+#            client; this workspace has no HTTP/2 dependency and no code path
+#            that constructs one" — not "not affected".
+#   expiry   the ISO-8601 date after which the entry is stale and MUST be
+#            re-justified or removed. An entry with no expiry is a permanent
+#            exemption and will be treated as a defect in review. A reasonable
+#            default is 90 days; a longer window needs a stated upstream issue
+#            URL in the reason.
+#
+# Note that cargo-deny also has an `[advisories] ignore` list in `deny.toml`,
+# and the same `supply-chain` job runs both tools. The two lists must stay in
+# sync: an id ignored in one and not the other is a hole in whichever tool runs
+# first, and a confusing failure in whichever runs second. Add to both in the
+# same commit, with the same four fields.
+#
+# `cargo audit` has no licence check, so it needs no allow-list; licence policy
+# is entirely in `deny.toml`.
+
+[advisories]
+# Empty. No RustSec advisory is currently ignored for this workspace.
+ignore = []
+
+# Anything else cargo-audit accepts in this file is deliberately left at its
+# default rather than restated: `[advisories] vulnerability`, `unmaintained`,
+# `informational`, `unsound`, `notice` and `severity-threshold` all default to
+# reporting at their documented levels, and pinning them here would only create
+# a second place to forget to update. Promote one of them to `ignore` only via
+# the policy above.

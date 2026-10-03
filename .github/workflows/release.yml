@@ -1,0 +1,236 @@
+# Release engineering for `audio-engine` tags.
+#
+# ── What this workflow deliberately does NOT do ────────────────────────────
+#
+# It does not publish anything to crates.io. That is a policy decision, not an
+# oversight, and there are three independent reasons:
+#
+#   1. The `config` crate name on crates.io belongs to `config-rs`, a
+#      completely unrelated configuration library. Publishing this workspace's
+#      `crates/config` under that name is either impossible or, worse,
+#      possible by taking over an identifier this project does not own.
+#   2. `crates/opus-decoder` is a *fork* of the registry crate of the same
+#      version (0.1.1). The in-tree fork exists because the registry release
+#      panics in debug builds with an integer-overflow at `celt/vq.rs:118`.
+#      Any publish path that resolves `opus-decoder` from crates.io instead of
+#      from `path = "crates/opus-decoder"` silently reintroduces a known crash
+#      on every Ogg Opus input. The `codec-opus` decode path depends on the
+#      fork staying in-tree, so this crate must never be substituted.
+#   3. Four of the six workspace members declare `publish = false` because they
+#      are only meaningful alongside the engine.
+#
+# `cargo publish --dry-run --locked -p plugin-abi` runs below as a
+# *validation* step: `plugin-abi` is the one crate that is standalone (optional
+# `serde` + `libloading`, no path dependencies) and therefore the only one whose
+# published form could ever be correct. Proving it packages and builds cleanly
+# keeps the publish path honest without performing one.
+#
+# What this workflow does do: build all three shipped binaries plus the release
+# gate on all three target platforms with `--locked`, prove each one installs
+# and (where it has a headless entry point) runs, verify the tag matches the
+# workspace version, and upload the artefacts.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# A tag build only needs to read the tree. Nothing here pushes, creates a
+# release, or writes back to the repository.
+permissions:
+  contents: read
+
+# Tag refs are immutable and must never be cancelled by a later push, so the
+# `cancel-in-progress` behaviour CI uses for branches is deliberately absent
+# here: a cancelled release build is a lost artefact, and re-running the
+# workflow is how you get it back.
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  build:
+    name: release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The tree is read-only for this workflow. Without this, `checkout`
+          # leaves a live `GITHUB_TOKEN` in `.git/config` and every later step
+          # runs with a credential on disk it does not need.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+        env:
+          # Overrides `rust-toolchain.toml` (which pins the 1.85 MSRV). A
+          # release is built with current stable, not with the floor.
+          RUSTUP_TOOLCHAIN: stable
+
+      - name: Install ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # A tag that disagrees with the manifests is the most common release
+      # mistake (bump, forget to tag, or vice versa), and it is invisible in
+      # the diff. Fail before spending twenty minutes compiling.
+      - name: Verify the tag matches every workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag: $GITHUB_REF_NAME -> $tag_version"
+          failed=0
+          for manifest in Cargo.toml crates/config/Cargo.toml \
+                          crates/plugin-abi/Cargo.toml crates/plugin-test-echo/Cargo.toml \
+                          crates/tui/Cargo.toml; do
+            # The first `version = ` under `[package]`; the comment blocks above
+            # it mention other versions, so anchor on the `[package]` header.
+            version="$(awk '/^\[package\]/{inpkg=1;next} /^\[/{inpkg=0} inpkg && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' "$manifest")"
+            printf '%-34s %s\n' "$manifest" "$version"
+            if [ "$version" != "$tag_version" ]; then
+              echo "::error::$manifest is version $version but the tag says $tag_version"
+              failed=1
+            fi
+          done
+          # `opus-decoder` is deliberately on its own 0.1.x line and must NOT
+          # match the tag (AGENTS.md "Versioning").
+          exit "$failed"
+
+      # `--locked` everywhere below: a release must be reproducible from the
+      # committed `Cargo.lock` or it is not the thing that was reviewed.
+      - name: Build every shipped binary (release, locked)
+        run: cargo build --workspace --release --locked --all-features --bins
+
+      - name: Release gate (linux only — it is the same code on every platform)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --release --locked --bin release-qualification -- --json
+
+      # `cargo install --path` is the smoke test: it resolves the package the
+      # way a downstream user would, compiles it against the *published* face of
+      # its dependencies, links it, and installs it. A binary that installs is a
+      # binary that links.
+      #
+      # Staging happens under a repo-relative `.release/` rather than under
+      # `$RUNNER_TEMP`: on the Windows leg `RUNNER_TEMP` is a Windows path
+      # (`D:\a\_temp`), which Git Bash will not glob, so `cp "$…"/bin/*` would
+      # fail there for a reason that has nothing to do with the build. Relative
+      # paths behave identically on all three runners.
+      - name: cargo install (audio-engine-cli)
+        run: cargo install --path . --locked --bin audio-engine-cli --root .release/install
+
+      - name: cargo install (replaygain-scanner)
+        # `replaygain-scanner` declares `required-features = ["tag-write"]`;
+        # loudness tag write-back is the scanner's entire purpose, so the
+        # feature is part of the product, not an optional extra.
+        run: cargo install --path . --locked --bin replaygain-scanner --features tag-write --root .release/install
+
+      - name: cargo install (engine-tui)
+        run: cargo install --path crates/tui --locked --bin engine-tui --root .release/install
+
+      - name: Smoke test the installed binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=".release/install/bin"
+          exe() { if [ -x "$bin/$1" ] || [ -x "$bin/$1.exe" ]; then echo "$bin/$1"; else echo "MISSING: $bin/$1" >&2; exit 1; fi; }
+
+          "$(exe audio-engine-cli)" --help
+
+          # `replaygain-scanner --help` prints usage and exits before it needs
+          # any input, so it is a real headless entry point.
+          "$(exe replaygain-scanner)" --help
+
+          # `engine-tui` has NO headless entry point: it has no `--help`, and
+          # any argument it does understand leads straight into raw-mode
+          # terminal setup, which has no meaning on a headless runner. Asserting
+          # a specific non-zero exit code here would mean suppressing the
+          # runner's exit-status check, and a smoke test that cannot fail is
+          # not a smoke test. So the check is that `cargo install` linked it and
+          # produced a non-empty executable — which is all there is to check.
+          tui="$(exe engine-tui)"
+          if [ ! -s "$tui" ]; then
+            echo "::error::engine-tui installed but is empty"
+            exit 1
+          fi
+          echo "engine-tui linked OK ($(wc -c < "$tui") bytes)"
+
+      # Dry-run packaging checks. `--list` resolves the package and enumerates
+      # exactly what a `.crate` would contain.
+      #
+      # This runs AFTER the `cargo install` steps, and `cargo package` collects
+      # untracked-but-not-gitignored files (verified: dropping a file into
+      # `.release/` makes it appear in the list), so without the exclusion below
+      # this job would be the thing that put its own staged binaries into the
+      # published file list.
+      #
+      # `.github/workflows/` is deliberately NOT excluded: it is already in the
+      # list today, because it is tracked and cargo ships tracked files. Asserting
+      # otherwise would be a check that fails on day one for a reason that is not
+      # a defect. What is worth asserting is the opposite direction — that no
+      # credential-shaped file got staged into the tree.
+      - name: Packaging check (audio-engine, file list only)
+        run: |
+          set -euo pipefail
+          cargo package --list -p audio-engine --locked > audio-engine-files.txt
+          for excluded in 'target/' 'testdata/fixtures/' '.release/'; do
+            if grep -q -- "$excluded" audio-engine-files.txt; then
+              echo "::error::audio-engine package would include $excluded"
+              grep -- "$excluded" audio-engine-files.txt
+              exit 1
+            fi
+          done
+          if grep -Eiq '(^|/)(\.env|\.netrc|id_rsa|.*\.pem|.*\.key)$' audio-engine-files.txt; then
+            echo "::error::audio-engine package would include a credential-shaped file"
+            grep -Ei '(^|/)(\.env|\.netrc|id_rsa|.*\.pem|.*\.key)$' audio-engine-files.txt
+            exit 1
+          fi
+          wc -l < audio-engine-files.txt
+
+      # See the header: validation only, never an upload. This is the crate that
+      # *could* be published, so its packaging and standalone build are kept
+      # honest.
+      - name: Publish validation (dry run only — never uploaded)
+        run: cargo publish --dry-run --locked -p plugin-abi --allow-dirty
+
+      - name: Collect release artefacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=".release/artefacts"
+          mkdir -p "$stage"
+          cp .release/install/bin/* "$stage/"
+          # `cargo install` only installs the three shipped binaries, so the
+          # release gate has to be copied from the build tree by hand.
+          relqual=target/release/release-qualification
+          if [ -f "$relqual.exe" ]; then relqual="$relqual.exe"; fi
+          cp "$relqual" "$stage/"
+          # Provenance: the exact toolchain and the tag, so an artefact can be
+          # traced back to what produced it without trusting the release page.
+          {
+            echo "tag: ${GITHUB_REF_NAME}"
+            echo "commit: ${GITHUB_SHA}"
+            echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner: ${RUNNER_OS}"
+            rustc --version --verbose
+            cargo --version
+          } > "$stage/BUILD_INFO.txt"
+          ls -l "$stage"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audio-engine-${{ matrix.os }}-${{ github.ref_name }}
+          path: .release/artefacts
+          retention-days: 90
+          if-no-files-found: error

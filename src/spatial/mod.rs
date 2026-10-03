@@ -13,6 +13,25 @@
 //! and writes a normal interleaved multichannel PCM buffer the engine's
 //! existing output core can deliver.
 //!
+//! # What the production graph actually does today
+//!
+//! The scene model and the renderers below are layout-independent, but the
+//! **production node is not yet**. `SpatialNode::process_block_f32` returns
+//! immediately unless the block is exactly two planes, and the layout is
+//! hardwired to stereo
+//! (`dsp/graph2/prod/arena/nodes/spatial_node.rs`). A multichannel (>2ch)
+//! master therefore passes through the spatial stage **bit-exact and
+//! unprocessed**, by design: spatializing an MC master needs per-object and
+//! per-bed audio routed into the node, and that scene-audio routing is
+//! deferred. The node stays active-looking but processes nothing, matching the
+//! "enabled-but-idle" contract the aux bus uses.
+//!
+//! So the four renderers documented below are a **library** capability. Only
+//! the binaural renderer is instantiated in the production graph today, and it
+//! operates on two program objects fed from the front pair. Ambisonic, VBAP,
+//! the hybrid renderer and the spatial bass engine are reachable from this
+//! module's API and from its tests, not from playback.
+//!
 //! This layer ships the full scene / speaker / listener / object data model,
 //! four renderers — the **equal-power [`BasicPanner`]**, the 3D
 //! **VBAP-style [`VbapRenderer`]** (speaker-geometry triangulation, 2D
