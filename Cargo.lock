@@ -174,7 +174,7 @@ checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
 name = "audio-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "alsa",
  "ape-decoder",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -927,7 +927,7 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "engine-tui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "audio-engine",
  "config",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-abi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "libloading",
  "serde",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-test-echo"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "plugin-abi",
  "serde",

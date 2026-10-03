@@ -5,7 +5,9 @@
 //! here rather than scattered across the drawing code, so retuning the whole
 //! interface is one edit and inconsistencies are visible in one file.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+
+pub use ratatui::style::Color;
 
 /// The UI's background. Slightly off-black so pure black text-on-black
 /// antialiasing fringes read as intentional.
@@ -32,6 +34,24 @@ pub fn meter_color(db: f32) -> Color {
     if db > -1.0 {
         DANGER
     } else if db > -6.0 {
+        WARN
+    } else {
+        GOOD
+    }
+}
+
+/// Colour for a bar of the visualizer, keyed on its normalized height rather
+/// than its dB value.
+///
+/// This is deliberately a separate function from [`meter_color`]: a
+/// visualizer bar's height is a *display* quantity chosen for looks, whereas a
+/// meter's colour is a *measurement* threshold. Colouring bars by their dB
+/// would make the whole row red the moment the signal got loud, which is
+/// exactly when the display is least useful.
+pub fn bar_color(level: f32) -> Color {
+    if level > 0.85 {
+        DANGER
+    } else if level > 0.6 {
         WARN
     } else {
         GOOD
@@ -100,6 +120,48 @@ pub fn bar_cells(level: f32, width: usize) -> Vec<&'static str> {
         });
     }
     cells
+}
+
+/// Bottom-up eighth blocks, for a bar that grows upward from the baseline.
+///
+/// Index 0 is one eighth of a cell tall, index 7 is a full cell — so
+/// `BAR_V_EIGHTHS[n - 1]` is the glyph for an `n/8`-cell remainder.
+pub const BAR_V_EIGHTHS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// Fill a vertical bar of `height` cells to `level`, growing from the bottom.
+///
+/// Returns one entry per cell, top row first, so the caller can render in
+/// order. Unfilled cells come back as a single space rather than `BAR_EMPTY`:
+/// a bar's own track should be invisible, whereas a *horizontal* meter's track
+/// is a useful reference line, which is why the two differ.
+pub fn vbar_cells(level: f32, height: usize) -> Vec<&'static str> {
+    let height = height.max(1);
+    let level = level.clamp(0.0, 1.0);
+    let eighths = level * height as f32 * 8.0;
+    let full = (eighths / 8.0).floor() as usize;
+    let rem = (eighths - (full as f32) * 8.0) as usize;
+
+    // Build bottom-up, then reverse into top-first order.
+    let mut cells: Vec<&'static str> = Vec::with_capacity(height);
+    if rem > 0 {
+        cells.push(BAR_V_EIGHTHS[rem - 1]);
+    }
+    cells.extend(std::iter::repeat_n(BAR_FULL, full.min(height)));
+
+    while cells.len() < height {
+        cells.push(" ");
+    }
+    cells.reverse();
+    cells
+}
+
+/// `"on"` / `"off"` for a boolean control.
+pub fn on_off(v: bool) -> &'static str {
+    if v {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// Format a dB value for a fixed-width column, with the conventional floor.

@@ -243,8 +243,8 @@ cargo run --bin audio-engine-cli -- --config ./shadow.toml
 ### 3b. Terminal UI
 
 For interactive use there is a live terminal UI — transport, per-channel
-metering, gain reduction, CPU and latency, an EQ curve editor, and panels for
-dynamics, spatial and output:
+metering, gain reduction, CPU and latency, an EQ response plot, a queue view, a
+file browser, and panels for dynamics, spatial and output:
 
 ```bash
 # From the workspace
@@ -254,13 +254,27 @@ cargo run -p engine-tui --bin engine-tui -- [options] [path_or_uri]
 engine-tui --config ./shadow.toml ~/Music
 ```
 
-`tab`/`shift-tab` cycle panels · `↑`/`↓` select a row · `←`/`→` adjust it ·
-`space` play/pause · `e` EQ · `d` dynamic EQ · `l` limiter · `m` spatial ·
-`q` quit (twice) · `ctrl-c` quit.
+**Keys that work everywhere**
 
-It reads everything from `EngineHandle::settings()` and `playback_info()`, both
-of which are lock-free `ArcSwap` loads — the UI thread never contends with the
-audio thread. See `crates/tui`.
+`tab`/`shift-tab` cycle panels · `↑`/`↓` select a row (hold to repeat, and it
+accelerates) · `←`/`→` adjust it · `enter` run it · `home`/`end` jump ·
+`space` play/pause · `/` open the file browser · `esc` clear a message ·
+`q` quit (twice) · `ctrl-c` quit immediately.
+
+**Keys scoped to the focused panel**
+
+Each panel's hint line lists its own, so nothing has to be memorised.
+*Equalizer*: `f`/`F` frequency · `w`/`W` Q · `t` filter type · `x` enable the
+selected band. *Output*: `r` rescan devices. *Browser*: `↑`/`↓` or `j`/`k`
+move · `enter` open · `←` up a level · `→` add the whole folder · `a` add-folder
+mode · `r` reload.
+
+It reads everything from `EngineHandle::settings()`, `playback_info()` and
+`meters_snapshot()`, all lock-free `ArcSwap` loads — the UI thread never
+contends with the audio thread. The UI runs **no** FFT: `App::new` switches the
+engine's `AudioAnalyzer` off through its own zero-cost bypass (it runs a 30 Hz
+transform on the decode thread whether or not anyone reads it), and the level
+bars are driven from the meter snapshot instead. See `crates/tui`.
 
 #### Interactive Commands
 

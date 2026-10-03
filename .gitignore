@@ -23,8 +23,7 @@ Cargo.lock.bak
 *.iml
 .project
 .settings/
-*.sublime-project
-*.sublime-workspace
+.kilo/
 
 # OS generated files
 .DS_Store

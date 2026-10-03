@@ -5,6 +5,114 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-10-03
+
+The terminal UI stops being a control-panel sample and starts being a player.
+The change is mostly about removing things that looked like features: an FFT
+spectrum nothing read, a meter panel fed by a subsystem nobody had switched on,
+rows that looked adjustable and were not, and an error message that could never
+appear — because every code path that would have raised one discarded its result.
+
+### Added
+
+- **A file browser (`/`).** The UI could show `<nothing loaded>` forever:
+  `EngineCommand::Open` existed, but nothing in the UI sent it, and a music
+  player you cannot put music into is not a player. A modal directory listing —
+  no typing, works over SSH — with `enter` to open, `←`/`→` to add a whole
+  folder, and `.m3u`/`.pls`/`.xspf`/`.cue` files loaded through the engine's own
+  commands. Which extensions it offers comes from the engine's codec table, so
+  it tracks the `codec-*` features rather than a hardcoded list. A positional
+  path argument now also decides where `/` opens.
+- **A queue panel.** The engine's playlist is private and exposes only a count
+  and an index, so a track list has to be shadowed; `QueueView` mirrors every
+  mutation the UI makes, reconciles against `EngineEvent::PlaylistChanged`, and
+  **reports drift on screen** rather than hiding it when something else changed
+  the queue underneath.
+- **A working transport.** `space` now sends `Pause` when playing — the old UI
+  always sent `Play`, which is a no-op on a playing engine, so `space` could not
+  pause. Added `Stop`, next/previous track, and a seekable position row.
+- **A live output panel.** The device row was display-only; it now enumerates
+  real devices and switches between them, as does the backend row. Enumeration
+  runs on a background thread: ALSA takes 50–100 ms, which is a visible freeze
+  if it runs on the frame loop, and `handle::available_devices()` ignores the
+  active backend, so it calls `output::cpal_devices::enumerate_devices` with the
+  backend in effect instead.
+- **An EQ response plot**, computed from the band parameters through
+  [`FilterType::compute_coeffs`] — the engine's own biquad constructors, not a
+  second implementation of the RBJ formulas that could drift from the audio
+  path. No FFT and no audio tap: closed-form arithmetic over the plot width.
+  Per-band frequency, Q, filter type and enable now have keys (`f`/`w`/`t`/`x`),
+  so no band control is display-only any more.
+- **Mute.** The engine has no master mute command (`SetInputMute` is per
+  mix-bus slot), so the UI synthesises one from `SetVolumeDb(-60.0)` and tracks
+  the intent locally — including the level that was replaced, so unmuting
+  restores it rather than jumping to full volume.
+- **Key repeat with acceleration.** Terminals do not auto-repeat in raw mode, so
+  a held `→` was one step per press — sweeping a 48 dB EQ band took 96 presses.
+  Synthesised in the frame loop, shortening as the key is held.
+- **`EngineSettings::eq_auto_headroom` is now reachable**, along with
+  stereo width, crossfeed, convolution wet mix, correction depth, the listener
+  pose, and the limiter's ceiling and lookahead.
+
+### Fixed
+
+- **The meter panel showed nothing.** `ProfessionalMeters` defaults to
+  *disabled* and nothing in the engine enables it — `set_meters_enabled` is only
+  reachable from a host — so every launch drew an empty vector: one bar pinned
+  at −∞. `App::new` now enables it.
+- **The FFT was paid for by everyone and read by no one in a GUI.**
+  `AudioAnalyzer::update` runs unconditionally on the decode thread, so a UI
+  that never reads the spectrum was not avoiding its cost, only declining to
+  look at it. On top of that, the UI's per-frame `snapshot()` took the
+  analyzer's mutex — the same one the decode thread holds while it transforms —
+  and cloned 513 floats every frame at 30 Hz. `App::new` now calls
+  `set_enabled(false)`, the engine's own zero-cost bypass. The level bars are
+  driven from the meter snapshot instead. (The CLI still reads the spectrum, so
+  this only bypasses the analyzer when a GUI is what is running.)
+- **Errors could never be shown.** `send_command`'s result was discarded and the
+  event channel was never read, so the persistent error toast was unreachable in
+  production — it existed only in tests. Both are wired now: `EngineEvent`
+  errors, failed playlist loads, and a dead command channel all reach the status
+  line.
+- **Errors no longer eat a keypress.** The old toast swallowed the next input to
+  "prevent a retry", which silently discarded a keystroke for a problem that
+  could not occur. Errors persist until `esc`; nothing is swallowed.
+- **Rows that looked adjustable and were not.** The Output panel had five rows
+  and one working control, with a hint line promising "←/→ adjust"; Spatial and
+  Volume had the same problem. A row is now *its behaviour* — `Row::selectable`
+  is derived from its `Kind`, so a display-only row cannot be focused, and the
+  per-panel hint lines are derived from what the panel actually handles. A
+  regression test walks every row of every panel and asserts none is inert.
+- **`{:?}` on screen.** `TransitionMode`, `VolumeMode`, `PrecisionMode`, the
+  audio backends, the EQ topologies and the rest were rendered with `Debug`,
+  showing `ExclusiveCoreAudioHog` and `BaseRateSyncExactFirst` verbatim. A new
+  `labels` module gives each enum a label and a cycle table, and a test asserts
+  no label equals its `Debug` spelling.
+- **Mouse capture is no longer enabled** without a single mouse event being
+  handled. It cost the user their terminal's selection and promised an
+  interaction that did not exist.
+
+### Changed
+
+- **`engine-tui` is modularised** along the engine's house pattern, one concern
+  per file and none over ~525 lines: `app/` (`mod`, `rows/{mod,panels}`,
+  `keys/{mod,commands}`, `browser`, `queue`, `viz`), `draw/` (`mod`, `transport`,
+  `meters`, `panel`, `browser`, `status`), `widgets/` (`mod`, `meter`, `bars`,
+  `eqcurve`), plus `labels`. Each `draw` sub-module takes an explicit `Rect`, so
+  the layout is stated in one place instead of being inferred by index.
+- **Keys are scoped.** Transport, quit and browse work everywhere; letters like
+  `f` and `t` belong to the focused panel and are listed in its hint line. The
+  previous single global alphabet had no room left for a search box.
+- **The playback bar uses the same position source as the time readout**, so the
+  bar and the number cannot disagree by the output latency.
+
+### Removed
+
+- The FFT spectrum readout, and the per-frame analyzer snapshot behind it.
+- `AudioSource`-shaped dead fields (`pending_eq_bands`, `toast_dirty`) and the
+  uncalled `widgets::spectrum`/`kv`/`progress` primitives that no longer had a
+  caller.
+
 ## [0.7.0] — 2026-10-02
 
 The control surface becomes readable, the configuration file becomes real, and

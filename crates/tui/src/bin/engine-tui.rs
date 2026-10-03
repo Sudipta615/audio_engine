@@ -6,17 +6,30 @@
 //! engine.
 //!
 //! ```text
-//! engine-tui [--config <file.toml>] [--backend <name>] [--device <name>] [--track <path>]
+//! engine-tui [--config <file.toml>] [--backend <name>] [--device <name>] [<path>]
 //! ```
 //!
 //! Config precedence, matching the CLI: `--backend`/`--device` override the
-//! config file, which overrides the built-in defaults.
+//! config file, which overrides the built-in defaults. A positional path is
+//! opened and played immediately; `--track` is accepted as an explicit synonym.
 //!
 //! ## Keys
 //!
-//! `tab`/`shift-tab` cycle panels · `↑`/`↓` select a row · `←`/`→` adjust it ·
-//! `space` play/pause · `e` EQ on/off · `d` dynamic EQ · `l` limiter · `m`
-//! spatial · `q` quit (twice) · `ctrl-c` quit immediately.
+//! These work in every panel:
+//!
+//! * `tab` / `shift-tab` cycle panels · `↑`/`↓` select a row (hold to repeat,
+//!   accelerating) · `←`/`→` adjust it · `enter` run it · `home`/`end` jump
+//! * `space` play/pause · `/` open the file browser · `esc` clear a message
+//! * `q` quit (twice) · `ctrl-c` quit immediately
+//!
+//! And these, only in the panel that owns them — the hint line under each
+//! panel lists them, so nothing has to be memorised:
+//!
+//! * **Equalizer**: `f`/`F` frequency · `w`/`W` Q · `t` filter type ·
+//!   `x` enable or bypass the selected band
+//! * **Output**: `r` rescan the device list
+//! * **Browser**: `↑`/`↓` or `j`/`k` move · `enter` open · `←` up a level ·
+//!   `→` add the whole folder · `a` add-folder mode · `r` reload
 
 use std::path::PathBuf;
 
@@ -76,15 +89,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: audio output unavailable: {e}");
     }
 
-    if let Some(track) = track {
+    if let Some(track) = &track {
         // `load`/`play` are commands like every other control, so they go
         // through the handle the UI already holds.
         let handle = engine.handle();
-        let _ = handle.send_command(EngineCommand::Open(track.into()));
+        let _ = handle.send_command(EngineCommand::Open(track.clone().into()));
         let _ = handle.send_command(EngineCommand::Play);
     }
 
-    engine_tui::run(engine.handle()).map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+    // A positional path also decides where the file browser starts, so
+    // `engine-tui ~/Music` lands the user in the folder they named rather than
+    // at `$HOME`.
+    let start = track.as_ref().map(|p| p.to_path_buf());
+    engine_tui::run_at(engine.handle(), start)
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
 }
 
 /// Value following `flag`, if present.
