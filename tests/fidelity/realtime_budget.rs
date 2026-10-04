@@ -47,6 +47,14 @@
 //! A debug build runs this DSP unoptimised and cannot meet the budget — the
 //! same reason the whole `test` CI job is `--release`. A wall-clock assertion
 //! in a debug build measures the compiler, not the engine.
+//!
+//! The guard for that is a **runtime skip**, not a compile error. It used to be
+//! a `const { assert!(!cfg!(debug_assertions)) }`, which failed at *compile*
+//! time and so made the default-profile `cargo test --workspace` — the first
+//! gate the README documents — unbuildable for anyone who followed the docs
+//! without adding `--release`. A gate you cannot run is not a gate. The suite
+//! now always builds and runs; in a debug profile it measures, reports, and
+//! returns without asserting, so the number is still there for comparison.
 
 use std::time::{Duration, Instant};
 
@@ -146,17 +154,30 @@ fn deadline_per_block() -> Duration {
     Duration::from_secs_f64(BLOCK_FRAMES as f64 / SAMPLE_RATE)
 }
 
+/// Whether a wall-clock assertion from this build is meaningful.
+///
+/// `false` in a debug profile, where the measured cost is dominated by absent
+/// optimisation rather than by the chain under test. Callers run the
+/// measurement anyway — it is still a useful relative number — and simply skip
+/// the assertion.
+fn budget_is_enforceable() -> bool {
+    let enforceable = !cfg!(debug_assertions);
+    if !enforceable {
+        eprintln!(
+            "SKIPPED ASSERTION: this is a debug build, so the DSP runs unoptimised and a \
+             wall-clock budget would measure the compiler rather than the engine. The \
+             measurement below is reported for comparison only. Re-run with --release \
+             (what the perf CI job does) to enforce the budget."
+        );
+    }
+    enforceable
+}
+
 /// The load-bearing test: the armed production chain meets its deadline.
 #[test]
 fn production_chain_stays_within_half_the_block_deadline() {
     let deadline = deadline_per_block();
-    const {
-        assert!(
-            !cfg!(debug_assertions),
-            "a wall-clock budget is meaningless in a debug build — the DSP runs \
-             unoptimised. Run this suite with `--release` (the `perf` CI job does)."
-        );
-    }
+    let enforceable = budget_is_enforceable();
 
     let cfg = active_dsp_config();
     let mut engine = Graph2Engine::from_config(&cfg, SAMPLE_RATE as f32);
@@ -187,6 +208,10 @@ fn production_chain_stays_within_half_the_block_deadline() {
     });
 
     timing.report("Graph2Engine armed chain", deadline);
+
+    if !enforceable {
+        return;
+    }
 
     assert!(
         timing.median.as_secs_f64() < deadline.as_secs_f64() * BUDGET_FRACTION,
@@ -301,12 +326,7 @@ fn resampler_tiers_are_within_budget() {
 #[test]
 fn small_blocks_stay_within_budget() {
     const SMALL: usize = 64;
-    const {
-        assert!(
-            !cfg!(debug_assertions),
-            "a wall-clock budget is meaningless in a debug build. Run with `--release`."
-        );
-    }
+    let enforceable = budget_is_enforceable();
 
     let deadline = Duration::from_secs_f64(SMALL as f64 / SAMPLE_RATE);
     let cfg = active_dsp_config();
@@ -330,6 +350,10 @@ fn small_blocks_stay_within_budget() {
     });
 
     timing.report("Graph2Engine armed chain", deadline);
+
+    if !enforceable {
+        return;
+    }
 
     assert!(
         timing.median.as_secs_f64() < deadline.as_secs_f64() * BUDGET_FRACTION,

@@ -101,10 +101,11 @@ cargo run --bin audio-engine-cli -- --log-level debug ~/Music/track.flac
 `volume 0.8` or `volume -6db`; `speed 1.25`; `eq on`; `levels`; `devices` / `device
 <name>`; `info` / `events`; `quit`.
 
-> **Remote URLs are not supported.** An `http(s)` argument is **refused with an actionable
-> error** rather than opened as a literal filesystem path. The `network-streaming` feature
-> compiles a `Range`-capable byte source, but nothing constructs one and the decoder is
-> not streaming end to end.
+> **Remote URLs need the `network-streaming` feature.** With it enabled, an
+> `http(s)` argument is opened over HTTP Range requests and decoded by the same
+> backend a local file uses. Without it, the URI is **refused with an actionable
+> error** rather than opened as a literal filesystem path. A URL is never
+> resolved to a local path — see `decode::resolve_uri`.
 
 ---
 
@@ -259,7 +260,7 @@ audio-engine = { path = "../audio_engine", features = ["c-ffi", "tag-write"] }
 | `asio-native` | ❌ | Native ASIO (Windows) |
 | `pipewire` / `jack` | ❌ | Linux/Unix pro-audio backends |
 | `plugin-dylib` | ❌ | `dlopen` plugin loading — see [`../SECURITY.md`](../SECURITY.md) before enabling |
-| `network-streaming` | ❌ | Compiles, does not function |
+| `network-streaming` | ❌ | Opens and decodes `http(s)://` URIs over HTTP Range requests. Not in `default` — it is a network dependency, and its I/O is blocking on the decode thread. |
 
 ---
 
@@ -281,9 +282,11 @@ Work through these in order.
    invalidate bit-perfectness. Ask for the cause rather than guessing — the engine checks
    every stage and reports the *first* condition that breaks it, over FFI as
    `bit_perfect_cause`.
-5. **Is the spatial stage involved?** `SpatialNode` renders **stereo (2-plane) blocks
-   only**. A multichannel (>2ch) master passes through it bit-exact and unprocessed. If
-   you expected spatial rendering on 5.1, you will get none — by design.
+5. **Is the spatial stage involved?** `SpatialNode` renders stereo (2-plane) blocks through
+   the binaural head model, and multichannel (>2ch) blocks through a layout-driven renderer
+   selected from the graph's configured `ChannelLayout`. **If the block's width disagrees with
+   the configured layout, the node passes it through bit-exact and unprocessed** — so the
+   first thing to check is that the layout was actually set.
 6. **Turn up the log.** `--log-level debug` on the CLI, or `RUST_LOG=engine=debug`
    through `env_logger`.
 

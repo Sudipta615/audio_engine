@@ -200,6 +200,8 @@ pub mod backend_id {
     pub const PIPEWIRE: u32 = 5;
     /// Native JACK pro-audio output.
     pub const JACK: u32 = 6;
+    /// Hardware-free sink: drains and discards, opening no OS device.
+    pub const NULL: u32 = 7;
 }
 
 /// Map a `u32` backend id onto [`config::AudioBackend`], or `None` when the
@@ -214,6 +216,7 @@ fn backend_from_id(id: u32) -> Option<config::AudioBackend> {
         b::EXCLUSIVE_ASIO => config::AudioBackend::ExclusiveAsio,
         b::PIPEWIRE => config::AudioBackend::PipeWire,
         b::JACK => config::AudioBackend::Jack,
+        b::NULL => config::AudioBackend::Null,
         _ => return None,
     })
 }

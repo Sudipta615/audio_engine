@@ -15,6 +15,7 @@
 use config::{EngineConfig, ResamplerQuality, SpatialConfig};
 use std::f64::consts::TAU;
 
+use crate::decode::ChannelLayout;
 use crate::dsp::biquad::{BiquadCoeffsF64, BiquadStateF64};
 use crate::dsp::convolution::ConvolutionEngine;
 use crate::dsp::graph2::prod::{DspNode, SpatialNode};
@@ -322,6 +323,9 @@ pub fn binaural(reg: &ReferenceVectorRegistry) -> ComponentReport {
             ..Default::default()
         },
         sr,
+        // This suite is a stereo binaural/ILD measurement, so the master's
+        // width is stereo; the multichannel renderer is not exercised here.
+        &ChannelLayout::Stereo,
     );
 
     /// Render one block through the node and read `|ILD|` of the two ears.

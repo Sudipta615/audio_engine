@@ -360,6 +360,11 @@ pub fn create_output(
     target_device: Option<&str>,
     fallback_policy: config::FallbackPolicy,
 ) -> Result<Box<dyn Output>, OutputError> {
+    if backend == config::AudioBackend::Null {
+        return Ok(Box::new(super::null_output::NullOutput::new(
+            buffer, 0, 0, 0,
+        )?));
+    }
     if backend == config::AudioBackend::ExclusiveWasapi {
         match super::wasapi_output::WasapiOutput::new(buffer.clone(), backend, target_device) {
             Ok(out) => {
@@ -416,6 +421,11 @@ pub fn create_output(
     target_device: Option<&str>,
     fallback_policy: config::FallbackPolicy,
 ) -> Result<Box<dyn Output>, OutputError> {
+    if backend == config::AudioBackend::Null {
+        return Ok(Box::new(super::null_output::NullOutput::new(
+            buffer, 0, 0, 0,
+        )?));
+    }
     #[cfg(target_os = "linux")]
     if backend == config::AudioBackend::ExclusiveAlsa {
         match super::alsa_output::AlsaOutput::new(

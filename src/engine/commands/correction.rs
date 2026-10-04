@@ -118,18 +118,53 @@ impl AudioEngine {
             )));
             return;
         }
-        self.handle_open(crate::source::AudioSource::File(sweep_wav.clone()));
-        self.handle_play();
 
-        // Capture the system mix. On platforms without a capture backend the
-        // CaptureError event fires and the measurement cannot complete.
+        // Capture must be running *before* the sweep is audible.
+        //
+        // This check used to sit after `handle_play()`. On any platform without
+        // a capture backend that meant the ordering was: write a full-amplitude
+        // sweep, blast it through the DAC at 0.4 amplitude, discover there was
+        // no capture to record it, delete the WAV, and report failure. A
+        // measurement attempt produced a loud noise burst and nothing else.
+        //
+        // Capture first, then play. If capture is unavailable the sweep is
+        // never written to disk, never played, and the user gets one honest
+        // failure event instead of a noise burst.
         let recording = std::env::temp_dir().join(format!("shadow_measurement_{stamp}.wav"));
-        self.handle_capture_start(Some(recording.clone()), None);
+        //
+        // Two kinds are tried, in order, and the *first that opens* wins:
+        //
+        // 1. `SystemMix` — hears the sweep plus the room with no microphone in
+        //    the chain, which is the measurement a correction curve should be
+        //    derived from. Windows-only in this build (it needs a loopback
+        //    client).
+        // 2. `InputDevice` — a microphone or line input. Everywhere, via cpal.
+        //
+        // The fallback is what turns this from a Windows-only feature into a
+        // portable one: on Linux and macOS a user with a measurement mic gets
+        // a real integrated measurement rather than "unsupported, load an IR
+        // by hand".
+        self.begin_capture(
+            Some(recording.clone()),
+            None,
+            crate::output::capture::CaptureKind::SystemMix,
+        );
+        if !self.capture_active() {
+            // The system mix is unavailable (or already busy). A mic capture is
+            // worse audio but a working measurement, so offer it rather than
+            // failing outright.
+            self.begin_capture(
+                Some(recording.clone()),
+                None,
+                crate::output::capture::CaptureKind::InputDevice,
+            );
+        }
         if !self.capture_active() {
             let _ = std::fs::remove_file(&sweep_wav);
             self.emit_event(EngineEvent::MeasurementFailed(
-                "capture unavailable — a generic input backend (Horizon) will bring \
-                 integrated measurement to this platform"
+                "no capture backend available — integrated measurement needs a system-mix \
+                 loopback (Windows) or an input device. Load a measured impulse response with \
+                 `LoadCorrectionIr` instead."
                     .to_string(),
             ));
             return;
@@ -137,6 +172,13 @@ impl AudioEngine {
         self.emit_event(EngineEvent::MeasurementProgress {
             stage: "capture started".to_string(),
         });
+
+        self.handle_open(crate::source::AudioSource::File(sweep_wav.clone()));
+        self.handle_play();
+        self.emit_event(EngineEvent::MeasurementProgress {
+            stage: "sweep playing".to_string(),
+        });
+
         self.measurement = Some(PendingMeasurement {
             sweep,
             sweep_wav,
@@ -255,21 +297,6 @@ impl AudioEngine {
         let set = derive_correction_ir(&measured, &params)?;
         self.land_correction(Arc::new(set));
         Ok(snr_db)
-    }
-}
-
-/// Whether a loopback capture is currently active (the Windows-only field
-/// is hidden behind the cfg; this method is the portable probe).
-impl AudioEngine {
-    pub(crate) fn capture_active(&self) -> bool {
-        #[cfg(all(target_os = "windows", feature = "wasapi-native"))]
-        {
-            self.capture.is_some()
-        }
-        #[cfg(not(all(target_os = "windows", feature = "wasapi-native")))]
-        {
-            false
-        }
     }
 }
 

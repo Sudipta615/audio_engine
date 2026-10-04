@@ -1,5 +1,6 @@
 use std::path::Path;
 
+pub mod aes67_source;
 pub mod ape;
 pub mod codecs;
 pub mod cue;
@@ -12,6 +13,7 @@ pub mod metadata;
 pub mod opus;
 pub mod scanner;
 pub mod shared_pcm;
+pub mod stream;
 pub mod symphonia_decoder;
 pub mod tags;
 #[cfg(feature = "codec-tta")]
@@ -20,6 +22,7 @@ pub mod tta;
 pub mod wavpack;
 
 #[cfg(feature = "codec-ape")]
+pub use aes67_source::Aes67Decoder;
 pub use ape::ApeDecoder;
 pub use codecs::{
     all_codecs, capability, for_codec_string, for_extension, Codec, CodecCapability, CodecStatus,
@@ -116,6 +119,62 @@ pub fn extract_loudness_metadata(path: &Path) -> crate::dsp::LoudnessMetadata {
 /// The URI schemes this engine can turn into a local path.
 const LOCAL_SCHEME: &str = "file://";
 
+/// Where an [`AudioSource::Uri`](crate::source::AudioSource::Uri) should be read
+/// from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UriTarget {
+    /// A path on this machine.
+    Local(std::path::PathBuf),
+    /// An `http(s)://` URL to stream.
+    Remote(String),
+}
+
+impl UriTarget {
+    /// Whether this is a remote URL rather than a path on this machine.
+    ///
+    /// Says nothing about whether the build can *open* it — that is
+    /// [`stream::open_remote`]'s answer, and it is allowed to differ.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, UriTarget::Remote(_))
+    }
+}
+
+/// Classify an `AudioSource::Uri` into a local path or a remote stream.
+///
+/// This is the decision that [`uri_to_local_path`] deliberately refuses to
+/// make: a URL is not a path, and collapsing one into the other is the bug that
+/// function documents. Callers that can serve both (all four `Uri` arms in
+/// `decode::decoder`, `engine::track_loading` and `engine::preload`) resolve
+/// here and branch on [`UriTarget::is_remote`].
+///
+/// # This is classification, not a capability check
+///
+/// An `http(s)` URI resolves to [`UriTarget::Remote`] whether or not this build
+/// can open it. Whether streaming is *available* is decided by
+/// [`stream::open_remote`], which returns a typed error naming the feature when
+/// it is off. Splitting it this way keeps the feature decision in one place
+/// instead of spreading `#[cfg]` across every call site.
+pub fn resolve_uri(uri: &str) -> Result<UriTarget, String> {
+    match uri_to_local_path(uri) {
+        Ok(path) => Ok(UriTarget::Local(path)),
+        Err(remote_reason) => {
+            // `uri_to_local_path` refuses remote schemes and other schemes
+            // alike. Only a genuine http(s) URL is worth re-examining here;
+            // anything else (`ftp:`, `gopher:`, …) keeps its original refusal.
+            let scheme = uri
+                .split("://")
+                .next()
+                .filter(|s| s.len() != uri.len())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            match scheme.as_str() {
+                "http" | "https" => Ok(UriTarget::Remote(uri.to_string())),
+                _ => Err(remote_reason),
+            }
+        }
+    }
+}
+
 /// Resolve an [`AudioSource::Uri`](crate::source::AudioSource::Uri) to a
 /// filesystem path, or say precisely why it cannot.
 ///
@@ -141,12 +200,11 @@ const LOCAL_SCHEME: &str = "file://";
 ///
 /// # Network URIs
 ///
-/// `http` and `https` are refused with an explicit, actionable error rather
-/// than a phantom path open. `NetworkByteSource` exists and is selected by the
-/// `network-streaming` feature, but nothing constructs it: no code path routes a
-/// URI into it, and the decoder would still need to be made streaming end to
-/// end. So the honest position today is a clear refusal naming the feature, not
-/// a "file not found" and not an advertised feature that opens nothing.
+/// `http` and `https` are refused here, and that is correct even now that
+/// streaming works: this function's contract is *a filesystem path*, and a URL
+/// is not one. Callers that can serve a remote stream resolve through
+/// [`resolve_uri`] instead, which returns a [`UriTarget`] rather than
+/// pretending the URL is a path.
 pub fn uri_to_local_path(uri: &str) -> Result<std::path::PathBuf, String> {
     if let Some(stripped) = uri.strip_prefix(LOCAL_SCHEME) {
         return crate::decode::percent_decode(stripped)
@@ -158,11 +216,10 @@ pub fn uri_to_local_path(uri: &str) -> Result<std::path::PathBuf, String> {
         let scheme = &uri[..scheme_end];
         return Err(match scheme {
             "http" | "https" => format!(
-                "'{scheme}' URIs are not supported: this engine has no streaming decoder, so \
-                 there is nothing to stream them into. The `NetworkByteSource` that would \
-                 serve them is selected by the `network-streaming` feature but has no caller. \
-                 Download the file and open it locally, or enable that feature once the \
-                 decode path is wired end to end."
+                "'{scheme}' URIs are not local paths: this function resolves a URI to a \
+                 filesystem path, and a URL has none. Remote URIs are opened by \
+                 `decode::stream::open_remote` under the `network-streaming` feature; callers \
+                 that accept both should use `decode::resolve_uri`."
             ),
             other => {
                 format!("unsupported URI scheme '{other}': only 'file' resolves to a local path")
@@ -196,7 +253,7 @@ pub fn percent_decode(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod uri_tests {
-    use super::uri_to_local_path;
+    use super::{resolve_uri, uri_to_local_path, UriTarget};
 
     /// A `file://` URI resolves to the path it names, percent-decoded.
     ///
@@ -233,25 +290,83 @@ mod uri_tests {
     /// `AudioSource::from` classifies `http(s)` as a `Uri`, so this was
     /// reachable from the command line.
     #[test]
-    fn an_http_uri_is_refused_with_an_actionable_reason() {
+    fn an_http_uri_is_not_resolved_as_a_local_path() {
         for uri in [
             "http://example.com/track.mp3",
             "https://example.com/track.mp3",
         ] {
             let err = uri_to_local_path(uri).unwrap_err();
             assert!(
-                err.contains("not supported"),
-                "an http URI must be refused, not opened as a path: {err}"
+                err.contains("not local paths"),
+                "an http URI must not resolve to a path: {err}"
             );
             assert!(
                 !err.contains("No such file"),
                 "the error must not read as a missing local file: {err}"
             );
+            // The error must point at the function that *can* handle it, so a
+            // reader is not left hunting for a feature that does nothing.
             assert!(
-                err.contains("network-streaming"),
-                "the error should name the feature a caller would investigate: {err}"
+                err.contains("resolve_uri"),
+                "the error should name the resolver that does handle remote URIs: {err}"
             );
         }
+    }
+
+    /// A `file://` URI, a bare path, and a remote URL each resolve the same way
+    /// through `resolve_uri` — so the four call sites that branch on the result
+    /// cannot drift.
+    #[test]
+    fn resolve_uri_classifies_local_and_remote() {
+        assert_eq!(
+            resolve_uri("file:///tmp/a%20b.flac").unwrap(),
+            UriTarget::Local(std::path::PathBuf::from("/tmp/a b.flac"))
+        );
+        assert_eq!(
+            resolve_uri("/tmp/plain.flac").unwrap(),
+            UriTarget::Local(std::path::PathBuf::from("/tmp/plain.flac"))
+        );
+
+        // Classification is feature-independent: a URL is remote whether or not
+        // this build can open one. That is what keeps the `#[cfg]` out of every
+        // call site — availability is `open_remote`'s business.
+        match resolve_uri("https://example.com/track.mp3").unwrap() {
+            UriTarget::Remote(url) => assert_eq!(
+                url, "https://example.com/track.mp3",
+                "the URL must survive resolution intact"
+            ),
+            UriTarget::Local(p) => panic!("a URL must not become a path: {p:?}"),
+        }
+        assert!(resolve_uri("https://example.com/t.flac")
+            .unwrap()
+            .is_remote());
+
+        // A scheme this engine has no business supporting is still refused, and
+        // `resolve_uri` must not "upgrade" it into a streamable target.
+        let err = resolve_uri("ftp://example.com/track.mp3").unwrap_err();
+        assert!(err.contains("unsupported URI scheme"), "got: {err}");
+    }
+
+    /// Without `network-streaming`, a remote URI is still refused — but the
+    /// refusal comes from `open_remote` and must name the *feature*, not claim
+    /// the engine lacks a streaming decoder. The decoder exists; this build just
+    /// did not compile it.
+    #[cfg(not(feature = "network-streaming"))]
+    #[test]
+    fn a_remote_uri_without_the_feature_names_the_feature() {
+        let target = resolve_uri("https://example.com/track.mp3").unwrap();
+        let crate::decode::UriTarget::Remote(url) = target else {
+            panic!("expected a remote target");
+        };
+        let Err(err) = crate::decode::stream::open_remote(&url) else {
+            panic!("the feature is off, so a remote URI cannot open");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("network-streaming"), "got: {msg}");
+        assert!(
+            !msg.contains("no streaming decoder"),
+            "the engine has a streaming decoder; only this build lacks it: {msg}"
+        );
     }
 
     #[test]

@@ -173,7 +173,6 @@ impl AudioEngine {
             output_event_rx,
             #[cfg(feature = "audio-output")]
             device_monitor,
-            #[cfg(all(target_os = "windows", feature = "wasapi-native"))]
             capture: None,
             measurement: None,
 

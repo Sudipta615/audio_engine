@@ -1,6 +1,6 @@
 # Shadow Desktop Audio Engine — Owner's Guide & Architectural Map
 
-**Version:** 0.9.1 (engine + config + plugin-abi + plugin-test-echo + engine-tui in lockstep)
+**Version:** 0.9.2 (engine + config + plugin-abi + plugin-test-echo + engine-tui in lockstep)
 **License:** Apache-2.0
 **Language:** Rust, with no C/C++ codec SDKs. (Linux `alsa` binds the C `libasound`;
 the WASAPI/ASIO backends are COM FFI and CoreAudio is ObjC FFI — OS audio APIs, not codecs.)
@@ -224,7 +224,7 @@ still present:
 
 ## 1.8 Current maturity level
 
-- Version 0.9.1, semantic versioning (pre-1.0: the API is explicitly
+- Version 0.9.2, semantic versioning (pre-1.0: the API is explicitly
   unstable; see `AGENTS.md`).
 - 187,544 lines of Rust across the six workspace members (`src/` + `crates/`,
   excluding `fuzz/` and `tests/`).
@@ -495,7 +495,8 @@ the real-time audio path · **Seam** = designed for, not yet implemented.
 | Graph 2.0 + timeline + aelog | Full (offline) | Deterministic render lab | internal | Offline-only; realtime graph untouched |
 | Quality harness | Full (offline) | Regression detection | aelog SHA-256 | 9 suites today |
 | AudioProfile | Full (offline) | Content intelligence | deterministic DSP | Heuristics, not ML |
-| System capture | Full (Windows) | Record system mix | WASAPI loopback | Windows only |
+| Input capture | Full (Linux/macOS/Windows) | Record a mic/line-in/interface input | cpal `build_input_stream` | Enumerable everywhere via `EnumerateInputDevices` |
+| System capture | Full (Windows) | Record the system mix | WASAPI loopback | Windows only — needs a loopback tap |
 | C FFI | Full | Any-language hosts | feature `c-ffi` | Feature-gated |
 
 ---
@@ -2224,29 +2225,62 @@ issues:
 
 ## Important (materially improve robustness/completeness)
 
-1. **Integrated room measurement is Windows-only in practice.** The
-   portable IR-import path works everywhere, but the integrated sweep
-   capture needs an input backend — today only WASAPI loopback exists. A
-   generic input/capture backend would bring live measurement to
-   Linux/macOS (the code explicitly marks this "Horizon").
+1. ~~**Integrated room measurement is Windows-only in practice.**~~
+   **Resolved in 0.9.2.** `output::capture::CpalInputCapture` provides a
+   portable input backend (cpal was already a required dependency and had an
+   input API nothing called), and `MeasureRoom` now tries the system mix
+   first, then a real input device. Live measurement works on Linux and
+   macOS, not just Windows.
 2. **Native DSD transport coverage.** Native wire works on ALSA `hw:` only;
    WASAPI has no format, ASIO vendor extensions are unimplemented, and
    CoreAudio DoP is a documented target, not code. If DSD is a product
    priority, close the ASIO/CoreAudio seams.
-3. **SpatialNode covers the stereo front pair only.** Multichannel masters
-   pass through untouched (documented seam). Spatializing all channels or
-   routing decoder object metadata into the node's scene is future work.
-4. **Hardware volume coverage.** Native hardware endpoint volume exists on
+3. ~~**SpatialNode is stereo-only.**~~ **Resolved in 0.9.2.** The node
+   now selects a layout-driven `VbapRenderer` from the graph's configured
+   `ChannelLayout` and routes a multichannel master's channels by semantic
+   role. The master is passed as a **bed**, not as N re-panned program
+   objects, so the scene's two program objects, cues and voice budget keep
+   their stereo meaning. Note the old diagnosis was right about the head
+   model — it *is* fixed at two ears — but wrong that this was the only
+   option: the bed path was already in the tree and was the right fit, so
+   the "generalise from 2 program objects to N" work turned out not to be
+   necessary. `ChannelLayout` now reaches the node via
+   `SpatialNode::apply_config` (widened) and
+   `DspGraph::set_multichannel_layout`. A width/layout mismatch still
+   passes through bit-exact.
+
+5. ~~**`src/network_audio/` has no engine caller.**~~ **Resolved in
+   0.9.2**, and the old diagnosis was wrong in a way worth recording. There
+   was no socket anywhere in the module, but the receive half was *not*
+   missing: `AdaptiveJitterBuffer` already had sequence tracking, dedup, late
+   drop, PLC and silence-on-pre-roll. The named seam was also wrong —
+   `SharedPcm` is a finite immutable `Arc<Vec<f32>>` whose decoder returns
+   `EndOfStream`, which the decode loop turns into "track finished", and
+   `PcmRingBuffer` is the *output* ring. `network_audio::receiver::Aes67Receiver`
+   now owns the socket and receive thread, reached via
+   `AudioSource::NetworkStream`; the non-blocking underrun policy is enforced
+   by keeping parse/jitter/PLC off the audio thread and padding short reads
+   with silence.
+
+6. **Hardware volume coverage.** Native hardware endpoint volume exists on
    macOS; other backends rely on software gain or report `volume_error`.
    Hardware volume on Windows/Linux (where the OS offers it) would
    complete the VolumeMode contract.
 5. **NetCDF-4/HDF5 SOFA** is refused (by design). If the market demands
    nc4 corpora, an optional feature with a contained C dependency (or a
    pure-Rust HDF5 subset) would close the gap without touching renderers.
-6. **No soak/robustness tests** for hours-long drift, memory stability over
-   days, or device-plug storms.
 7. **Benchmark budgets are not CI-enforced** (criterion reports are
    reviewed manually).
+
+   *Partly resolved.* `tests/fidelity/realtime_budget` now asserts the
+   **production chain** completes within 50% of its audio deadline, on
+   the median block, in the release test job — so a graph that silently
+   doubled in cost fails CI rather than merely producing a slower
+   report. What remains unenforced is the *per-stage* Criterion
+   breakdown, which still needs a human to read the trend. The
+   suite's debug-profile guard was also a compile-time failure, which
+   made `cargo test --workspace` unbuildable in the default profile;
+   it is now a runtime skip that still measures and reports.
 
 ## Optional (useful, not necessary)
 
@@ -2256,9 +2290,11 @@ issues:
 2. **Per-wall materials in the live `Room`** (the old room uses one
    absorption coefficient; per-wall spectra exist in the acoustic world
    — a convergence seam).
-3. **Generic input backend** beyond loopback (mic/line-in) — enables
-   measurement everywhere and live monitoring.
-4. **Loopback capture on macOS/Linux** (Windows-only today).
+3. **Talkback / duplex monitoring.** Input capture and enumeration landed in
+   0.9.2; routing a live input back into the output path is still open.
+4. **System-mix loopback capture on macOS/Linux** (still Windows-only — it
+   needs a loopback tap; ALSA's equivalent is the `snd-aloop` kernel module
+   and CoreAudio has none on the output path).
 5. **More crossfeed profiles / limiter modes / graphic-EQ layouts** —
    the seams exist; add data, not architecture.
 6. **`codec-dsd` feature cleanup**: it's an accepted no-op for API
@@ -2514,7 +2550,11 @@ Engine
   other platforms import IRs.
 - Native DSD wire: ALSA `hw:` only; DoP on WASAPI/ASIO; CoreAudio DoP
   unimplemented.
-- SpatialNode spatializes the stereo front pair only (MC passthrough).
+- SpatialNode renders stereo blocks only; a multichannel master is
+  bit-exact pass-through (deliberate: a two-ear head model cannot
+  render N speakers, and the stage may not change the master width).
+- `network_audio` (AES67/RTP/PTP/SAP) is library-only; no engine caller
+  and no non-blocking underrun policy for a live source.
 - SOFA nc4/HDF5 refused (deliberate, pure-Rust rule).
 - WavPack multichannel/DSD/hybrid rejected (typed error).
 - Hardware volume: macOS only among native backends.

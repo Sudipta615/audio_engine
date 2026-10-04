@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::dsp_config::{
-    BassManagementConfig, ChannelEqConfig, ChannelMixConfig, ChannelRoutingConfig,
+    BassManagementConfig, CaptureConfig, ChannelEqConfig, ChannelMixConfig, ChannelRoutingConfig,
     ChannelTrimConfig, ConvolutionConfig, CorrectionConfig, CrossfadeConfig, CrossfeedConfig,
     EqConfig, GraphicEqConfig, LfeConfig, LimiterConfig, LoudnessConfig, MultibandCompressorConfig,
     StereoEnhancerConfig,
@@ -76,6 +76,10 @@ pub struct EngineConfig {
     pub aux: AuxBusConfig,
     #[serde(default)]
     pub correction: CorrectionConfig,
+    /// Capture state. New in 0.9.2 with the portable input backend, so a
+    /// config file written before it round-trips unchanged.
+    #[serde(default)]
+    pub capture: CaptureConfig,
     #[serde(default)]
     pub spatial: SpatialConfig,
     /// Optional explicit path for the active spatial scene's auto-save file
@@ -541,6 +545,7 @@ impl Default for EngineConfig {
             mix_sends: Vec::new(),
             aux: AuxBusConfig::default(),
             correction: CorrectionConfig::default(),
+            capture: crate::CaptureConfig::default(),
             spatial: SpatialConfig::default(),
             spatial_autosave_path: None,
             endpoints: Vec::new(),

@@ -599,6 +599,10 @@ impl AudioEngine {
 
             // ── Capture ──
             EngineCommand::CaptureStart { path, device } => self.handle_capture_start(path, device),
+            EngineCommand::CaptureStartInput { path, device } => {
+                self.handle_capture_start_input(path, device)
+            }
+            EngineCommand::EnumerateInputDevices => self.handle_enumerate_inputs(),
             EngineCommand::CaptureStop => self.handle_capture_stop(),
 
             // ── Runtime DSP & Mix Controls (Punch List P1 Items 20 & 21) ──

@@ -25,40 +25,35 @@ use config;
 use super::{AudioClock, AudioEngine, EngineError, PlaybackStream};
 
 impl AudioEngine {
-    /// Stream the loopback capture ring into the active WAV file. Runs every
+    /// Stream the capture ring into the active WAV file. Runs every
     /// tick while a capture is active; the capture thread never touches the
     /// file, so disk stalls cannot back-pressure the realtime path. On an
     /// I/O error the capture is torn down with a `CaptureError` event.
     pub(crate) fn drain_capture(&mut self) {
-        #[cfg(all(target_os = "windows", feature = "wasapi-native"))]
-        {
-            let Some(active) = self.capture.as_mut() else {
+        let Some(active) = self.capture.as_mut() else {
+            return;
+        };
+        let mut buf = [0.0f32; 8192];
+        let ch = active.capture.channels() as usize;
+        loop {
+            let n = active.capture.buffer().pop_frames_interleaved(&mut buf, ch);
+            if n == 0 {
+                break;
+            }
+            if let Err(e) = active.writer.write_frames(&buf[..n * ch]) {
+                log::error!("capture write failed: {e}");
+                // Drop the capture; the WAV writer's Drop finalizes the
+                // header so the partial file stays playable.
+                let mut active = self.capture.take().unwrap();
+                active.capture.stop();
+                let path = active.path.clone();
+                self.emit_event(crate::events::EngineEvent::CaptureError(format!(
+                    "capture write to '{}' failed: {e}",
+                    path.display()
+                )));
                 return;
-            };
-            let mut buf = [0.0f32; 8192];
-            let ch = active.capture.channels() as usize;
-            loop {
-                let n = active.capture.buffer().pop_frames_interleaved(&mut buf, ch);
-                if n == 0 {
-                    break;
-                }
-                if let Err(e) = active.writer.write_frames(&buf[..n * ch]) {
-                    log::error!("capture write failed: {e}");
-                    // Drop the capture; the WAV writer's Drop finalizes the
-                    // header so the partial file stays playable.
-                    let mut active = self.capture.take().unwrap();
-                    active.capture.stop();
-                    let path = active.path.clone();
-                    self.emit_event(crate::events::EngineEvent::CaptureError(format!(
-                        "capture write to '{}' failed: {e}",
-                        path.display()
-                    )));
-                    return;
-                }
             }
         }
-        #[cfg(not(all(target_os = "windows", feature = "wasapi-native")))]
-        {}
     }
 
     /// Block until at least one command arrives or `max_wait` elapses,

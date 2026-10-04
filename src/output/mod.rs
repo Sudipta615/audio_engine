@@ -8,6 +8,10 @@ pub mod alsa_output;
 pub mod asio_output;
 pub mod calibration;
 pub mod capabilities;
+/// Portable capture: input devices everywhere via cpal, plus the Windows
+/// system-mix loopback. This is the seam `CaptureStart` / `CaptureStartInput`
+/// and `MeasureRoom` are written against.
+pub mod capture;
 #[cfg(target_os = "macos")]
 pub mod coreaudio_output;
 pub mod cpal_callbacks;
@@ -19,6 +23,9 @@ pub mod drift;
 pub mod endpoint;
 pub mod format_converter;
 pub mod jack;
+// Hardware-free sink ("null" backend). Cross-platform; needs no OS device, so
+// the headless suites can exercise the engine's output matrix end to end.
+pub mod null_output;
 // The directory `src/output/` holds the `output.rs` core trait + factory
 // alongside the backend modules; the naming is intentional.
 #[allow(clippy::module_inception)]
@@ -56,6 +63,7 @@ pub use format_converter::{AudioFormatConverter, TargetFormat};
 pub use jack::{
     JackAutoConnectPolicy, JackClientConfig, JackOutput, JackTimebaseInfo, JackTransportState,
 };
+pub use null_output::NullOutput;
 pub use output::{
     create_output, NativeDsdCapability, NativeDsdParams, Output, StreamErrorBatch,
     StreamErrorEvent, StreamErrorKind, StreamErrorState,

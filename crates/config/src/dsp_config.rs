@@ -928,6 +928,27 @@ pub struct CorrectionConfig {
     pub depth: f32,
 }
 
+/// Capture (recording) state, read back by hosts via `EngineSettings`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureConfig {
+    /// Whether a capture is currently running. The engine owns the actual
+    /// device handle; this mirrors it so a host can render a record button
+    /// without tracking `CaptureStarted` / `CaptureStopped` events (which it
+    /// may have joined after the fact).
+    #[serde(default)]
+    pub active: bool,
+    /// Friendly name of the device the last capture opened, or the system mix.
+    /// `None` = nothing captured yet this session. Persisted so a restarted
+    /// host can pre-select the device a user actually used, rather than
+    /// defaulting and silently recording the wrong one.
+    #[serde(default)]
+    pub last_device: Option<String>,
+    /// Default output path for recordings. `None` = `capture.wav` in the
+    /// current directory.
+    #[serde(default)]
+    pub default_path: Option<std::path::PathBuf>,
+}
+
 fn default_correction_depth() -> f32 {
     1.0
 }

@@ -1,6 +1,6 @@
 [package]
 name = "plugin-test-echo"
-version = "0.9.1"
+version = "0.9.2"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ publish = false
 
 
 [dependencies]
-plugin-abi = { path = "../plugin-abi", version = "0.9.1", default-features = false }
+plugin-abi = { path = "../plugin-abi", version = "0.9.2", default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

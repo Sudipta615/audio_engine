@@ -1,6 +1,6 @@
 [package]
 name = "engine-tui"
-version = "0.9.1"
+version = "0.9.2"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ publish = false
 # three move together: the TUI compiles against a specific handle surface.
 
 [dependencies]
-audio-engine = { path = "../..", version = "0.9.1" }
-config = { path = "../config", version = "0.9.1" }
+audio-engine = { path = "../..", version = "0.9.2" }
+config = { path = "../config", version = "0.9.2" }
 ratatui = "0.30.2"
 crossterm = "0.29.0"

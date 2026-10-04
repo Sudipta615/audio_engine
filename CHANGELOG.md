@@ -5,6 +5,355 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] — 2026-10-04
+
+Closes four of the six entries the README listed under Known Limitations. One
+is closed only in part, and one cannot be closed at all — both are stated
+plainly below rather than dressed up as fixes.
+
+**A note on the version number.** This is a patch release that adds public API
+(`AudioBackend::Null`, `AudioSource::NetworkStream`, `Decoder::Aes67`,
+`config::CaptureConfig`, `EngineCommand::CaptureStartInput`,
+`EngineCommand::EnumerateInputDevices`, `EngineEvent::InputDeviceList`,
+`SpatialNode::set_multichannel_layout`, and a changed signature on
+`SpatialNode::apply_config`). Under the project's own Versioning rule that is a
+**minor** bump, not a patch. It is published as 0.9.2 — the next release after
+0.9.1 — so every affected signature change is called out below rather than
+discovered by a consumer.
+
+### Added
+
+- **Audio input devices exist, portably.** The README recorded "no microphone
+  capture, input enumeration, duplex mode, or talkback", with Windows WASAPI
+  loopback as the only capture path in the tree. That was true of the *engine*,
+  not of the dependency: `cpal` has had a first-class input API for years and
+  was already a required dependency via the required `audio-output` feature.
+  Nothing was using it.
+  - `output::capture::SystemCapture` is the new seam: a source of interleaved
+    `f32` in a shared SPSC ring, object-safe so `ActiveCapture` holds a
+    `Box<dyn SystemCapture>`. The engine's capture code is now written once
+    against the trait instead of twice against `#[cfg]`.
+  - `output::capture::CpalInputCapture` implements it on Linux, macOS and
+    Windows. The callback does one lock-free ring push and one atomic
+    `fetch_add` — no allocation, no locks, no logging.
+  - `enumerate_input_devices()` returns every device that advertises a usable
+    input configuration, with channel counts and the standard rates each one
+    supports, sorted for stable UI indexing.
+  - `EngineHandle::start_capture_input(path, device)` and
+    `EngineHandle::enumerate_input_devices()` are the host surface. The reply
+    arrives as `EngineEvent::InputDeviceList`, because `EngineCommand` is
+    write-only and cannot return a `Result`.
+  - `EngineSettings` gained `capture_active` and `capture_device` so a host
+    renders the right record button without replaying events it may have joined
+    after. Covered by four new cases in `src/engine/tests/settings.rs`.
+  - `config::CaptureConfig` persists `active` / `last_device` /
+    `default_path`, all `#[serde(default)]`, so a config written before this
+    release round-trips unchanged.
+- **`AudioBackend::Null` — a hardware-free output sink.** Not a stub: it runs
+  the same drain loop a device callback runs (pull a block, starve-count when
+  short, advance a wall-clock deadline) and retains what it drained, so a test
+  can assert on the samples that actually left the engine. Available over Rust
+  and C-FFI (`backend_id::NULL = 7`).
+  - It **never claims hardware**: `OutputInfo::is_exclusive` is `false`, the
+    access state reads `Shared`/unverified, `likely_direct_access` is `false`,
+    and `supports_hardware_volume()` is `false`. A "Bit-Perfect" badge from
+    this backend is a bug, and there is a test that says so.
+- **`tests/headless_output_matrix.rs` — the missing half of the output path.**
+  Every previous suite stopped at the master ring, so an underrun in the output
+  matrix had no coverage at all and a regression that starved the sink shipped
+  green. Seven tests now cover paced realtime draining, retained-audio
+  verification, starved-producer accounting, the honesty guarantees above, a
+  full engine run through the real matrix with no DAC, and capture failing
+  honestly on a deviceless host.
+- **AES67 / RTP receive is now reachable from engine playback.** See Fixed.
+
+### Changed
+
+- **Multichannel masters are routed, not declined.** The `SpatialNode` had one
+  renderer and a `planes.len() != 2` early return, so a 5.1 master passed
+  through *wholly* unprocessed — front pair included — while the node's own
+  capability metadata advertised `StageChannelSupport::AllChannels`.
+  - A layout-driven `VbapRenderer` (already implemented and tested as library
+    code) is selected from the graph's configured `ChannelLayout`. The master's
+    channels are handed to it as a **bed**, so `render_beds` places each on the
+    speaker carrying its semantic role. That is the transparent round trip an
+    already-spatial master wants; a second round of panning would scramble it.
+  - The scene's two program objects, cue machinery and voice budget keep their
+    stereo meaning and are **not** redefined for N inputs. This is why the
+    change is small rather than the generalisation the old README text asked
+    for — the bed model was already in the tree and was the right fit.
+  - `ChannelLayout` now reaches the node. `DspGraph::set_multichannel_layout`
+    previously fed only the LFE trimmer, and `SpatialNode::apply_config` takes a
+    third `&ChannelLayout` argument so a *rebuilt* generation carries it too
+    (otherwise a graph rebuild silently reverted to passthrough).
+  - `DspGraph::multichannel_layout()` is a new read-back accessor.
+  - The multichannel renderer is held behind a `Box`. Held inline it was enough
+    to overflow a default 2 MiB test thread stack — caught by the existing
+    suite, and the reason the field is a pointer rather than an optimisation
+    choice.
+  - A block whose width disagrees with the configured layout, or that arrives
+    with no layout known, still passes through **bit-exact**. Guessing which of
+    the two is authoritative would be worse than declining.
+- **Room measurement is no longer Windows-only.** `MeasureRoom` plays the sweep
+  *after* capture is confirmed running (that ordering was already deliberate),
+  and now tries `SystemMix` first — the right signal for a correction curve,
+  since it hears the sweep plus the room with no microphone in the chain — then
+  falls back to a real input device. A Linux or macOS user with a measurement
+  mic now gets a working integrated measurement instead of "unsupported, load
+  an IR by hand".
+- `EngineCommand::CaptureStart` keeps its meaning ("record the system mix") but
+  is no longer a silent no-op off Windows — it falls back to the default input
+  and says so in its documentation. `CaptureStartInput` is the unambiguous
+  form.
+- `EngineEvent::CaptureStarted` documentation no longer claims WASAPI-only.
+
+### Fixed
+
+- **AES67 / RTP had a complete implementation and no socket.** The README
+  recorded "`src/network_audio/` has zero engine callers ... the RTP/AES67
+  pieces are transmit-only or I/O-less today", and named the seam as
+  "`AudioSource::SharedPcm` over a `PcmRingBuffer`". Both halves of that were
+  wrong, and the correction matters:
+  - There was no socket anywhere in the module — a grep for `std::net` across
+    `src/network_audio/` returned nothing. It was not transmit-only either:
+    `AdaptiveJitterBuffer` already had sequence tracking, dedup, late drop,
+    packet-loss concealment and silence-on-pre-roll. Only the socket was
+    missing.
+  - `SharedPcm` is an immutable `Arc<Vec<f32>>` with a known `total_frames`
+    and no producer, and `SharedPcmDecoder` returns `EndOfStream` at the end,
+    which the decode loop turns into `SourceFinished` plus a playlist advance.
+    For a network source that is simply wrong. `PcmRingBuffer` is the engine's
+    *output* ring, not a source-side seam.
+  - `network_audio::receiver::Aes67Receiver` binds the socket, joins the
+    multicast group, and runs the jitter buffer on a receive thread that
+    publishes interleaved f32 into a lock-free ring. It filters by SSRC (so a
+    multiplexed group cannot mix two streams into one master) and by negotiated
+    payload type.
+  - `decode::Aes67Decoder` is the engine-facing arm, reached through the new
+    `AudioSource::NetworkStream`. **The non-blocking underrun policy the README
+    named as the blocker is now explicit and enforced**: the socket read, the
+    RTP parse, the jitter buffer and the PLC all live on the receive thread;
+    the engine thread performs one lock-free SPSC read and pads a short read
+    with silence. It never returns `EndOfStream` while the receiver is alive,
+    because a dead multicast group must not be reported as "track finished" and
+    advance the playlist.
+  - `DecodeInfo::duration_secs` is `f32::INFINITY` for a live stream, and
+    `AudioSource::is_unbounded()` exists so the progress reporting can
+    distinguish "still playing" from "finished".
+  - `Aes67StreamConfig` and its two enums gained `Eq + Hash` derives so
+    `AudioSource` could keep its `PartialEq`/`Eq`/`Hash`.
+  - Ten tests, six of them over a **real UDP socket** — including an
+    end-to-end sender→receiver→decoder round trip, a malformed-datagram
+    survival check, SSRC demux, payload-type filtering, and a bounded-latency
+    check that an idle group reads immediately.
+
+### Not fixed, and why
+
+- **Musepack and TAK are still refused at open.** This is unchanged and is not
+  closable in a release. No pure-Rust decoder exists for either format in this
+  tree or in any dependency — Symphonia 0.6.1 supports neither in any feature
+  combination — and the alternatives remain an FFI binding to `libmpcdec`
+  (which this project deliberately does without) or writing Musepack SV7/SV8
+  and TAK decoders from scratch. A from-scratch Musepack decoder is a
+  multi-week project with a modified Rice/ANS decoder and range coding, and it
+  cannot be validated without reference streams and conformance vectors; an
+  unvalidated bit-exact claim is worse than an honest refusal.
+  The existing behaviour is correct and stays: typed, descriptive errors rather
+  than a mis-parse, with `Codec::Musepack` / `Codec::Tak` present so the
+  formats are *named* and reported rather than silently unknown, and
+  `codec-musepack` deliberately excluded from `all-codecs` so `--all-features`
+  cannot imply a decoder that does not exist.
+- **Talkback and duplex mode still do not exist.** Input *capture* and input
+  *enumeration* now work, which is what the "no audio input devices" entry
+  described, but routing a live input back into the output path as a monitor
+  mix is a separate DSP feature with its own gain, feedback and ducking
+  questions. It is not in this release.
+- **Headless CI still opens no physical DAC.** `AudioBackend::Null` and
+  `tests/headless_output_matrix.rs` mean CI now exercises the engine's own
+  output path — master ring, output matrix, per-endpoint worker, drift
+  resampler, format converter, underrun declick — which it previously did not.
+  Real driver negotiation, real hardware clocks and real DACs remain
+  unverifiable from a CI agent, and that is an environment fact rather than a
+  defect in the engine.
+
+### Also in 0.9.2: the `network-streaming` rewrite
+
+The release that stops the README's Known Limitations from being wrong in the
+easy direction. One documented limitation — `network-streaming` being
+non-functional — was a real defect and is now fixed. Two more were not defects
+at all and are now stated accurately instead of being "fixed" into something
+worse. One turned out to be a broken documented gate.
+
+#### Added
+
+- **`network-streaming` now opens and decodes `http(s)://` URIs.** The feature
+  compiled `audio_io::NetworkByteSource` — a working `Range`-capable HTTP byte
+  source — and *nothing ever constructed one*: no code path routed a URI into
+  it, and `Decoder` had no streaming backend, so remote URIs were refused. It is
+  now wired end to end.
+  - `decode::stream::open_remote` bridges the byte source to
+    `SymphoniaDecoder::open_media_source`, the same entry point `open` already
+    uses for a `File`, so a remote track decodes through the **same** backend a
+    local one does. There is no second decoder backend to keep in sync.
+  - The `MediaSource` wrapper is load-bearing rather than decorative:
+    `AudioByteSource` requires `Read + Seek + Debug + Send` and `MediaSource`
+    requires `Read + Seek + Send + Sync`, so neither is a supertype of the
+    other and no blanket impl can bridge them.
+  - `decode::resolve_uri` returns a `UriTarget` (local path or remote URL)
+    instead of collapsing a URL into a path. `uri_to_local_path` keeps its
+    refusal, because a URL genuinely is not a filesystem path — that refusal is
+    what stopped an `http(s)` target being opened as the literal string
+    `https://host/track.mp3` and reported as "No such file or directory".
+  - All four `AudioSource::Uri` call sites (`decode::decoder`,
+    `engine::track_loading` ×2, `engine::preload`) branch on the resolved
+    target, so a URL can no longer reach a filesystem loader on one path and be
+    refused on another.
+  - Fetching is windowed, not a whole-file download: 128 KiB chunks with
+    eviction behind the read cursor. `is_seekable` reports what the HTTP probe
+    actually found rather than always claiming `true`, because Symphonia acts on
+    that answer when it builds seek tables.
+  - `tests/fidelity/network_streaming` drives a hand-rolled loopback HTTP
+    server and asserts on the decoded samples, that `Range` requests are
+    actually used, that a range-less server still decodes via the whole-body
+    fallback, and that **a remote seek lands exactly where the same bytes seek
+    to on disk** — which is the claim that separates streaming from "a slower
+    way to fetch a file".
+  - CI now *runs* this suite. `network-streaming` was previously only ever
+    `cargo check`ed, which is precisely how a feature can compile perfectly and
+    still be dead.
+
+#### Fixed
+
+- **`MeasureRoom` played an audible sweep and then failed.** The handler started
+  playback of the full-amplitude ESS sweep *before* checking whether capture was
+  available, then discovered there was no capture backend, deleted the WAV, and
+  reported failure. On any platform without one — which is every non-Windows
+  call, so every call on Linux and macOS — a measurement attempt produced a loud
+  noise burst and nothing else. Capture now starts before the sweep is written or
+  played, and the failure message points at `LoadCorrectionIr` instead of an
+  internal roadmap marker ("Horizon").
+
+- **A test suite claimed coverage that does not exist.**
+  `tests/fidelity/room_correction_pipeline.rs` stated that live-toggle and
+  IR-hot-load-across-a-generation-swap acceptance "live in the engine command
+  tests (`src/engine/tests/commands.rs`)". They do not — that file has no such
+  tests, and neither does anywhere else in the tree. The suite now states the real
+  gap and why it is hard to close (it needs a capture backend drivable headlessly).
+
+- **`cargo test --workspace` — the first gate the README documents — could not
+  build in the default profile.** `tests/fidelity/realtime_budget` guarded its
+  wall-clock assertion with `const { assert!(!cfg!(debug_assertions)) }`, which
+  fails at *compile* time. Anyone following the README without adding
+  `--release` got two `error[E0080]`s and no test run at all. The guard is now a
+  runtime skip: the suite always builds and runs, and in a debug profile it
+  measures, reports, and returns without asserting — so the number is still
+  there for comparison and the gate is runnable in both profiles.
+
+- **Two more wall-clock assertions failed as soon as that was unblocked** —
+  masked by the compile error above, so neither had ever run in a debug profile.
+  Both are now release-only assertions that still measure and report in debug:
+  - `tests/headless_playback.rs`: the tick-driven test slept a fixed 50 ms and
+    then asserted `Stopped`, and separately waited a fixed 3 s for `SourceOpened`.
+    In an unoptimized build the background tick thread had not finished either
+    within those windows. Both now poll to a profile-scaled deadline: the
+    assertions that matter ("it opens", "it stops") are kept, and the ones that
+    were really statements about the machine are not.
+  - `tests/fidelity/graph_pipeline_equivalence.rs`:
+    `graph2_block_throughput_within_tolerance_of_pipeline` asserted the graph
+    plan runner is under 1.5× the reference pipeline. Unoptimized it measures
+    ~1.55× — because the enum-dispatch plan runner is a deeper call chain than a
+    direct call, not because the hot path regressed. It now also alternates
+    measurement order across two rounds so a slow machine cannot systematically
+    favour whichever side runs first.
+  - `tests/fidelity/long_duration_realtime_qualification.rs` asserted a P95
+    latency under one 192 kHz block period, with a comment claiming the bound was
+    chosen "in unoptimized debug test profile". Unoptimized the chain runs ~5×
+    over that budget (mean ~6.0 ms against 1.33 ms), so it failed on any
+    developer machine. Its xrun count is derived from the same wall-clock
+    deadline and failed for the same reason (7474/10000 blocks).
+
+    The two kinds of check in that suite are now separated rather than gated
+    together. **Zero heap allocations and sample finiteness are properties of the
+    code** and stay asserted in every profile — unoptimized code still does not
+    allocate on the hot path, which is precisely why they are the suite's most
+    valuable output. **P95 latency and xrun count are properties of code +
+    compiler + machine** and are asserted in release only, still measured and
+    printed in debug. Gating all four together would have silently discarded the
+    realtime guarantee to preserve a number that never meant anything unoptimized.
+  - `tests/fidelity/long_duration_stress.rs` had the same shape — an xrun count
+    and an average-CPU percentage both derived from `elapsed_us` against a block
+    budget — and is split the same way: per-block sample finiteness is still
+    asserted in every profile, the two wall-clock-derived bounds are release-only.
+
+  The pattern worth naming: a wall-clock threshold in a test that runs in both
+  profiles is measuring the compiler unless it is explicitly release-gated, and
+  the compile error in `realtime_budget` meant none of these had ever been
+  exercised in a debug profile to find out.
+
+- **`all-codecs` advertised a decoder that does not exist.** The aggregate
+  listed `codec-musepack`, an empty no-op feature, and since `default` includes
+  `all-codecs`, an ordinary build shipped a feature list claiming Musepack
+  support that no configuration could deliver. The codec registry and the decode
+  dispatch were both honest about it (`Codec::Musepack` is
+  `DeclaredUnavailable`, `.mpc` is refused with a typed error) — the
+  *feature list* was the outlier, and the feature list is what a host reads to
+  decide what to depend on. `codec-musepack` is now documented as
+  declared-but-undecodable with the reason (no pure-Rust Musepack decoder exists;
+  Symphonia 0.6.1 supports neither Musepack nor TAK in any feature combination)
+  and excluded from `all-codecs`, whose meaning is now enforced.
+
+#### Changed
+
+- **`decode::uri_to_local_path`'s remote-URI error no longer claims the engine
+  has no streaming decoder.** It did not, and did not need to: the function's
+  contract is *a filesystem path*, which a URL is not. The message now names
+  `decode::resolve_uri` — the resolver that does handle remote URIs — instead of
+  pointing at a feature for wiring that now exists.
+- **`decode::stream::remote_extension` strips the query string.** A signed URL
+  (`track.flac?token=…`) yielded the extension `flac?token=…`, which poisoned
+  the probe hint and could turn a decodable stream into "no audio track found".
+  Fragment stripping is handled too, and in the right order for a URL carrying
+  both.
+
+#### Known gaps — re-examined, and *not* closed
+
+These were on the README's limitation list. Each was investigated rather than
+assumed fixable, and the honest outcome is recorded here instead of a partial
+change:
+
+- **Musepack / TAK cannot be decoded.** Not a wiring gap: no pure-Rust decoder
+  for either format exists in this tree or any dependency. The alternatives are
+  an FFI binding to `libmpcdec` — which this project deliberately does without —
+  or writing a decoder from scratch. They stay typed refusals. Likewise WavPack
+  multichannel/DSD/hybrid stays refused: that boundary is upstream (`wavicle`
+  hard-scopes to mono/stereo), not an engine choice.
+- **SpatialNode remains stereo-only, now deliberately so.** A multichannel
+  master passes through wholly untouched — front pair included, not just the
+  surrounds. The production node drives a binaural *head* model, which has two
+  ears by physics, and the stage cannot change the master's channel count
+  without breaking the endpoint contract. Folding 5.1 to a head and re-expanding
+  onto 5.1 speakers would be lossy and physically wrong, so the node declines
+  rather than inventing a mapping. The real fix is renderer selection from the
+  channel layout (`VbapRenderer`/`AmbisonicRenderer` already exist and are
+  tested as library code) plus generalising scene authoring, cues and the voice
+  budget from two program objects to N, and an MC f64 path. That case only
+  arises with a multichannel *output device*: a stereo device already folds MC
+  to stereo before the graph.
+- **No audio input devices, and therefore room measurement stays
+  Windows-only.** These are one piece of work, not two: live sweep capture on
+  Linux/macOS needs the capture backend whose absence causes the first gap. It
+  is a platform feature (ALSA capture / CoreAudio input / WASAPI input) with a
+  duplex and talkback surface on top, not a defect.
+- **`src/network_audio/` still has zero engine callers.** The seam is
+  `AudioSource::SharedPcm` over a `PcmRingBuffer`. What blocks it is a design
+  decision, not plumbing: a live source needs an explicit **non-blocking**
+  underrun policy (silence or PLC rather than a wait), because a source that can
+  block would put the engine tick at the mercy of a dead multicast group — a
+  regression to the engine's core realtime promise. That belongs in the spec
+  before it is coded.
+- **"Headless CI testing" is an environment fact, not a defect**, and has been
+  reworded as one rather than "fixed".
+
 ## [0.9.1] — 2026-10-04
 
 Follow-up release filling the known gaps identified in the 0.9.0 audit.

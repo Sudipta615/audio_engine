@@ -218,6 +218,11 @@ impl Graph2Engine {
         self.inner.set_multichannel_layout(layout);
     }
 
+    /// The multichannel layout currently configured.
+    pub fn multichannel_layout(&self) -> &crate::decode::ChannelLayout {
+        self.inner.multichannel_layout()
+    }
+
     /// Set the precision mode.
     pub fn set_precision_mode(&mut self, mode: crate::dsp::pipeline::PrecisionMode) {
         self.inner.set_precision_mode(mode);

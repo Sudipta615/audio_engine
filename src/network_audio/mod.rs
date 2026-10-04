@@ -2,14 +2,28 @@
 //!
 //! Implements RFC 3550 RTP streaming, AES67 interoperability profiles,
 //! IEEE 1588-2008 PTP clock synchronization, and RFC 2974 SAP session announcements.
+//!
+//! # Wiring, as of 0.9.2
+//!
+//! [`receiver::Aes67Receiver`] is the engine's entry point: it owns a UDP
+//! socket, joins the multicast group, and feeds an [`AdaptiveJitterBuffer`] on
+//! a receive thread that publishes into a lock-free PCM ring. The engine
+//! reaches it through `AudioSource::NetworkStream` → `Decoder::Aes67`, so
+//! `EngineCommand::Open` starts a stream with no command of its own.
+//!
+//! Until 0.9.2 this module had **no socket at all** and no engine caller: the
+//! packet→PCM logic was complete but unreachable, which is what the README
+//! recorded as "`src/network_audio/` has zero engine callers".
 
 pub mod aes67;
 pub mod clock;
+pub mod receiver;
 pub mod rtp;
 pub mod session;
 
 pub use aes67::{Aes67Encoding, Aes67PacketTime, Aes67StreamConfig};
 pub use clock::{PtpClock, PtpClockState, PtpClockTelemetry, PtpTimestamp};
+pub use receiver::{Aes67Receiver, NetworkAudioError};
 pub use rtp::{PcmPayloadCodec, RtpError, RtpHeader, RtpPacket, RTP_HEADER_MIN_SIZE, RTP_VERSION};
 pub use session::{AdaptiveJitterBuffer, JitterBufferStats, SapPacket};
 

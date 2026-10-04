@@ -238,10 +238,8 @@ impl PreloadManager {
             // segment and a directly-opened one are positioned identically.
             AudioSource::CueSegment(_) => Decoder::open_source(source)
                 .map_err(|e| format!("Decoder::open_source failed: {e}"))?,
-            AudioSource::Uri(uri) => {
-                let path_buf = crate::decode::uri_to_local_path(uri)?;
-                Decoder::open(&path_buf).map_err(|e| format!("Decoder::open failed: {e}"))?
-            }
+            AudioSource::Uri(_) => crate::decode::Decoder::open_source(source)
+                .map_err(|e| format!("Decoder::open_source failed: {e}"))?,
             AudioSource::Memory {
                 data,
                 extension_hint,
@@ -252,6 +250,11 @@ impl PreloadManager {
             AudioSource::SharedPcm(pcm) => Decoder::SharedPcm(
                 crate::decode::shared_pcm::SharedPcmDecoder::new(pcm.clone()),
             ),
+            // A live stream is opened here on the worker, so the socket bind
+            // and group join do not happen on the audio thread. Decoding is
+            // continuous, so nothing is "preloaded" beyond the connection.
+            AudioSource::NetworkStream(_) => Decoder::open_source(source)
+                .map_err(|e| format!("Decoder::open_source failed: {e}"))?,
         };
 
         let info = decoder.info().clone();

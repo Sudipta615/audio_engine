@@ -61,6 +61,7 @@ impl GraphGeneration {
         &mut self,
         config: &EngineConfig,
         sample_rate: f32,
+        layout: &ChannelLayout,
         user: UserState,
     ) {
         // Config replay: generation-level trim, send, and aux
@@ -100,8 +101,14 @@ impl GraphGeneration {
             .apply_config(&config.correction, sample_rate);
 
         // The spatial config (enabled / screen / room / listener)
-        // applies to the spatial master node.
-        gen_node!(self, node_id::SPATIAL, Spatial).apply_config(&config.spatial, sample_rate);
+        // applies to the spatial master node, together with the channel layout —
+        // the node cannot choose a layout-driven renderer for a multichannel
+        // master without being told what that master's channels mean.
+        gen_node!(self, node_id::SPATIAL, Spatial).apply_config(
+            &config.spatial,
+            sample_rate,
+            layout,
+        );
 
         // The plugin host insert. Each configured slot is
         // resolved (library path or `static:<uid>`), instantiated, and
@@ -340,7 +347,7 @@ impl GraphGeneration {
             reservation: None,
         };
         gen.apply_config(config, sample_rate, layout);
-        gen.finish_build(config, sample_rate, user);
+        gen.finish_build(config, sample_rate, layout, user);
         Box::new(gen)
     }
 

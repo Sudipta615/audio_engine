@@ -978,15 +978,39 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::OpenAsioControlPanel);
     }
 
-    /// Start capturing the system mix (WASAPI loopback on Windows) to a WAV
-    /// file. `path` defaults to `capture.wav`; `device` selects the render
-    /// endpoint (`None` = system default). Emits `CaptureStarted` or
-    /// `CaptureError`. No-op on platforms without the `wasapi-native` feature.
+    /// Start capturing the system mix (WASAPI loopback on Windows, falling back
+    /// to the default input device elsewhere) to a WAV file. `path` defaults
+    /// to `capture.wav`; `device` selects the render endpoint (`None` = system
+    /// default). Emits `CaptureStarted` or `CaptureError`.
+    ///
+    /// Prefer [`Self::start_capture_input`] to record a microphone: this
+    /// variant means "what you hear" and that is only genuinely available on
+    /// Windows.
     pub fn start_capture(&self, path: Option<std::path::PathBuf>, device: Option<String>) {
         let _ = self.send_command(EngineCommand::CaptureStart { path, device });
     }
 
-    /// Stop the active system-audio capture and finalize its WAV file.
+    /// Start recording from an input device (microphone, line-in, interface
+    /// input) to a WAV file. Portable — works on Linux, macOS and Windows.
+    ///
+    /// `device` matches the device name (case-insensitive substring) or a
+    /// stable id; `None` selects the platform default input. `path` defaults
+    /// to `capture.wav`. Emits `CaptureStarted` or `CaptureError`; a host with
+    /// no input device gets the error, never a silent zero-byte file.
+    pub fn start_capture_input(&self, path: Option<std::path::PathBuf>, device: Option<String>) {
+        let _ = self.send_command(EngineCommand::CaptureStartInput { path, device });
+    }
+
+    /// Ask the engine to enumerate every input device it can capture from.
+    ///
+    /// The list arrives as an
+    /// [`EngineEvent::InputDeviceList`](crate::events::EngineEvent::InputDeviceList)
+    /// event. An empty list means the host has no capture device at all.
+    pub fn enumerate_input_devices(&self) {
+        let _ = self.send_command(EngineCommand::EnumerateInputDevices);
+    }
+
+    /// Stop the active capture and finalize its WAV file.
     /// Emits `CaptureStopped` (or `CaptureError` if none is active).
     pub fn stop_capture(&self) {
         let _ = self.send_command(EngineCommand::CaptureStop);

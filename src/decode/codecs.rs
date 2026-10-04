@@ -1065,4 +1065,148 @@ mod tests {
             }
         }
     }
+
+    /// The `codec-*` feature name that governs a codec's decoder.
+    ///
+    /// `None` for codecs with no decoder feature at all:
+    ///
+    ///   * `Dsd` — its module is compiled unconditionally, so there is nothing
+    ///     to gate.
+    ///   * `Tak` — declared in the enum so the format is *named* and refused
+    ///     with a typed error, and given no feature, because no pure-Rust TAK
+    ///     decoder exists to put behind one.
+    ///   * `Unknown` — by definition, the codec the extension map does not
+    ///     recognise.
+    ///
+    /// Every other codec is governed by a feature, whether that feature enables
+    /// a Symphonia codec (`codec-mp3` → `symphonia/mp3`), an in-tree decoder
+    /// (`codec-tta`), or a crate (`codec-wavpack` → `dep:wavicle`).
+    ///
+    /// `codec-musepack` appears here even though it enables nothing: that is
+    /// the point. The feature exists so the format has a stable, nameable
+    /// identity in the manifest, and this table is what lets the test below
+    /// assert it is never *claimed* by `all-codecs`.
+    fn codec_feature_name(c: Codec) -> Option<&'static str> {
+        Some(match c {
+            Codec::Mp3 => "codec-mp3",
+            Codec::Flac => "codec-flac",
+            Codec::OggVorbis => "codec-ogg",
+            Codec::Opus => "codec-opus",
+            Codec::Wav => "codec-wav",
+            Codec::Aac => "codec-aac",
+            Codec::Alac => "codec-alac",
+            Codec::Ape => "codec-ape",
+            Codec::Pcm => "codec-pcm",
+            Codec::Aiff => "codec-aiff",
+            Codec::Mka => "codec-mkv",
+            Codec::WavPack => "codec-wavpack",
+            Codec::Tta => "codec-tta",
+            Codec::Musepack => "codec-musepack",
+            Codec::Dsd | Codec::Tak | Codec::Unknown => return None,
+        })
+    }
+
+    /// `all-codecs` must mean "every codec this build can actually decode".
+    ///
+    /// It used to list `codec-musepack` — an empty no-op feature, since no
+    /// pure-Rust Musepack decoder exists to enable. Because `default` includes
+    /// `all-codecs` and CI builds `--all-features`, the aggregate advertised a
+    /// decoder that does not exist in any configuration. The registry and the
+    /// decode dispatch were honest (`Codec::Musepack` is `DeclaredUnavailable`
+    /// and `.mpc` is refused with a typed, explanatory error), but the *feature
+    /// list* was not — and the feature list is what a host reads to decide what
+    /// to depend on.
+    ///
+    /// `table_agrees_with_decode_dispatch` cannot catch that class of defect:
+    /// it compares the registry against the dispatch, and those two agreed with
+    /// each other. The disagreement was with `Cargo.toml`. So this test reads the
+    /// manifest and holds the two together.
+    #[test]
+    fn all_codecs_names_exactly_the_codecs_that_decode() {
+        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("the manifest must be readable from the crate root");
+        let parsed: toml::Value =
+            toml::from_str(&manifest).expect("Cargo.toml must stay parseable as TOML");
+        let features = parsed
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("Cargo.toml must keep a [features] table");
+        // The *declared* contents of the aggregate, which is what a host reads.
+        // Note this is the manifest's list, independent of whether this
+        // particular build has the feature switched on — so the checks below
+        // hold in every configuration, not only under `--all-features`.
+        let claimed = features
+            .get("all-codecs")
+            .and_then(toml::Value::as_array)
+            .expect("`all-codecs` must remain a feature aggregate")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert!(
+            !claimed.is_empty(),
+            "`all-codecs` must name at least one codec"
+        );
+        let aggregate_active = cfg!(feature = "all-codecs");
+
+        for c in all_codecs() {
+            let cap = capability(*c);
+            let decodable = cap.status == CodecStatus::Available && cap.decode;
+            let Some(feature) = codec_feature_name(*c) else {
+                // Compiled unconditionally: there is no feature to claim or
+                // omit, and nothing to assert.
+                continue;
+            };
+            assert!(
+                features.contains_key(feature),
+                "{c:?} is governed by `{feature}`, so that feature must exist in Cargo.toml"
+            );
+            if decodable {
+                // Only meaningful while the aggregate is actually on; without it
+                // a missing entry is expected, not a defect.
+                if aggregate_active {
+                    assert!(
+                        claimed.contains(&feature),
+                        "{c:?} decodes in this build, so `all-codecs` must include `{feature}` — \
+                         otherwise the default configuration silently drops a codec the engine \
+                         plays"
+                    );
+                }
+            } else {
+                assert!(
+                    !claimed.contains(&feature),
+                    "{c:?} is {:?}+decode={} in this build, so `all-codecs` must NOT include \
+                     `{feature}`: the aggregate may only claim codecs that decode. Enabling a \
+                     feature that supplies no decoder makes `--all-features` promise a capability \
+                     that does not exist.",
+                    cap.status,
+                    cap.decode
+                );
+            }
+        }
+
+        // Nothing may be claimed that the manifest does not actually define, and
+        // nothing may be claimed that no registry row accounts for — so a
+        // feature cannot smuggle in a codec the registry has never heard of.
+        for feature in &claimed {
+            let (feature, exists) = (*feature, features.contains_key(*feature));
+            assert!(
+                exists,
+                "`all-codecs` names `{feature}`, which is not a feature in Cargo.toml"
+            );
+            let governed = all_codecs()
+                .iter()
+                .any(|c| codec_feature_name(*c) == Some(feature));
+            // `codec-isomp4` supplies the MP4/M4A *container*; the codecs it
+            // carries (AAC, ALAC) have their own rows and their own features.
+            // A container feature legitimately has no codec of its own.
+            let container_only = matches!(feature, "codec-isomp4");
+            assert!(
+                governed || container_only,
+                "`all-codecs` names `{feature}`, which no codec in the registry governs and which \
+                 is not a known container feature — either the feature is vestigial or the \
+                 registry is missing the codec"
+            );
+        }
+    }
 }

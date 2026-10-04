@@ -9,7 +9,7 @@ A routing table. Find the question, read the one document that answers it.
 | **Build the engine for the first time** | [`GETTING_STARTED.md`](GETTING_STARTED.md) — prerequisites, from-scratch build, first playback, first config file |
 | **Embed it in a Rust host** | [`EMBEDDING.md`](EMBEDDING.md) — the two embedding models, lifecycle, sink contract, read-back, realtime-safety contract |
 | **Embed it from C / C++ / Python / C# / Node** | [`EMBEDDING.md`](EMBEDDING.md) §9 — the 47 exported entry points, `backend_id` constants, status codes, and the manual header declaration you have to write yourself |
-| **Know what the engine claims, and what it does not do** | [`../README.md`](../README.md) § Known limitations — spatial rendering is stereo-only in the production graph; no audio input devices; measurement capture is Windows-only; `network-streaming` is non-functional by design; no golden reference files from an external tool |
+| **Know what the engine claims, and what it does not do** | [`../README.md`](../README.md) § Known limitations — no Musepack/TAK decoder; no talkback/duplex; CI opens no physical DAC. Four limitations were closed in 0.9.2 (input devices, portable room measurement, multichannel spatial routing, AES67 receive), and that section records what changed |
 | **See the authoritative engineering contract** | [`ENGINE_SPEC.md`](ENGINE_SPEC.md) — normative requirements, not commentary |
 | **Understand a subsystem without reading Rust** | [`OWNERS_GUIDE.md`](OWNERS_GUIDE.md) — plain-English full-system map, one section per subsystem |
 | **Find which module owns what** | [`ARCHITECTURE.md`](ARCHITECTURE.md) — the module map, dependency graph, concurrency model, feature table |

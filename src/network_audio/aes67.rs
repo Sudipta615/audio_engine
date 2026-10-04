@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// AES67 standard packet times (transmission intervals).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Aes67PacketTime {
     /// 125 microseconds (ultra-low latency: 6 samples @ 48 kHz).
     Us125,
@@ -56,7 +56,7 @@ impl Aes67PacketTime {
 }
 
 /// AES67 linear PCM audio encoding format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Aes67Encoding {
     /// 24-bit linear PCM (mandatory AES67 format, RFC 3190).
     L24,
@@ -81,7 +81,7 @@ impl Aes67Encoding {
 }
 
 /// Structured configuration for an AES67 network audio stream.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Aes67StreamConfig {
     pub stream_name: String,
     pub session_id: u64,

@@ -16,12 +16,12 @@ pub mod versioned_state;
 
 pub use config_file::{load_file_warnings, ConfigFileError};
 pub use dsp_config::{
-    BandConfig, BassManagementConfig, ChannelEqConfig, ChannelEqEntry, ChannelMixConfig,
-    ChannelMixTemplate, ChannelRoutingConfig, ChannelTrimConfig, ChannelTrimEntry,
-    ConvolutionConfig, CorrectionConfig, CorrectionPhaseMode, CorrectionTarget, CrossfadeConfig,
-    CrossfeedConfig, CrossoverFilterType, CrossoverSlope, DynamicEqBandConfig, DynamicEqConfig,
-    EqBandConfig, EqConfig, EqPreset, GraphicEqConfig, GraphicEqLayout, LfeConfig, LimiterConfig,
-    LoudnessConfig, MultibandCompressorConfig, StereoEnhancerConfig,
+    BandConfig, BassManagementConfig, CaptureConfig, ChannelEqConfig, ChannelEqEntry,
+    ChannelMixConfig, ChannelMixTemplate, ChannelRoutingConfig, ChannelTrimConfig,
+    ChannelTrimEntry, ConvolutionConfig, CorrectionConfig, CorrectionPhaseMode, CorrectionTarget,
+    CrossfadeConfig, CrossfeedConfig, CrossoverFilterType, CrossoverSlope, DynamicEqBandConfig,
+    DynamicEqConfig, EqBandConfig, EqConfig, EqPreset, GraphicEqConfig, GraphicEqLayout, LfeConfig,
+    LimiterConfig, LoudnessConfig, MultibandCompressorConfig, StereoEnhancerConfig,
 };
 pub use engine_config::{
     AuxBusConfig, ConfigIssue, ConfigIssueKind, ConfigSeverity, ConfigValidation, EndpointConfig,

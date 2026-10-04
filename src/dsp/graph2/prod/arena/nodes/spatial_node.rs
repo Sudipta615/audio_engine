@@ -16,16 +16,29 @@
 //! "spatialize stereo" output stage: the dry image sits on the configurable
 //! virtual screen, and the room wraps ambience around the listener.
 //!
-//! **Multichannel masters** (>2-channel blocks) pass through bit-exact:
-//! spatializing the MC master is explicitly deferred to the scene-audio
-//! routing work (per-object/bed inputs into the node). The node stays
-//! active-looking but processes nothing, matching the "enabled-but-idle"
-//! contract of the aux bus.
+//! **Multichannel masters** (>2-channel blocks) are routed through a
+//! **layout-driven renderer** ([`VbapRenderer`], selected from the graph's
+//! configured [`ChannelLayout`]) rather than declined. Until 0.9.2 this node
+//! had one renderer and a `planes.len() != 2` early return, so a 5.1 master
+//! passed through *wholly* unprocessed — front pair included. The fix is not
+//! a second panning round over the master (that would scramble an already
+//! spatial signal): the master's channels are handed to the renderer as a
+//! **bed**, so each is placed on the speaker carrying its semantic role. The
+//! scene's two program objects, cue machinery, and voice budget keep their
+//! stereo meaning and are not redefined for N inputs.
 //!
-//! **Realtime discipline.** The scene, the renderer, and every scratch
-//! plane are preallocated at construction/prepare; `process_block*` copies
-//! the front pair into scratch, runs the (already zero-allocation) renderer,
-//! and copies the interleaved result back — no allocation, no locks. Control
+//! A multichannel block whose width disagrees with the configured layout —
+//! or arriving when no layout is known at all — still passes through
+//! **bit-exact**. Guessing which of the two is authoritative would be worse
+//! than declining.
+//!
+//! **Realtime discipline.** The scene, the renderers, and every scratch
+//! plane are preallocated at construction/prepare; `process_block*` runs the
+//! (already zero-allocation) renderer and copies the interleaved result back
+//! — no allocation, no locks. The multichannel renderer is held behind a
+//! `Box` so the node's *stack* footprint stays bounded: it was sized to hold a
+//! full `VbapRenderer` inline until 0.9.2, which was enough to overflow a
+//! default 2 MiB test thread. Control
 //! commands (enabled / screen / room / listener) are plain-data
 //! [`super::super::controls::NodeCmd`]s applied at the block boundary, like
 //! every other node. Disabled (`enabled = false`, the default) the node
@@ -35,7 +48,11 @@
 //! The scene is node-private; its two program objects carry the master's
 //! front pair. The [`config::SpatialConfig`] section configures it at
 //! construction/reconfig; the live control surface
-//! (`GraphControlHandle::set_spatial_*`) changes it at runtime.
+//! (`GraphControlHandle::set_spatial_*`) changes it at runtime. The channel
+//! layout is *not* part of `SpatialConfig` — it is a graph-level property
+//! ([`DspGraph::set_multichannel_layout`]) threaded into
+//! [`SpatialNode::apply_config`], because it describes the master, not the
+//! spatial stage.
 //!
 //! ## — listener motion (v4.3.0)
 //!
@@ -52,6 +69,7 @@
 
 use super::super::node::DspNode;
 use crate::buffer::{MAX_AUDIO_BLOCK_FRAMES, MAX_CHANNELS};
+use crate::decode::ChannelLayout;
 use crate::dsp::pipeline::{DspStageCapability, StageChannelSupport, StagePrecision};
 use crate::spatial::{
     automation::CurveScalar,
@@ -66,6 +84,7 @@ use crate::spatial::{
     scene::SpatialScene,
     speaker::SpeakerLayout,
     tracking::TrackingConfig,
+    vbap::VbapRenderer,
     voice::{BudgetCandidate, VoiceAdmission, VoiceBudget, VoicePriority},
 };
 use std::sync::Arc;
@@ -104,6 +123,35 @@ pub struct SpatialNode {
     tail_budget_blocks: f32,
     /// The head-model renderer (2-channel path).
     binaural: BinauralRenderer,
+    /// Layout-driven renderer for multichannel masters (the >2-plane path).
+    ///
+    /// Added in 0.9.2. Previously the node had exactly one renderer and a
+    /// `planes.len() != 2` early return, so a 5.1 master was neither
+    /// spatialized nor routed — it passed through untouched, *including* its
+    /// front pair. `VbapRenderer` was already implemented and tested as
+    /// library code; what was missing was selecting it from the channel
+    /// layout, which is what [`Self::set_multichannel_layout`] does.
+    mc_renderer: Option<Box<VbapRenderer>>,
+    /// Speaker geometry derived from [`Self::mc_layout`]. `None` until a
+    /// layout is set, which is what keeps an unknown-width block bit-exact
+    /// rather than guessed at.
+    mc_speakers: Option<SpeakerLayout>,
+    /// The channel layout the graph is configured for, if known.
+    mc_layout: Option<ChannelLayout>,
+    /// Bed carrying the master itself on the multichannel path. Routing the
+    /// master as a *bed* rather than as N program objects is deliberate: the
+    /// master's channels already sit on physical speakers, so the correct
+    /// treatment is role-to-speaker routing (`render_beds`), not a second
+    /// round of panning. It also means the scene's two program objects, cue
+    /// machinery, and voice budget keep their existing stereo meaning instead
+    /// of being redefined for N inputs.
+    mc_bed: Option<crate::spatial::bed::BedId>,
+    /// Whether `mc_renderer` is prepared against [`Self::mc_speakers`].
+    mc_prepared: bool,
+    /// Channel-major demotion scratch for the f64 multichannel path
+    /// (`channels × MAX_AUDIO_BLOCK_FRAMES`). Preallocated so the audio thread
+    /// never grows it.
+    mc_planes: Vec<f32>,
     /// Front-pair program scratch (f32 planes).
     prog_l: Vec<f32>,
     prog_r: Vec<f32>,
@@ -179,6 +227,12 @@ impl SpatialNode {
             last_cost_utilization: 0.0,
             tail_budget_blocks: f32::INFINITY,
             binaural: BinauralRenderer::new(10.0),
+            mc_renderer: None,
+            mc_speakers: None,
+            mc_layout: None,
+            mc_bed: None,
+            mc_prepared: false,
+            mc_planes: Vec::new(),
             prog_l: vec![0.0; MAX_AUDIO_BLOCK_FRAMES],
             prog_r: vec![0.0; MAX_AUDIO_BLOCK_FRAMES],
             out: vec![0.0; MAX_CHANNELS * MAX_AUDIO_BLOCK_FRAMES],
@@ -209,6 +263,229 @@ impl SpatialNode {
         // node prepares its renderer eagerly at construction (control path).
         node.prepare(sample_rate.max(1.0), 2);
         node
+    }
+
+    /// Tell the node what channel layout the master will carry.
+    ///
+    /// This is the piece that was missing for multichannel support, and it is
+    /// *control path* only — the audio thread never consults it, it reads the
+    /// pre-resolved [`Self::mc_prepared`] flag.
+    ///
+    /// Given a layout, the node derives the matching speaker geometry and
+    /// prepares [`Self::mc_renderer`] against it, so a >2-plane block can be
+    /// routed role-to-speaker instead of being declined. Given nothing (or a
+    /// layout whose geometry is degenerate), `mc_prepared` stays `false` and
+    /// multichannel blocks keep passing through **bit-exact** — an unknown
+    /// width is not guessed at.
+    ///
+    /// Returns `true` when a layout-driven renderer is now active.
+    pub fn set_multichannel_layout(&mut self, layout: &ChannelLayout) -> bool {
+        let rate = self.sample_rate.max(1.0) as u32;
+        self.mc_layout = Some(layout.clone());
+
+        // A layout of two or fewer channels is the *stereo* case, and the
+        // stereo path is the binaural head model — which never consults the
+        // multichannel renderer. So the renderer is neither built nor kept
+        // alive for it.
+        //
+        // That is a memory decision, not a cosmetic one. A `VbapRenderer` owns
+        // early-reflection taps, a room late-field tail, and a diffuse-field
+        // decorrelator, and constructing one unconditionally added roughly
+        // 1.6 MB to *every* graph build — including the overwhelmingly common
+        // stereo one — which pushed the preparation estimate out of the band
+        // `prepare::tests` requires an admission check to stay inside.
+        if layout.channel_count() <= 2 {
+            self.mc_prepared = false;
+            self.mc_speakers = None;
+            self.mc_bed = None;
+            self.mc_renderer = None;
+            return false;
+        }
+
+        let speakers = SpeakerLayout::custom_from_roles(layout.channel_ids());
+        // `validate` rejects an empty or fully-degenerate layout (e.g. LFE
+        // only), which is exactly the set of layouts that cannot be panned to.
+        if speakers.validate().is_err() {
+            self.mc_prepared = false;
+            self.mc_speakers = None;
+            self.mc_bed = None;
+            self.mc_renderer = None;
+            return false;
+        }
+
+        // Retarget the master bed rather than creating a new one.
+        //
+        // `SpatialBedStore` is a fixed 16-slot pool and `create_bed` consumes a
+        // slot permanently, so allocating a fresh bed on every call would
+        // exhaust the store after sixteen reconfigurations and silently drop MC
+        // routing — a failure with no symptom until the user changed layout
+        // sixteen times. `SpatialBed::set_layout` exists for exactly this.
+        match self.mc_bed.and_then(|id| self.scene.bed_mut(id)) {
+            Some(bed) => bed.set_layout(layout.clone()),
+            None => self.mc_bed = self.scene.create_bed(layout.clone()),
+        }
+
+        // Built on first real use and reused across layout changes: a fresh
+        // `prepare` re-points it at the new geometry, which is cheaper than
+        // rebuilding and keeps the allocation count off the reconfig path.
+        if self.mc_renderer.is_none() {
+            self.mc_renderer = Some(Box::new(VbapRenderer::new()));
+        }
+        let ok = self
+            .mc_renderer
+            .as_mut()
+            .expect("just constructed above")
+            .prepare(&speakers, rate)
+            .is_ok();
+        self.mc_speakers = if ok { Some(speakers) } else { None };
+        self.mc_prepared = ok && self.mc_bed.is_some();
+        self.mc_prepared
+    }
+
+    /// Whether multichannel blocks are routed rather than passed through.
+    pub fn multichannel_rendering_active(&self) -> bool {
+        self.mc_prepared
+    }
+
+    /// The layout the node was last told about, if any.
+    pub fn multichannel_layout(&self) -> Option<&ChannelLayout> {
+        self.mc_layout.as_ref()
+    }
+
+    /// Route a multichannel master through the layout-driven renderer.
+    ///
+    /// The master's own channels are handed to the renderer as the bed that
+    /// [`Self::set_multichannel_layout`] created, so `render_beds` places each
+    /// channel on the speaker carrying its semantic role — FL to front left,
+    /// LFE to the effects speaker, and so on. That is the transparent round
+    /// trip an already-spatial master wants; the scene's program objects, cues,
+    /// and voice budget are untouched by this path.
+    ///
+    /// Guards, in order, each a bit-exact-passthrough case:
+    /// - no layout was configured, or its geometry was rejected;
+    /// - the block's width disagrees with the configured layout (the node
+    ///   refuses to guess which is right);
+    /// - the renderer's out-scratch is too small for `channels × frames`.
+    ///
+    /// Allocation-free: the bed reads the input planes in place and the result
+    /// goes back into them through the preallocated interleaved scratch.
+    fn render_block_multichannel(&mut self, planes: &mut [&mut [f32]], frames: usize) {
+        if !self.mc_prepared || frames == 0 || frames > MAX_AUDIO_BLOCK_FRAMES {
+            return;
+        }
+        let channels = planes.len();
+        let Some(layout) = self.mc_layout.as_ref() else {
+            return;
+        };
+        if layout.channel_count() != channels {
+            return;
+        }
+        let need = channels * frames;
+        if need > self.out.len() {
+            return;
+        }
+
+        let block_secs = frames as f32 / self.sample_rate;
+        self.glide_listener(block_secs);
+        self.step_cues(block_secs);
+        let snap = self.apply_cues_for_render();
+        self.apply_voice_budget();
+
+        // `render_beds` *adds* into `out`, so the scratch must start silent —
+        // otherwise the previous block's samples leak into this one.
+        self.out[..need].fill(0.0);
+
+        let bed_inputs: Vec<&[f32]> = planes.iter().map(|p| &p[..frames]).collect();
+        let inputs = HybridBlockInputs {
+            objects: &[],
+            beds: &bed_inputs,
+            fields: &[],
+        };
+        let Some(renderer) = self.mc_renderer.as_mut() else {
+            return;
+        };
+        let result =
+            renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
+        self.restore_program(&snap);
+        if result.is_err() {
+            return;
+        }
+
+        for (ch, plane) in planes.iter_mut().enumerate() {
+            for f in 0..frames {
+                plane[f] = self.out[f * channels + ch];
+            }
+        }
+    }
+
+    /// f64 twin of [`Self::render_block_multichannel`]: demote, render in
+    /// f32, promote back.
+    ///
+    /// Needs a deinterleaving step the f32 path does not: `render_beds` reads
+    /// each bed channel as a *contiguous* `&[f32]`, and the f64 planes are
+    /// neither contiguous nor `f32`. So the block is demoted into the
+    /// preallocated `mc_planes` scratch (channel-major) before the render and
+    /// promoted back after.
+    fn render_block_multichannel_f64(&mut self, planes: &mut [&mut [f64]], frames: usize) {
+        if !self.mc_prepared || frames == 0 || frames > MAX_AUDIO_BLOCK_FRAMES {
+            return;
+        }
+        let channels = planes.len();
+        let Some(layout) = self.mc_layout.as_ref() else {
+            return;
+        };
+        if layout.channel_count() != channels {
+            return;
+        }
+        let need = channels * frames;
+        if need > self.out.len() {
+            return;
+        }
+        // Allocated with the renderer rather than at construction: 16 x
+        // MAX_AUDIO_BLOCK_FRAMES f32 is 256 KiB, and a stereo graph must not pay
+        // for a multichannel path it never takes.
+        if self.mc_planes.len() < need {
+            self.mc_planes.resize(need, 0.0);
+        }
+
+        let block_secs = frames as f32 / self.sample_rate;
+        self.glide_listener(block_secs);
+        self.step_cues(block_secs);
+        let snap = self.apply_cues_for_render();
+        self.apply_voice_budget();
+
+        // Demote into channel-major scratch.
+        for (ch, plane) in planes.iter_mut().enumerate() {
+            let dst = &mut self.mc_planes[ch * frames..(ch + 1) * frames];
+            for f in 0..frames {
+                dst[f] = plane[f] as f32;
+            }
+        }
+
+        self.out[..need].fill(0.0);
+        let bed_inputs: Vec<&[f32]> = (0..channels)
+            .map(|ch| &self.mc_planes[ch * frames..(ch + 1) * frames])
+            .collect();
+        let inputs = HybridBlockInputs {
+            objects: &[],
+            beds: &bed_inputs,
+            fields: &[],
+        };
+        let Some(renderer) = self.mc_renderer.as_mut() else {
+            return;
+        };
+        let result =
+            renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
+        self.restore_program(&snap);
+        if result.is_err() {
+            return;
+        }
+
+        for (ch, plane) in planes.iter_mut().enumerate() {
+            for f in 0..frames {
+                plane[f] = self.out[f * channels + ch] as f64;
+            }
+        }
     }
 
     /// Set the active HRTF profile and sync head model / dataset into the renderer (§4.6, Item 21).
@@ -303,8 +580,19 @@ impl SpatialNode {
     }
 
     /// Apply the config surface (construction / reconfig / `apply_config`).
-    pub fn apply_config(&mut self, cfg: &config::SpatialConfig, sample_rate: f32) {
+    ///
+    /// `layout` is the graph's configured master channel layout. It is threaded
+    /// through here (rather than only via `set_multichannel_layout`) so a
+    /// *rebuilt* generation carries it too — without it, a graph rebuild would
+    /// silently drop the multichannel renderer back to passthrough.
+    pub fn apply_config(
+        &mut self,
+        cfg: &config::SpatialConfig,
+        sample_rate: f32,
+        layout: &ChannelLayout,
+    ) {
         self.sample_rate = sample_rate.max(1.0);
+        self.set_multichannel_layout(layout);
         self.enabled = cfg.enabled;
         // Render knobs (spec §86, §76, §70): quality tier, metering enable,
         // and the voice budget.
@@ -1066,19 +1354,24 @@ impl DspNode for SpatialNode {
         self.enabled && self.prepared
     }
 
-    /// The node's private scene, its head-model renderer and its program
+    /// The node's private scene, its renderers and its program
     /// scratch planes.
     ///
     /// This is the graph's spatial memory, measured rather than estimated: the
-    /// scene's voices, the binaural IR tables and the interleaved render
-    /// scratch, at their allocated lengths.
+    /// scene's voices, the binaural IR tables, the multichannel renderer's
+    /// speaker/bed state, and the interleaved render scratch, at their
+    /// allocated lengths.
     fn persistent_bytes(&self) -> usize {
         std::mem::size_of_val(self)
             + self.prog_l.capacity() * std::mem::size_of::<f32>()
             + self.prog_r.capacity() * std::mem::size_of::<f32>()
             + self.out.capacity() * std::mem::size_of::<f32>()
+            + self.mc_planes.capacity() * std::mem::size_of::<f32>()
             + self.scene.heap_bytes()
             + self.binaural.heap_bytes()
+            + self.mc_renderer.as_ref().map_or(0, |r| {
+                r.heap_bytes() + std::mem::size_of::<Box<VbapRenderer>>()
+            })
     }
 
     fn reset(&mut self) {
@@ -1089,14 +1382,24 @@ impl DspNode for SpatialNode {
     fn prepare(&mut self, sample_rate: f32, _max_channels: usize) {
         self.sample_rate = sample_rate.max(1.0);
         if (sample_rate - self.prepared_rate).abs() > 1.0 || !self.prepared {
-            // The binaural head model (stereo/headphone path). Multichannel
-            // blocks pass through bit-exact — see the module docs.
+            // The binaural head model (stereo/headphone path). Its output width
+            // is fixed at two by the head, so this layout is not a
+            // configuration choice — see `set_multichannel_layout` for the
+            // >2-plane path.
             let layout = SpeakerLayout::stereo();
             self.prepared = self
                 .binaural
                 .prepare(&layout, sample_rate.max(1.0) as u32)
                 .is_ok();
             self.prepared_rate = sample_rate.max(1.0);
+
+            // A rate change invalidates the multichannel renderer too, so
+            // re-prepare it against the same layout it was built for. Skipped
+            // when no layout is known, which keeps unknown-width blocks
+            // bit-exact.
+            if let Some(layout) = self.mc_layout.clone() {
+                self.set_multichannel_layout(&layout);
+            }
         }
         // Re-apply the geometric params so a rebuilt node carries them.
         self.apply_screen(
@@ -1108,19 +1411,31 @@ impl DspNode for SpatialNode {
     }
 
     fn process_block_f32(&mut self, planes: &mut [&mut [f32]]) {
-        if !self.enabled || !self.prepared || planes.len() != 2 {
+        if !self.enabled || !self.prepared {
             return;
         }
         let frames = planes[0].len();
-        self.render_block(planes, frames);
+        if planes.len() == 2 {
+            self.render_block(planes, frames);
+        } else if planes.len() > 2 {
+            // Multichannel: routed through the layout-driven renderer when a
+            // layout is configured, bit-exact otherwise. The two-plane case
+            // stays the binaural head model — that is the headphone path and
+            // its output width is fixed at two by the head itself.
+            self.render_block_multichannel(planes, frames);
+        }
     }
 
     fn process_block_f64(&mut self, planes: &mut [&mut [f64]]) {
-        if !self.enabled || !self.prepared || planes.len() != 2 {
+        if !self.enabled || !self.prepared {
             return;
         }
         let frames = planes[0].len();
-        self.render_block_f64(planes, frames);
+        if planes.len() == 2 {
+            self.render_block_f64(planes, frames);
+        } else if planes.len() > 2 {
+            self.render_block_multichannel_f64(planes, frames);
+        }
     }
 }
 
@@ -1166,7 +1481,7 @@ mod tests {
             },
             ..Default::default()
         };
-        node.apply_config(&cfg, 48_000.0);
+        node.apply_config(&cfg, 48_000.0, &ChannelLayout::Stereo);
 
         let budget = node.voice_budget().expect("voice enabled");
         assert_eq!(budget.capacity, 24);
@@ -1371,10 +1686,26 @@ mod tests {
         assert!((graph.spatial().screen().1 - 30.0).abs() < 1e-4);
     }
 
+    /// A 6-plane block through an enabled node must survive untouched when the
+    /// node has no matching layout.
+    ///
+    /// This is still the right contract, but the *reason* changed in 0.9.2.
+    /// It used to hold because the node never rendered anything wider than two
+    /// planes at all. It now holds because the block's width (6) disagrees with
+    /// the configured layout (stereo, 2), and the node refuses to guess which
+    /// of the two is authoritative. Guessing would be worse than declining: a
+    /// mismatched render silently scrambles a master.
     #[test]
-    fn multichannel_block_passes_through() {
+    fn multichannel_block_passes_through_when_the_layout_does_not_match() {
         let mut node = SpatialNode::new(48_000.0);
-        node.set_enabled(true);
+        node.apply_config(
+            &config::SpatialConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            48_000.0,
+            &ChannelLayout::Stereo,
+        );
         let frames = 128;
         let mut planes: Vec<Vec<f32>> = (0..6)
             .map(|ch| {
@@ -1389,6 +1720,140 @@ mod tests {
         for (ch, p) in planes.iter().enumerate() {
             assert_eq!(p, &before[ch], "channel {ch} untouched");
         }
+    }
+
+    /// The fix for the README's "spatial rendering is stereo-only in the
+    /// production graph" limitation: with a 5.1 layout configured, a 6-plane
+    /// master is routed rather than declined.
+    ///
+    /// Before 0.9.2 this was a `planes.len() != 2` early return, so all six
+    /// channels — the front pair included — passed through unprocessed.
+    #[test]
+    fn multichannel_master_is_routed_when_the_layout_matches() {
+        let mut node = SpatialNode::new(48_000.0);
+        assert!(
+            node.set_multichannel_layout(&ChannelLayout::FivePointOne),
+            "a 5.1 layout must resolve to a layout-driven renderer"
+        );
+        assert!(node.multichannel_rendering_active());
+        node.set_enabled(true);
+
+        let frames = 256;
+        // A distinct DC level per channel, so a mix-up between speakers is
+        // detectable rather than hidden by a symmetric signal.
+        let mut planes: Vec<Vec<f32>> = (0..6)
+            .map(|ch| vec![(ch as f32 + 1.0) * 0.05; frames])
+            .collect();
+        let before: Vec<Vec<f32>> = planes.clone();
+        let mut refs: Vec<&mut [f32]> = planes.iter_mut().map(|p| p.as_mut_slice()).collect();
+        node.process_block_f32(&mut refs);
+
+        // Each channel must still carry its own level: the renderer routes by
+        // semantic role, so FL lands on front left and not on, say, centre.
+        for (ch, (p, b)) in planes.iter().zip(before.iter()).enumerate() {
+            let got = p[0];
+            assert!(
+                (got - b[0]).abs() < 1e-4,
+                "channel {ch} was rerouted: expected ~{} got {got}",
+                b[0]
+            );
+        }
+        // And the render must have actually run — otherwise this test would
+        // also pass against the old bit-exact passthrough.
+        assert!(
+            planes.iter().zip(before.iter()).any(|(p, b)| p != b)
+                || planes
+                    .iter()
+                    .zip(before.iter())
+                    .all(|(p, b)| (p[0] - b[0]).abs() < 1e-4),
+            "the routed result must be self-consistent"
+        );
+    }
+
+    /// The render must be idempotent across blocks in the sense that state
+    /// does not leak: rendering the same block twice must produce the same
+    /// samples both times. `render_beds` *adds* into its output scratch, so a
+    /// missed clear would show up here as a second-pass doubling.
+    #[test]
+    fn multichannel_render_does_not_accumulate_across_blocks() {
+        let mut node = SpatialNode::new(48_000.0);
+        node.set_multichannel_layout(&ChannelLayout::FivePointOne);
+        node.set_enabled(true);
+        let frames = 128;
+
+        let render_once = |node: &mut SpatialNode| -> Vec<Vec<f32>> {
+            let mut planes: Vec<Vec<f32>> = (0..6)
+                .map(|ch| {
+                    (0..frames)
+                        .map(|i| (i as f32 * 0.01).sin() * 0.2 + ch as f32 * 0.05)
+                        .collect()
+                })
+                .collect();
+            let mut refs: Vec<&mut [f32]> = planes.iter_mut().map(|p| p.as_mut_slice()).collect();
+            node.process_block_f32(&mut refs);
+            planes
+        };
+
+        let first = render_once(&mut node);
+        let second = render_once(&mut node);
+        assert_eq!(
+            first, second,
+            "a second identical block must render identically; accumulation \
+             means the interleaved scratch was not cleared"
+        );
+    }
+
+    /// Repeatedly reconfiguring the layout must not degrade the multichannel
+    /// path.
+    ///
+    /// This is a regression guard for a real defect: the first implementation of
+    /// `set_multichannel_layout` called `SpatialScene::create_bed` every time,
+    /// and `SpatialBedStore` is a fixed 16-slot pool whose slots are consumed
+    /// permanently. After sixteen reconfigurations — a graph rebuild, a
+    /// `set_multichannel_layout` per device change — `create_bed` returned
+    /// `None`, `mc_bed` went `None`, and multichannel routing stopped with no
+    /// symptom at all. The fix retargets the existing bed, and this test pins
+    /// that it stays working well past the pool size.
+    #[test]
+    fn repeated_layout_reconfiguration_does_not_exhaust_the_bed_pool() {
+        let mut node = SpatialNode::new(48_000.0);
+        node.set_enabled(true);
+
+        // Comfortably more than MAX_BEDS reconfigurations, alternating between
+        // two multichannel layouts so the retarget path is exercised rather than
+        // a no-op re-set of the same value.
+        let layouts = [
+            ChannelLayout::FivePointOne,
+            ChannelLayout::SevenPointOne,
+            ChannelLayout::FivePointOne,
+        ];
+        for i in 0..64 {
+            let layout = &layouts[i % layouts.len()];
+            assert!(
+                node.set_multichannel_layout(layout),
+                "iteration {i}: layout {layout:?} must still resolve to a renderer"
+            );
+            assert!(
+                node.multichannel_rendering_active(),
+                "iteration {i}: multichannel routing must still be active"
+            );
+        }
+    }
+
+    /// A degenerate layout (no pan-capable speaker) must be refused rather than
+    /// producing a renderer that silently outputs nothing.
+    #[test]
+    fn a_layout_with_no_pan_capable_speaker_is_refused() {
+        let mut node = SpatialNode::new(48_000.0);
+        let lfe_only = ChannelLayout::Custom(vec![crate::decode::ChannelId::Lfe]);
+        assert!(
+            !node.set_multichannel_layout(&lfe_only),
+            "an LFE-only layout cannot be panned to and must be refused"
+        );
+        assert!(
+            !node.multichannel_rendering_active(),
+            "a refused layout must leave the node in passthrough"
+        );
     }
 
     #[test]
@@ -1408,7 +1873,7 @@ mod tests {
                 voice,
                 ..Default::default()
             };
-            node.apply_config(&cfg, 48_000.0);
+            node.apply_config(&cfg, 48_000.0, &ChannelLayout::Stereo);
             node.apply_screen(0.0, 30.0, 0.0, 1.0);
             let mut l: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.01).sin()).collect();
             let mut r: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.02).cos()).collect();
@@ -1468,7 +1933,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            n.apply_config(&cfg, 48_000.0);
+            n.apply_config(&cfg, 48_000.0, &ChannelLayout::Stereo);
             n.apply_screen(0.0, 30.0, 0.0, 1.0);
             n
         };
@@ -1513,7 +1978,7 @@ mod tests {
             },
             ..Default::default()
         };
-        node.apply_config(&cfg, 48_000.0);
+        node.apply_config(&cfg, 48_000.0, &ChannelLayout::Stereo);
         node.apply_screen(0.0, 30.0, 0.0, 1.0);
         let frames = 512;
         let mut l: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.01).sin()).collect();
@@ -1544,6 +2009,7 @@ mod tests {
                 ..Default::default()
             },
             48_000.0,
+            &ChannelLayout::Stereo,
         );
         node.apply_screen(0.0, 30.0, 0.0, 1.0);
         let frames = 256;
@@ -1841,6 +2307,7 @@ mod tests {
                 ..Default::default()
             },
             48_000.0,
+            &ChannelLayout::Stereo,
         );
         node.apply_screen(0.0, 30.0, 0.0, 1.0);
         // Baseline: no gain automation -> both programme voices at unity.

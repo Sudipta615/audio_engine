@@ -6,6 +6,16 @@
 use super::*;
 
 impl DspGraph {
+    // ── Graph-level layout ────────────────────────────────────────────────
+
+    /// The multichannel layout this graph is configured for.
+    ///
+    /// Read back so a control-path consumer (scene restore, the TUI) can hand
+    /// the *live* layout to a node rather than assuming stereo.
+    pub fn multichannel_layout(&self) -> &ChannelLayout {
+        &self.multichannel_layout
+    }
+
     // ── Mix bus (pre-mix chain) ────────────────────────────────────────────
 
     pub fn mix(&self) -> &MixBusNode {

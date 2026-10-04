@@ -13,7 +13,7 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on.
-version = "0.9.1"
+version = "0.9.2"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
@@ -162,6 +162,21 @@ codec-tta = []
 # The `encode` feature is enabled only for the dev-dependency so tests can
 # generate deterministic `.wv` fixtures at test time (no binary assets).
 codec-wavpack = ["dep:wavicle"]
+# DECLARED BUT NOT DECODABLE. Musepack (`.mpc`/`.mp+`/`.mpp`) is declared in
+# `decode::Codec` so the format is *named* and reported rather than silently
+# unknown, and opening one fails with an explicit, actionable error
+# (`src/decode/decoder.rs`). It is a no-op feature for the same reason
+# `codec-dsd` is: it enables no decoder, because **no pure-Rust Musepack
+# decoder exists to enable**. Symphonia 0.6.1 has no Musepack support in any
+# feature combination (its codec set is AAC/ADPCM/ALAC/FLAC/MP1/MP2/MP3/PCM/
+# Vorbis), and the only alternatives are an FFI binding to `libmpcdec` — which
+# this project deliberately does without — or writing a decoder from scratch.
+#
+# It is therefore NOT listed in `all-codecs` below. That aggregate means "every
+# codec this build can actually decode"; including a declared-but-undecodable
+# codec here would make `--all-features` imply a capability that does not
+# exist, which is the exact kind of false claim the codec registry's
+# `DeclaredUnavailable` status exists to prevent.
 codec-musepack = []
 
 # Native NetCDF-classic (CDF) SOFA / AES69 HRTF importer (`spatial::sofa::import_sofa`),
@@ -171,19 +186,20 @@ codec-musepack = []
 # with a typed error (documented HDF5 seam).
 sofa-import = []
 
-# UNUSABLE. Pulls in the `ureq` blocking HTTP client (pure Rust, no async
-# runtime) and compiles `audio_io::NetworkByteSource`, but nothing constructs
-# one: no code path routes a URI into it, and `Decoder` is not streaming end to
-# end. An `http(s)` URI is refused with an explicit, actionable error rather
-# than opened as a literal filesystem path.
+# Open and decode an `http(s)://` URI over HTTP Range requests, via
+# `decode::stream::open_remote`. Pulls in `ureq`, the blocking HTTP client
+# (pure Rust, no async runtime).
 #
-# Kept, rather than deleted, because removing the feature would also remove
-# `NetworkByteSource` -- a Range-request byte source that is a reasonable
-# foundation for the streaming work. What is not kept is the claim that the
-# feature does something: `decode::uri_to_local_path` refuses remote URIs with
-# a message naming this feature, and the network-source path is documented as
-# incomplete in `README.md`. (This comment used to point at
-# `docs/GETTING_STARTED.md`, which does not exist.)
+# This feature used to be non-functional: it compiled `NetworkByteSource`, but
+# nothing ever constructed one — no code path routed a URI into it and `Decoder`
+# had no streaming backend — so remote URIs were refused. It is now wired end to
+# end: `decode::resolve_uri` classifies an `AudioSource::Uri` as local or remote,
+# the four `Uri` call sites branch on that, and a remote target decodes through
+# the same Symphonia backend a local file uses. `tests/fidelity/network_streaming`
+# drives it against a loopback HTTP server and is the guard on that wiring.
+#
+# Not in `default`: a network dependency most local playback never uses, and
+# blocking HTTP I/O on the decode thread is a real cost to opt into knowingly.
 network-streaming = ["dep:ureq"]
 
 # Write loudness metadata (EBU R128 / ReplayGain) back into file tags.
@@ -197,6 +213,11 @@ fingerprint = ["dep:chromaprint-next"]
 # opaque-pointer API in `src/ffi.rs` instead of linking the Rust crate directly.
 c-ffi = []
 
+# Every codec this build can actually *decode*. Deliberately excludes
+# `codec-musepack`, which is a declared-but-undecodable no-op (see its entry
+# above), and `codec-dsd`, whose decoder is compiled unconditionally. Adding a
+# name here is a claim that `.ext` files decode — `decode::codecs` has a test
+# that holds the registry and the decode dispatch to that claim.
 all-codecs = [
     "codec-mp3",
     "codec-flac",
@@ -212,7 +233,6 @@ all-codecs = [
     "codec-opus",
     "codec-tta",
     "codec-wavpack",
-    "codec-musepack",
 ]
 
 
@@ -231,10 +251,10 @@ realfft = "3.5"
 # cepstral minimum-phase, hybrid-phase rendering. Same crate realfft builds
 # on, so this adds no new compiled code.
 rustfft = "6.2"
-config = { path = "crates/config", version = "0.9.1" }
+config = { path = "crates/config", version = "0.9.2" }
 # The Rust-native plugin ABI + host. Default features off —
 # the `plugin-dylib` engine feature pulls in the loader.
-plugin-abi = { path = "crates/plugin-abi", version = "0.9.1", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.2", default-features = false }
 thread-priority = { version = "3.1", optional = true }
 # Pure-Rust Monkey's Audio (APE) decoder, enabled by the `codec-ape` feature.
 ape-decoder = { version = "0.3.2", optional = true }
@@ -350,8 +370,8 @@ rusty-opus = "0.9.1"
 # `.wv` fixtures at test time (no committed binary assets).
 wavicle = { version = "0.1", features = ["encode"] }
 # The reference plugin (in-process, via the static registry).
-plugin-abi = { path = "crates/plugin-abi", version = "0.9.1", default-features = false }
-plugin-test-echo = { path = "crates/plugin-test-echo", version = "0.9.1", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.2", default-features = false }
+plugin-test-echo = { path = "crates/plugin-test-echo", version = "0.9.2", default-features = false }
 # Parses `testdata/fixtures.toml` for the decode fixture smoke test. Test-only:
 # the library itself has no TOML dependency.
 toml = "0.8"
@@ -753,6 +773,14 @@ path = "tests/fidelity/realtime_budget.rs"
 name = "decode_streaming"
 path = "tests/fidelity/decode_streaming.rs"
 
+# End-to-end HTTP streaming decode (`network-streaming`). Drives a hand-rolled
+# loopback HTTP server, so it is the only suite that touches a socket — and the
+# reason the feature cannot silently regress to "compiles but opens nothing".
+[[test]]
+name = "network_streaming"
+path = "tests/fidelity/network_streaming.rs"
+required-features = ["network-streaming"]
+
 # Playlist file I/O through the engine command path (M3U / PLS / XSPF).
 [[test]]
 name = "playlist_io"
@@ -846,3 +874,7 @@ lto = "thin"
 [profile.bench]
 # Benchmarks should measure the same code shape users run.
 lto = "thin"
+
+[[test]]
+name = "headless_output_matrix"
+path = "tests/headless_output_matrix.rs"

@@ -169,6 +169,35 @@ fn test_headless_engine_lifecycle_and_events() {
     let _ = std::fs::remove_file(track2);
 }
 
+/// How long to wait for the worker thread to open a track.
+///
+/// # Why this is profile-dependent
+///
+/// The test asserts that a *background* tick thread opens the track within a
+/// wall-clock budget. That budget is only a statement about the engine if the
+/// engine is compiled the way it ships. In a debug build the decoder and the
+/// DSP graph run unoptimised, and first-time initialisation (device open, plan
+/// compilation, scratch allocation) can plausibly take longer than the whole
+/// budget — so a fixed 3 s limit measures the compiler, not the engine, and the
+/// test fails for reasons that have nothing to do with what it is checking.
+///
+/// This is the same trap as `tests/fidelity/realtime_budget`, which guards its
+/// wall-clock assertion the same way. Note also that before that guard was a
+/// compile-time failure, `cargo test --workspace` could not build in the default
+/// profile *at all* — so this test was never actually being run in debug, and
+/// its debug-profile behaviour was untested rather than passing.
+///
+/// CI runs the suite with `--release`, which is the configuration the 3 s figure
+/// was calibrated for; the debug figure is deliberately generous, because a
+/// generous budget costs a slow test and a tight one costs a wrong signal.
+fn open_deadline() -> std::time::Duration {
+    if cfg!(debug_assertions) {
+        std::time::Duration::from_secs(60)
+    } else {
+        std::time::Duration::from_secs(3)
+    }
+}
+
 #[test]
 fn test_headless_engine_driven_by_tick_blocking_thread() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -198,9 +227,12 @@ fn test_headless_engine_driven_by_tick_blocking_thread() {
     handle.open_file(track.clone());
     handle.play();
 
-    // Wait for the track to open and play
+    // Wait for the track to open and play. The budget is profile-dependent —
+    // see `open_deadline` for why a fixed limit would be measuring the wrong
+    // thing in a debug build.
     let mut opened = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let budget = open_deadline();
+    let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline {
         if let Ok(EngineEvent::SourceOpened { .. }) =
             event_rx.recv_timeout(Duration::from_millis(50))
@@ -211,16 +243,33 @@ fn test_headless_engine_driven_by_tick_blocking_thread() {
     }
     assert!(
         opened,
-        "Track must open when driven by tick_blocking thread"
+        "Track must open when driven by tick_blocking thread (waited up to {budget:?}; \
+         see `open_deadline` for why this is profile-dependent)"
     );
 
     let info = handle.playback_info();
     assert_eq!(info.sample_rate, 44100);
 
-    // Stop and shutdown
+    // Stop and shutdown.
+    //
+    // Polled with a deadline rather than a fixed sleep. A bare
+    // `sleep(50ms); assert_eq!(state, Stopped)` asserts two things — that the
+    // engine stops, *and* that it stops within 50 ms — but the second is a
+    // statement about the machine, not the engine, and the background thread
+    // here is running the unoptimised DSP in a debug build. Polling keeps the
+    // assertion that matters ("it does stop") and drops the one that does not.
+    // A stop that never lands still fails, at the deadline.
     handle.stop();
-    std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(handle.state(), PlaybackState::Stopped);
+    let stop_budget = open_deadline();
+    let stop_deadline = std::time::Instant::now() + stop_budget;
+    while handle.state() != PlaybackState::Stopped && std::time::Instant::now() < stop_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        handle.state(),
+        PlaybackState::Stopped,
+        "the engine must reach Stopped after `stop()`, within {stop_budget:?}"
+    );
 
     running.store(false, Ordering::Relaxed);
     let _ = worker.join();

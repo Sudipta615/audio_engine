@@ -157,6 +157,35 @@ impl VbapRenderer {
         Self::with_smoothing(DEFAULT_SMOOTHING_MS)
     }
 
+    /// Heap held by this renderer's preallocated state, in bytes.
+    ///
+    /// Added in 0.9.2 alongside the production node's use of this renderer on
+    /// the multichannel path: `DspNode::persistent_bytes` reports the graph's
+    /// spatial memory as a measured number, and it cannot measure a renderer
+    /// that does not say how big it is. Mirrors
+    /// [`BinauralRenderer::heap_bytes`](crate::spatial::binaural::BinauralRenderer::heap_bytes).
+    ///
+    /// Only the vectors this renderer owns directly are counted — the nested
+    /// room/field mixers keep their own accounting, exactly as the binaural
+    /// twin documents.
+    pub fn heap_bytes(&self) -> usize {
+        fn t<T>(v: &[T]) -> usize {
+            std::mem::size_of_val(v)
+        }
+        t(&self.pan)
+            + t(&self.triplets)
+            + t(&self.pairs)
+            + t(&self.out_trim)
+            + t(&self.sm)
+            + t(&self.sm_lfe)
+            + t(&self.occ)
+            + t(&self.abs)
+            + t(&self.nf)
+            + t(&self.doppler)
+            + t(&self.bed_roles)
+            + t(&self.late_scratch)
+    }
+
     /// Create a renderer with a custom smoothing time constant (ms).
     /// `smooth_ms <= 0.0` disables smoothing (= exact target gains).
     pub fn with_smoothing(smooth_ms: f32) -> Self {

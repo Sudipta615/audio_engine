@@ -186,6 +186,12 @@ impl DspGraph {
                 .map(|(i, _)| i)
                 .collect(),
         );
+        // The spatial node needs the same layout: it is what selects a
+        // layout-driven renderer for a >2-plane master instead of declining the
+        // block. Until 0.9.2 this field reached only the trimmer, which is
+        // why the node could not know the master's channel semantics even
+        // though the graph had been told them.
+        self.spatial_mut().set_multichannel_layout(layout);
     }
 
     pub fn sample_rate(&self) -> f32 {

@@ -191,6 +191,14 @@ impl PlaylistFormat {
                 AudioSource::CueSegment(seg) => {
                     Err(PlaylistIoError::NotRepresentable(seg.display_label()))
                 }
+                // A network stream has no stable portable identity in a
+                // playlist file: the group address, payload type, and codec are
+                // not expressible in M3U/PLS/XSPF, and writing the address
+                // alone would lose the encoding and silently decode to noise.
+                // Refused rather than half-written.
+                AudioSource::NetworkStream(_) => {
+                    Err(PlaylistIoError::NotRepresentable(source.display_name()))
+                }
             })
             .collect()
     }

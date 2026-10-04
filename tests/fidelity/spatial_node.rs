@@ -188,18 +188,22 @@ fn live_enable_survives_a_generation_rebuild() {
     assert!(r.iter().all(|v| v.is_finite()));
 }
 
+/// A multichannel block whose width does not match the graph's configured
+/// layout must stay bit-exact.
+///
+/// This is still a required guarantee, but it is no longer the *only*
+/// multichannel behaviour: since 0.9.2 the node routes a multichannel master
+/// through a layout-driven renderer when — and only when — it knows the
+/// master's channel semantics. Here the graph is left on its default stereo
+/// layout while fed 5.1, so the node must decline rather than guess.
 #[test]
-fn multichannel_master_passes_through_bit_exact() {
-    // The node renders the stereo path only (documented seam): an MC block
-    // through the graph's multichannel entry point stays untouched.
-    let mut graph = DspGraph::from_config(&EngineConfig::default(), SR as f32);
-    graph.set_spatial_enabled(true);
-    graph.drain_queued_control();
+fn multichannel_master_passes_through_bit_exact_when_the_layout_is_unknown() {
     let layout = ChannelLayout::FivePointOne;
     let channels = layout.channel_count();
     let frames = 128;
     let run = |enabled: bool| -> Vec<f32> {
         let mut g = DspGraph::from_config(&EngineConfig::default(), SR as f32);
+        // Deliberately NOT calling `set_multichannel_layout(&layout)`.
         g.set_spatial_enabled(enabled);
         g.drain_queued_control();
         let mut interleaved: Vec<f32> = (0..channels * frames)
@@ -211,7 +215,50 @@ fn multichannel_master_passes_through_bit_exact() {
     let on = run(true);
     let off = run(false);
     assert_eq!(on, off, "MC output bit-exact with the node enabled");
-    let _ = graph; // the local `graph` was built with the node enabled
+}
+
+/// The other half of the same contract: with the layout configured, a
+/// multichannel master is routed rather than passed through, and the routing
+/// is stable across repeated blocks (the interleaved scratch is cleared, so
+/// `render_beds`' accumulate-into-output behaviour cannot double the signal).
+#[test]
+fn multichannel_master_is_routed_once_the_layout_is_configured() {
+    let layout = ChannelLayout::FivePointOne;
+    let channels = layout.channel_count();
+    let frames = 128;
+    let run = |enabled: bool, set_layout: bool| -> Vec<f32> {
+        let mut g = DspGraph::from_config(&EngineConfig::default(), SR as f32);
+        if set_layout {
+            g.set_multichannel_layout(&layout);
+        }
+        g.set_spatial_enabled(enabled);
+        g.drain_queued_control();
+        let mut interleaved: Vec<f32> = (0..channels * frames)
+            .map(|i| (i as f32 * 0.001).sin() * 0.25)
+            .collect();
+        g.process_block_multichannel(&mut interleaved, channels);
+        interleaved
+    };
+
+    let routed_on = run(true, true);
+    let routed_off = run(false, true);
+    assert!(
+        routed_on != routed_off,
+        "with a 5.1 layout configured, enabling the node must change the \
+         multichannel output — otherwise the layout-driven renderer is not \
+         actually in the path"
+    );
+    assert!(
+        routed_on.iter().all(|v| v.is_finite()),
+        "the routed multichannel output must be finite"
+    );
+
+    // Block-to-block stability: the same block twice must render identically.
+    assert_eq!(
+        routed_on,
+        run(true, true),
+        "an identical second block must render identically (no accumulation)"
+    );
 }
 
 #[test]

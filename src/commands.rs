@@ -429,13 +429,37 @@ pub enum EngineCommand {
     /// Start capturing the system mix (WASAPI loopback) to a WAV file.
     /// `path` defaults to `capture.wav`. No-op unless the `wasapi-native`
     /// feature is compiled in on Windows.
+    ///
+    /// On platforms without a loopback backend this falls back to recording a
+    /// real input device, so it never silently no-ops — but a host that means
+    /// "record the microphone" should use [`Self::CaptureStartInput`], which is
+    /// unambiguous on every platform.
     CaptureStart {
         /// Output WAV path (`None` → `capture.wav` in the current directory).
         path: Option<std::path::PathBuf>,
         /// Render endpoint to capture (`None` → system default).
         device: Option<String>,
     },
-    /// Stop the active system-audio capture and finalize its WAV file.
+    /// Start recording from an input device (microphone, line-in, interface
+    /// input) to a WAV file.
+    ///
+    /// Portable: implemented on Linux, macOS and Windows via cpal, which is a
+    /// required dependency. `device` matches the device name
+    /// (case-insensitive substring) or a stable id; `None` selects the
+    /// platform default input. `path` defaults to `capture.wav`.
+    CaptureStartInput {
+        /// Output WAV path (`None` → `capture.wav` in the current directory).
+        path: Option<std::path::PathBuf>,
+        /// Input device to capture (`None` → system default).
+        device: Option<String>,
+    },
+    /// Report every input device this host can capture from, via
+    /// [`EngineEvent::InputDeviceList`](crate::events::EngineEvent::InputDeviceList).
+    ///
+    /// Empty list = the host has no capture device. This is a query with a
+    /// data-carrying reply because `EngineCommand` is write-only.
+    EnumerateInputDevices,
+    /// Stop the active capture and finalize its WAV file.
     CaptureStop,
 
     // ── Runtime DSP & Mix Controls (Punch List P1 Items 20 & 21) ───────

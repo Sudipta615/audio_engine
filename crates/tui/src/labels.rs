@@ -107,6 +107,7 @@ cycleable!(
         ExclusiveAsio => "ASIO",
         PipeWire => "PipeWire",
         Jack => "JACK",
+        Null => "null (no device)",
         Custom => "custom",
     }
 );

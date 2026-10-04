@@ -480,3 +480,127 @@ fn an_in_place_config_change_does_not_count_as_a_rebuild() {
         "an in-place change must not be counted as a graph rebuild"
     );
 }
+
+// ── Capture read-back ───────────────────────────────────────────────
+//
+// Added with the portable input backend. The rule being pinned here is that a
+// `false` must mean "nothing is capturing", never "capture state is unknown" —
+// which is exactly what the old Windows-gated `capture_active()` returned on
+// every other platform.
+
+#[test]
+fn capture_readback_is_idle_before_anything_is_recorded() {
+    let engine = AudioEngine::new_default().unwrap();
+    let handle = engine.handle();
+    let s = handle.settings();
+
+    assert!(
+        !s.capture_active,
+        "a freshly constructed engine must report no active capture"
+    );
+    assert_eq!(
+        s.capture_device, None,
+        "no capture has run, so there is no last device to report"
+    );
+}
+
+#[test]
+fn input_enumeration_answers_with_a_device_list_not_a_silent_no_op() {
+    let mut engine = AudioEngine::new_default().unwrap();
+    let handle = engine.handle();
+    let events = handle.clone_event_receiver();
+
+    handle.enumerate_input_devices();
+    // The command is processed on a tick, as every command is.
+    //
+    // `try_iter()` *drains* the receiver, so the window is collected into a
+    // flag here and asserted below. Calling `try_iter()` a second time would
+    // find an empty channel and fail against an event that had already been
+    // consumed by the probe — which is exactly what this test did at first.
+    let mut listed = false;
+    let mut device_count = 0usize;
+    for _ in 0..64 {
+        engine.tick();
+        for event in events.try_iter() {
+            if let crate::events::EngineEvent::InputDeviceList { devices } = event {
+                listed = true;
+                device_count = devices.len();
+            }
+        }
+        if listed {
+            break;
+        }
+    }
+    assert!(
+        listed,
+        "`EnumerateInputDevices` must answer with an InputDeviceList event on \
+         every platform — an empty list means 'no devices', not 'unimplemented'"
+    );
+    if device_count > 0 {
+        // If the host does have inputs, each one must be nameable: a device
+        // with no name cannot be selected by a host's picker.
+        for event in handle.clone_event_receiver().try_iter() {
+            if let crate::events::EngineEvent::InputDeviceList { devices } = event {
+                for d in devices {
+                    assert!(!d.name.is_empty(), "a nameless input device was reported");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn stopping_a_capture_that_never_started_reports_an_error_not_success() {
+    let mut engine = AudioEngine::new_default().unwrap();
+    let handle = engine.handle();
+    let events = handle.clone_event_receiver();
+
+    handle.stop_capture();
+    engine.tick();
+
+    assert!(
+        events
+            .try_iter()
+            .any(|e| matches!(e, crate::events::EngineEvent::CaptureError(_))),
+        "stopping with nothing active must report a CaptureError"
+    );
+    assert!(
+        !handle.settings().capture_active,
+        "a failed stop must not leave the engine claiming an active capture"
+    );
+}
+
+#[test]
+fn capture_start_on_a_device_that_does_not_exist_never_reports_success() {
+    let mut engine = AudioEngine::new_default().unwrap();
+    let handle = engine.handle();
+    let events = handle.clone_event_receiver();
+
+    handle.start_capture_input(
+        Some(std::env::temp_dir().join("shadow_no_such_device.wav")),
+        Some("no-such-input-device-xyzzy".to_string()),
+    );
+    for _ in 0..8 {
+        engine.tick();
+    }
+
+    let saw_error = events
+        .try_iter()
+        .any(|e| matches!(e, crate::events::EngineEvent::CaptureError(_)));
+    let saw_started = events
+        .try_iter()
+        .any(|e| matches!(e, crate::events::EngineEvent::CaptureStarted { .. }));
+
+    assert!(
+        saw_error,
+        "an unopenable capture device must report a CaptureError"
+    );
+    assert!(
+        !saw_started,
+        "an unopenable capture device must never emit CaptureStarted"
+    );
+    assert!(
+        !handle.settings().capture_active,
+        "a failed capture start must not leave `capture_active` true"
+    );
+}

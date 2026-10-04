@@ -9,10 +9,23 @@
 //!   differing only in phase/latency;
 //! * the reported correction latency matches the IR group delay.
 //!
-//! The live-toggle / IR-hot-load-across-a-generation-swap and
-//! `position_secs_compensated` acceptance live in the engine command tests
-//! (`src/engine/tests/commands.rs`), which exercise the engine's real
-//! reconfigure path.
+//! # What this suite does *not* cover
+//!
+//! These are all pure-DSP and graph-level tests driven by a synthetic room
+//! (`convolve(sweep.samples(), &room)`), so they never touch a capture device.
+//!
+//! Two gaps are known and stated rather than implied:
+//!
+//! * The **command-level** acceptance — `EngineCommand::LoadCorrectionIr`,
+//!   `MeasureRoom`, and the live-toggle / IR-hot-load-across-a-generation-swap
+//!   path — has **no tests anywhere in the tree**. An earlier version of this
+//!   file claimed those lived in `src/engine/tests/commands.rs`; they do not,
+//!   and it does not. Adding them needs a capture backend that can be driven
+//!   headlessly, which is the same missing piece that keeps integrated room
+//!   measurement Windows-only.
+//! * `position_secs_compensated` is covered for the *graph latency* accounting
+//!   in `latency_alignment`, not for the correction stage's contribution
+//!   end-to-end through the engine.
 
 use std::sync::Arc;
 

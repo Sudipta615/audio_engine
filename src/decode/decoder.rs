@@ -75,6 +75,7 @@ fn buf_and_open_file<T>(
     result
 }
 
+use crate::decode::aes67_source::Aes67Decoder;
 use crate::decode::dsd::{DsdDecoder, DsdError};
 use crate::decode::shared_pcm::SharedPcmDecoder;
 #[cfg(feature = "codec-ape")]
@@ -88,14 +89,22 @@ use crate::decode::WavpackDecoder;
 use crate::decode::{AudioFormatInfo, DecodeError, DecodeInfo, DecodedChunk, SymphoniaDecoder};
 
 /// A decoded source: native DSD (DSF/DFF), Monkey's Audio (APE), Ogg Opus
-/// (RFC 7845), TTA (True Audio), a pre-decoded shared payload, or a
-/// Symphonia-supported codec.
+/// (RFC 7845), TTA (True Audio), a pre-decoded shared payload, a live AES67 /
+/// RTP stream, or a Symphonia-supported codec.
 pub enum Decoder {
     Symphonia(SymphoniaDecoder),
     Dsd(DsdDecoder),
     /// Already-decoded PCM handed over by the control plane: no file is opened
     /// and no decode runs, but the pipeline downstream is identical.
     SharedPcm(SharedPcmDecoder),
+    /// A live AES67 / RTP multicast stream.
+    ///
+    /// The one arm that is *not* finite: it has no duration, returns silence
+    /// rather than stalling when the group is quiet, and reports
+    /// `EndOfStream` only once its receiver has stopped. See
+    /// [`Aes67Decoder`](crate::decode::aes67_source::Aes67Decoder) for the
+    /// underrun policy.
+    Aes67(Aes67Decoder),
     #[cfg(feature = "codec-ape")]
     Ape(ApeDecoder),
     #[cfg(feature = "codec-opus")]
@@ -243,10 +252,16 @@ impl Decoder {
             }
             crate::source::AudioSource::Uri(uri) => {
                 // One shared resolution, so an http(s) URI cannot quietly become
-                // a filesystem open here and something else elsewhere.
-                let path =
-                    crate::decode::uri_to_local_path(uri).map_err(DecodeError::InvalidSource)?;
-                Self::open(&path)
+                // a filesystem open here and something else elsewhere. A URL is
+                // not a path, so `resolve_uri` classifies it instead of
+                // collapsing it; `open_remote` reports a typed error when this
+                // build cannot stream.
+                match crate::decode::resolve_uri(uri).map_err(DecodeError::InvalidSource)? {
+                    crate::decode::UriTarget::Local(path) => Self::open(&path),
+                    crate::decode::UriTarget::Remote(url) => {
+                        crate::decode::stream::open_remote(&url)
+                    }
+                }
             }
             crate::source::AudioSource::Memory {
                 data,
@@ -254,6 +269,12 @@ impl Decoder {
             } => Self::open_memory(data.clone(), extension_hint.as_deref()),
             crate::source::AudioSource::SharedPcm(pcm) => {
                 Ok(Self::SharedPcm(SharedPcmDecoder::new(pcm.clone())))
+            }
+            crate::source::AudioSource::NetworkStream(cfg) => {
+                // Opens the socket and joins the multicast group here, so a
+                // host that names an unreachable group fails at `Open` with a
+                // typed error rather than playing silence forever.
+                Ok(Self::Aes67(Aes67Decoder::new(cfg.as_ref().clone())?))
             }
         }
     }
@@ -264,6 +285,7 @@ impl Decoder {
             Self::Symphonia(d) => d.decode_next(max_frames),
             Self::Dsd(d) => d.decode_next(max_frames),
             Self::SharedPcm(d) => d.decode_next(max_frames),
+            Self::Aes67(d) => d.decode_next(max_frames),
             #[cfg(feature = "codec-ape")]
             Self::Ape(d) => d.decode_next(max_frames),
             #[cfg(feature = "codec-opus")]
@@ -281,6 +303,7 @@ impl Decoder {
             Self::Symphonia(d) => d.seek(position_secs),
             Self::Dsd(d) => d.seek(position_secs),
             Self::SharedPcm(d) => d.seek(position_secs),
+            Self::Aes67(d) => d.seek(position_secs),
             #[cfg(feature = "codec-ape")]
             Self::Ape(d) => d.seek(position_secs),
             #[cfg(feature = "codec-opus")]
@@ -297,6 +320,7 @@ impl Decoder {
             Self::Symphonia(d) => d.info(),
             Self::Dsd(d) => d.info(),
             Self::SharedPcm(d) => d.info(),
+            Self::Aes67(d) => d.info(),
             #[cfg(feature = "codec-ape")]
             Self::Ape(d) => d.info(),
             #[cfg(feature = "codec-opus")]
@@ -313,6 +337,7 @@ impl Decoder {
             Self::Symphonia(d) => d.duration_secs(),
             Self::Dsd(d) => d.duration_secs(),
             Self::SharedPcm(d) => d.duration_secs(),
+            Self::Aes67(d) => d.duration_secs(),
             #[cfg(feature = "codec-ape")]
             Self::Ape(d) => d.duration_secs(),
             #[cfg(feature = "codec-opus")]
@@ -330,6 +355,7 @@ impl Decoder {
             Self::Symphonia(d) => d.format_info(),
             Self::Dsd(d) => d.format_info(),
             Self::SharedPcm(d) => d.format_info(),
+            Self::Aes67(d) => d.format_info(),
             #[cfg(feature = "codec-ape")]
             Self::Ape(d) => d.format_info(),
             #[cfg(feature = "codec-opus")]
@@ -383,6 +409,7 @@ impl Decoder {
         match self {
             Self::Dsd(d) => d.dop_rate(),
             Self::Symphonia(_) | Self::SharedPcm(_) => None,
+            Self::Aes67(_) => None,
             #[cfg(feature = "codec-ape")]
             Self::Ape(_) => None,
             #[cfg(feature = "codec-opus")]

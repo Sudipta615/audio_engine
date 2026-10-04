@@ -1,7 +1,7 @@
 //! The producer's per-tick allocation count, measured rather than assumed.
 //!
 //! `PlaybackInfo` is published through an `ArcSwap`, so every write clones the
-//! struct — 1 624 bytes, plus whatever its heap fields currently hold — and
+//! struct — 1 640 bytes, plus whatever its heap fields currently hold — and
 //! allocates one `Arc`. On a 5 ms tick that is 200 publishes a second, and it
 //! was long assumed to be the reason the producer thread churns the heap: a
 //! structure carrying six `Vec`s and five `String`/`Option<String>` fields,
@@ -78,8 +78,28 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
+/// Serialises the measuring tests.
+///
+/// `ARMED` and `ALLOCATIONS` are **process-global**, and cargo runs the tests in
+/// one binary concurrently. Two tests measuring at once therefore count each
+/// other's allocations — which shows up as an idle tick costing "2.000
+/// allocations" purely because a playing-tick test happened to be mid-flight in
+/// another thread. That is a defect in the harness rather than in the engine,
+/// but it reads exactly like an engine regression, so it is guarded here.
+static MEASURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the measurement lock, poisoning-tolerant: a panicking test must not
+/// cascade into every other test in this binary.
+fn measurement_guard() -> std::sync::MutexGuard<'static, ()> {
+    MEASURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Count allocations across `ticks` calls, after `warmup` untimed calls so
 /// one-time construction is not priced into the steady state.
+///
+/// The caller must hold [`measurement_guard`].
 fn allocations_per_tick(ticks: usize, warmup: usize) -> f64 {
     let mut engine = engine::engine::AudioEngine::new_default().expect("engine");
     for _ in 0..warmup {
@@ -136,6 +156,7 @@ fn sine_wav(secs: f32) -> std::path::PathBuf {
 /// re-adds per-tick construction of any of the heavy fields.
 #[test]
 fn an_idle_tick_costs_exactly_one_allocation() {
+    let _guard = measurement_guard();
     let per_tick = allocations_per_tick(200, 20);
     assert!(
         (per_tick - 1.0).abs() < 1e-9,
@@ -156,6 +177,7 @@ fn an_idle_tick_costs_exactly_one_allocation() {
 /// enough that the 106 of an ungated tick fails it by a wide margin.
 #[test]
 fn a_playing_tick_stays_far_below_the_ungated_cost() {
+    let _guard = measurement_guard();
     let path = sine_wav(120.0);
     let mut engine = engine::engine::AudioEngine::new_default().expect("engine");
     engine.send_command(EngineCommand::Open(AudioSource::from_file(&path)));
@@ -204,11 +226,19 @@ fn a_playing_tick_stays_far_below_the_ungated_cost() {
 /// them and this same test measured **8** allocations per idle tick instead of
 /// 1. Keeping the snapshot behind an `Arc` moves that cost to the reader (a UI
 ///    polling at 30–60 Hz) instead of the engine tick, which is where it belongs.
+///
+/// `1632 → 1640`: the two `EngineSettings` capture read-back fields added in
+/// 0.9.2 (`capture_active: bool`, `capture_device: Option<String>`). Eight
+/// bytes, absorbed into existing tail padding — so the per-tick memcpy grows by
+/// nothing measurable, and the idle allocation count is unchanged (verified:
+/// still exactly 1.000). Recorded here because the point of the assert is that
+/// a field addition shows up as a diff against a known number rather than as a
+/// slower machine.
 #[test]
 fn playback_info_size_is_known() {
     assert_eq!(
         std::mem::size_of::<PlaybackInfo>(),
-        1632,
+        1640,
         "PlaybackInfo changed size; the per-tick memcpy above is proportional to it, \
          so re-measure and update the figures in this file's module docs."
     );

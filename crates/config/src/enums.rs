@@ -24,6 +24,13 @@ pub enum AudioBackend {
     PipeWire,
     /// Native Linux JACK pro-audio output backend.
     Jack,
+    /// Hardware-free sink. Drains the master ring on a real-time-shaped
+    /// schedule and discards the audio, opening no OS device — for headless
+    /// qualification, CI, and hosts that want the engine's timing without a
+    /// DAC. It never claims bit-perfectness: `OutputInfo::is_exclusive` is
+    /// `false` and the access state reads `Shared`/unverified, because there
+    /// is no mixer to bypass and no hardware to be perfect *to*.
+    Null,
     /// Reserved for an application-provided backend; currently maps to the
     /// platform default shared output in the built-in engine.
     Custom,

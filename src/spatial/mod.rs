@@ -13,24 +13,22 @@
 //! and writes a normal interleaved multichannel PCM buffer the engine's
 //! existing output core can deliver.
 //!
-//! # What the production graph actually does today
+//! # What the production graph does
 //!
-//! The scene model and the renderers below are layout-independent, but the
-//! **production node is not yet**. `SpatialNode::process_block_f32` returns
-//! immediately unless the block is exactly two planes, and the layout is
-//! hardwired to stereo
-//! (`dsp/graph2/prod/arena/nodes/spatial_node.rs`). A multichannel (>2ch)
-//! master therefore passes through the spatial stage **bit-exact and
-//! unprocessed**, by design: spatializing an MC master needs per-object and
-//! per-bed audio routed into the node, and that scene-audio routing is
-//! deferred. The node stays active-looking but processes nothing, matching the
-//! "enabled-but-idle" contract the aux bus uses.
+//! `SpatialNode` runs two renderers, chosen by block width:
 //!
-//! So the four renderers documented below are a **library** capability. Only
-//! the binaural renderer is instantiated in the production graph today, and it
-//! operates on two program objects fed from the front pair. Ambisonic, VBAP,
-//! the hybrid renderer and the spatial bass engine are reachable from this
-//! module's API and from its tests, not from playback.
+//! - **Stereo (2 planes)** — the binaural head model over the scene's two
+//!   program objects, fed from the master's front pair. The head has two ears
+//!   by physics, so this path's output width is fixed.
+//! - **Multichannel (>2 planes)** — a layout-driven [`VbapRenderer`] selected
+//!   from the graph's configured `ChannelLayout`, with the master's channels
+//!   handed over as a **bed** so each lands on the speaker carrying its
+//!   semantic role. A block whose width disagrees with that layout, or one
+//!   arriving with no layout known, still passes through **bit-exact**.
+//!
+//! Ambisonic, the hybrid renderer and the spatial bass engine remain a
+//! **library** capability: reachable from this module's API and its tests, not
+//! from playback.
 //!
 //! This layer ships the full scene / speaker / listener / object data model,
 //! four renderers — the **equal-power [`BasicPanner`]**, the 3D

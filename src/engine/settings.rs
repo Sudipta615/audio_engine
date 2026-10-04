@@ -189,6 +189,17 @@ pub struct EngineSettings {
     pub correction_enabled: bool,
     pub correction_depth: f32,
 
+    // ── Capture ───────────────────────────────────────────────────────
+    /// Whether a capture is running right now.
+    ///
+    /// Mirrors the engine's own device handle rather than tracking
+    /// `CaptureStarted`/`CaptureStopped` events, so a host that attached
+    /// mid-session still renders the right record button.
+    pub capture_active: bool,
+    /// Friendly name of the device the last capture opened, or the system mix.
+    /// `None` = nothing captured yet this session.
+    pub capture_device: Option<String>,
+
     // ── Spatial ───────────────────────────────────────────────────────
     pub spatial_enabled: bool,
     pub spatial_quality: config::SpatialQuality,
@@ -263,6 +274,9 @@ impl Default for EngineSettings {
             correction_enabled: false,
             correction_depth: 0.0,
 
+            capture_active: false,
+            capture_device: None,
+
             spatial_enabled: false,
             spatial_quality: config::SpatialQuality::default(),
             hrtf_profile: None,
@@ -317,6 +331,7 @@ impl crate::engine::AudioEngine {
         use crate::dsp::graph2::prod::DspGraph;
 
         let cfg = &self.config;
+        let cap = &cfg.capture;
         // `DspGraph` derefs from `Graph2Engine`, so the typed node accessors
         // are reachable directly on `self.graph`.
         let graph: &DspGraph = &self.graph;
@@ -433,6 +448,9 @@ impl crate::engine::AudioEngine {
             convolution_ir_loaded: conv.is_ir_loaded(),
             correction_enabled: corr.enabled,
             correction_depth: corr.depth,
+
+            capture_active: self.capture.is_some(),
+            capture_device: cap.last_device.clone(),
 
             spatial_enabled: ctl.spatial_enabled(),
             spatial_quality: cfg.spatial.quality,

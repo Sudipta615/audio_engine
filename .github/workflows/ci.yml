@@ -184,6 +184,16 @@ jobs:
       - name: check (network-streaming + fingerprint + sofa-import)
         run: cargo check --workspace --no-default-features --features audio-output,network-streaming,fingerprint,sofa-import
 
+      # `network-streaming` was previously only ever `check`ed, never *tested*.
+      # That is exactly how a feature can compile perfectly and still be dead:
+      # `NetworkByteSource` satisfied every bound it had, and the only test
+      # touching it asserted `Send`. Nothing would have noticed that no playback
+      # path could reach it. `network_streaming` is a `required-features` suite
+      # that drives a real loopback HTTP server and decodes what it serves, so it
+      # has to actually run.
+      - name: test (network-streaming)
+        run: cargo test --workspace --features network-streaming --test network_streaming
+
       # `--no-default-features` alone must FAIL FAST with the explanatory
       # `compile_error!` in `lib.rs`, not with a cascade of unresolved-import
       # errors from backend internals.

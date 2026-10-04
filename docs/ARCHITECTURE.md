@@ -603,5 +603,5 @@ those entries silently dropped.
 | `c-ffi` | ❌ | The stable C FFI surface (`src/ffi.rs`) |
 | `tag-write` | ❌ | EBU R128 / ReplayGain tag write-back via `lofty` |
 | `fingerprint` | ❌ | Chromaprint/AcoustID fingerprinting |
-| `network-streaming` | ❌ | **Non-functional by design.** Compiles `audio_io::NetworkByteSource` (a real `Range`-capable byte source on `ureq`), but nothing constructs one and `Decoder` is not streaming end to end. A remote `http(s)` URI is refused with an actionable error. Kept because the byte source is a reasonable foundation for the streaming work. |
-| `codec-*` | — | Per-codec Symphonia / pure-Rust decoders. `codec-musepack` is an **empty placeholder** — no decoder is wired in. |
+| `network-streaming` | ❌ | **Functional.** Opens and decodes an `http(s)://` URI over HTTP Range requests. `decode::resolve_uri` classifies an `AudioSource::Uri` as local or remote; a remote target decodes through `decode::stream::open_remote` using the same Symphonia backend a local file uses. Fetching is windowed (128 KiB chunks, eviction behind the read cursor), not a whole-file download. Not in `default`: it is a network dependency, and the HTTP I/O is blocking on the decode thread. |
+| `codec-*` | — | Per-codec Symphonia / pure-Rust decoders. `codec-musepack` is a **declared-but-undecodable no-op** — no pure-Rust Musepack decoder exists to enable, so it is deliberately *not* in `all-codecs`. |

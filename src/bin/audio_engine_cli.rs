@@ -858,6 +858,30 @@ fn print_event(event: EngineEvent) {
                 message
             );
         }
+        EngineEvent::InputDeviceList { ref devices } => {
+            if devices.is_empty() {
+                println!("\n  \x1b[33m[Engine] No input devices found\x1b[0m");
+            } else {
+                println!("\n  \x1b[35m[Engine] Input devices:\x1b[0m");
+                for d in devices {
+                    let marker = if d.is_default { " (default)" } else { "" };
+                    println!(
+                        "    - {}{marker}  [{} ch, {} Hz]",
+                        d.name,
+                        d.channels
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                        d.sample_rates
+                            .iter()
+                            .map(|r| r.to_string())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    );
+                }
+            }
+        }
         EngineEvent::CaptureStarted { ref path } => {
             println!(
                 "\n  \x1b[35m[Engine] Capture started -> '{}' (system audio)\x1b[0m",

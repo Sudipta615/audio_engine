@@ -403,9 +403,17 @@ impl AudioEngine {
                 self.load_opened_decoder(source.clone(), decoder, Some(&seg.path))
             }
             AudioSource::Uri(uri) => {
-                let path_buf =
-                    crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
-                self.load_track(&path_buf)
+                // Classified, not collapsed: a URL must never be handed to a
+                // filesystem loader. See `decode::resolve_uri`.
+                match crate::decode::resolve_uri(uri).map_err(EngineError::InvalidSource)? {
+                    crate::decode::UriTarget::Local(path) => self.load_track(&path),
+                    crate::decode::UriTarget::Remote(url) => {
+                        let decoder = crate::decode::stream::open_remote(&url)?;
+                        let info = decoder.info().clone();
+                        self.load_opened_decoder(AudioSource::Uri(url), decoder, None)?;
+                        Ok(info)
+                    }
+                }
             }
             AudioSource::Memory {
                 data,
@@ -415,6 +423,21 @@ impl AudioEngine {
             // is opened and nothing is decoded; the pipeline downstream is the
             // same one a file decoder feeds.
             AudioSource::SharedPcm(pcm) => self.load_shared_pcm(pcm.clone()),
+            // A live AES67 stream: open the socket and join the group here, so
+            // an unreachable multicast group fails `Open` with a typed error
+            // rather than playing silence indefinitely. From here it is an
+            // ordinary decoder feeding the ordinary pipeline.
+            AudioSource::NetworkStream(cfg) => {
+                let decoder = crate::decode::Aes67Decoder::new(cfg.as_ref().clone())
+                    .map_err(|e| EngineError::InvalidSource(format!("AES67 stream: {e}")))?;
+                let info = decoder.info().clone();
+                self.load_opened_decoder(
+                    AudioSource::NetworkStream(cfg.clone()),
+                    Decoder::Aes67(decoder),
+                    None,
+                )?;
+                Ok(info)
+            }
         }
     }
 
@@ -458,9 +481,17 @@ impl AudioEngine {
                 Ok(info)
             }
             AudioSource::Uri(uri) => {
-                let path_buf =
-                    crate::decode::uri_to_local_path(uri).map_err(EngineError::InvalidSource)?;
-                self.prepare_next_track(&path_buf)
+                match crate::decode::resolve_uri(uri).map_err(EngineError::InvalidSource)? {
+                    crate::decode::UriTarget::Local(path) => self.prepare_next_track(&path),
+                    crate::decode::UriTarget::Remote(url) => {
+                        let decoder = crate::decode::stream::open_remote(&url)?;
+                        let info = decoder.info().clone();
+                        self.scratch.cached_incoming_decoder = Some(decoder);
+                        self.loudness_scan.pending_incoming_loudness_metadata =
+                            Some(crate::dsp::LoudnessMetadata::default());
+                        Ok(info)
+                    }
+                }
             }
             AudioSource::Memory {
                 data,
@@ -469,6 +500,19 @@ impl AudioEngine {
                 let decoder = Decoder::open_memory(data.clone(), extension_hint.as_deref())?;
                 let info = decoder.info().clone();
                 self.scratch.cached_incoming_decoder = Some(decoder);
+                self.loudness_scan.pending_incoming_loudness_metadata =
+                    Some(crate::dsp::LoudnessMetadata::default());
+                Ok(info)
+            }
+            AudioSource::NetworkStream(cfg) => {
+                // A network stream has no "next track" in the file sense, but a
+                // crossfade partner can still be pre-armed the same way: open
+                // its receiver now so the group join and jitter pre-roll happen
+                // during the current track rather than mid-transition.
+                let decoder = crate::decode::Aes67Decoder::new(cfg.as_ref().clone())
+                    .map_err(|e| EngineError::InvalidSource(format!("AES67 stream: {e}")))?;
+                let info = decoder.info().clone();
+                self.scratch.cached_incoming_decoder = Some(Decoder::Aes67(decoder));
                 self.loudness_scan.pending_incoming_loudness_metadata =
                     Some(crate::dsp::LoudnessMetadata::default());
                 Ok(info)

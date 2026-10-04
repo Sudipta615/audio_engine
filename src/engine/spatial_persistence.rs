@@ -153,7 +153,16 @@ impl SpatialPersistence {
             Ok(c) => c,
             Err(_) => return false,
         };
-        graph.with_graph(|g| g.spatial_mut().apply_config(&cfg, sample_rate.max(1.0)));
+        // The restored config comes from disk and carries no channel layout, so the
+        // scene is re-applied against the graph's currently configured layout
+        // rather than the stereo default — otherwise loading a saved scene
+        // would silently drop a multichannel master back to bit-exact
+        // passthrough.
+        let layout = graph.with_graph(|g| g.multichannel_layout().clone());
+        graph.with_graph(|g| {
+            g.spatial_mut()
+                .apply_config(&cfg, sample_rate.max(1.0), &layout)
+        });
         self.last_saved = Some(cfg);
         true
     }

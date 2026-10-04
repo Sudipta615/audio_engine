@@ -762,8 +762,10 @@ interpolated spectral IR (which carries both the ITD and the elevation
 cues); the analytic path keeps the `ElevationNotch` pinna model as its
 elevation cue. The same hybrid scene is now also reachable as a real plan
 step: the `SpatialNode` spatializes the graph's stereo master through the
-head model (optionally with the room) with a full control surface, while
-multichannel masters pass through untouched. A host that already has an
+head model (optionally with the room) with a full control surface, and a
+multichannel master through a layout-driven `VbapRenderer` selected from the
+configured `ChannelLayout` — its channels routed by semantic role as a bed.
+A block whose width disagrees with that layout passes through untouched. A host that already has an
 ambisonic bus can skip the scene and feed `AmbisonicRenderer` directly
 (up to order 3): the renderer rotates each frame by the listener
 orientation (world-fixed fields) and applies the decode matrix (`Basic`

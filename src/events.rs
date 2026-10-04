@@ -97,7 +97,8 @@ pub enum EngineEvent {
         /// the file could not be decoded or yielded no measurable audio.
         result: Option<LoudnessScanResult>,
     },
-    /// System-audio capture started (WASAPI loopback).
+    /// System-audio capture started (an input device, or the Windows
+    /// system-mix loopback).
     CaptureStarted {
         /// WAV file being written.
         path: std::path::PathBuf,
@@ -113,6 +114,17 @@ pub enum EngineEvent {
     },
     /// A capture could not be started or stopped.
     CaptureError(String),
+    /// The host's input devices, from `EnumerateInputDevices`.
+    ///
+    /// Carries data rather than returning it, because `EngineCommand` is
+    /// write-only (see the `LoadPlaylistFile` rationale in `commands.rs`): a
+    /// command cannot hand a `Result` back. An empty list means the host
+    /// genuinely has no capture device, which is different from "enumeration
+    /// failed" — the latter is reported as a `CaptureError`.
+    InputDeviceList {
+        /// Every device that advertises a usable input configuration.
+        devices: Vec<crate::output::capture::InputDeviceInfo>,
+    },
     /// Room measurement progress: a stage of the sweep
     /// measurement completed (sweep generated, capture started, …).
     MeasurementProgress {

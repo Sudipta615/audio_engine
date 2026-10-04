@@ -54,6 +54,27 @@ pub enum AudioSource {
     /// this variant exists, so identity-bearing code must compare the fields
     /// it cares about rather than whole sources.
     CueSegment(Box<crate::engine::cue_split::CueSegmentInfo>),
+
+    /// A **live** AES67 / RTP multicast stream.
+    ///
+    /// Added in 0.9.2. This is the variant that makes
+    /// `src/network_audio/` reachable from engine playback: it opens
+    /// [`Aes67Receiver`](crate::network_audio::Aes67Receiver), which binds a
+    /// UDP socket, joins the group, and runs the jitter buffer on a receive
+    /// thread that publishes into a lock-free ring.
+    ///
+    /// It is deliberately **not** modelled as `SharedPcm`. `SharedPcm` is an
+    /// immutable `Arc<Vec<f32>>` with a known `total_frames`, and its decoder
+    /// returns `EndOfStream` at the end — which the decode loop turns into
+    /// `SourceFinished` plus a playlist advance. A network stream has no end
+    /// and no total, so it needs its own variant and its own decoder, whose
+    /// underrun policy is **silence, never stall and never end-of-stream**
+    /// (see [`Aes67Decoder`](crate::decode::aes67_source::Aes67Decoder)).
+    ///
+    /// The stream is unbounded, so the reporting fields a finite source has are
+    /// absent by construction: `DecodeInfo::duration_secs` is `f64::INFINITY`
+    /// and a host must treat "still playing" as the only terminal-free state.
+    NetworkStream(Box<crate::network_audio::Aes67StreamConfig>),
 }
 
 impl AudioSource {
@@ -128,7 +149,33 @@ impl AudioSource {
                 seg.start_frame,
                 seg.frame_count
             ),
+            Self::NetworkStream(cfg) => format!(
+                "<aes67: {} -> {}:{} ({} Hz / {} ch)>",
+                cfg.stream_name,
+                cfg.destination_ip,
+                cfg.destination_port,
+                cfg.sample_rate,
+                cfg.channels
+            ),
         }
+    }
+
+    /// The AES67 stream configuration, when this source is a live network
+    /// stream.
+    pub fn as_network_stream(&self) -> Option<&crate::network_audio::Aes67StreamConfig> {
+        match self {
+            Self::NetworkStream(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+
+    /// True for a source with no predetermined end — currently only a network
+    /// stream.
+    ///
+    /// The decode loop consults this so it never treats a live source's
+    /// underrun as "track finished".
+    pub fn is_unbounded(&self) -> bool {
+        matches!(self, Self::NetworkStream(_))
     }
 
     /// The already-decoded payload, when this source carries one.

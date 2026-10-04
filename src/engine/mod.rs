@@ -155,10 +155,14 @@ pub struct AudioEngine {
     #[cfg(feature = "audio-output")]
     device_monitor: DeviceMonitor,
 
-    /// Active system-audio capture (WASAPI loopback), if any. The loopback
-    /// thread fills `ActiveCapture.capture`'s ring; the tick loop drains it
-    /// into the WAV writer.
-    #[cfg(all(target_os = "windows", feature = "wasapi-native"))]
+    /// Active capture, if any. The capture backend's audio thread fills
+    /// `ActiveCapture.capture`'s ring; the tick loop drains it into the WAV
+    /// writer.
+    ///
+    /// Portable as of 0.9.2: previously gated to
+    /// `all(target_os = "windows", feature = "wasapi-native")`, which made both
+    /// recording and room measurement Windows-only even though the engine half
+    /// (writer, drain, sweep orchestration) never was.
     capture: Option<ActiveCapture>,
 
     /// Room measurement in flight (sweep playing + capture
@@ -260,11 +264,15 @@ impl AudioEngine {
     }
 }
 
-/// An active system-audio capture: the loopback endpoint plus the WAV file
-/// the tick loop streams into. Windows-only (see `wasapi-native`).
-#[cfg(all(target_os = "windows", feature = "wasapi-native"))]
+/// An active capture: the endpoint backend plus the WAV file the tick loop
+/// streams into.
+///
+/// `capture` is a [`SystemCapture`](crate::output::capture::SystemCapture)
+/// trait object rather than a concrete backend, which is what lets the same
+/// handler serve a portable cpal input device on every platform and the
+/// Windows-only system-mix loopback.
 pub(crate) struct ActiveCapture {
-    pub(crate) capture: crate::output::WasapiLoopbackCapture,
+    pub(crate) capture: Box<dyn crate::output::capture::SystemCapture>,
     pub(crate) writer: crate::output::wav_writer::WavFileWriter,
     pub(crate) path: std::path::PathBuf,
 }

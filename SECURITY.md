@@ -72,12 +72,15 @@ Treat `plugin-dylib` as an opt-in trust decision, not a convenience.
 Two optional features reach the network. Neither is in `default`.
 
 - **`network-streaming`** — pulls `ureq` (which pulls `rustls` and the Mozilla CA bundle
-  `webpki-roots`). It compiles a `Range`-capable byte source, `audio_io::NetworkByteSource`,
-  but **nothing constructs one**: `Decoder` is not streaming end to end and a remote
-  `http(s)` URI is refused with an actionable error. The transport is real; the
-  playback path that would use it does not exist. The byte source is nonetheless worth
-  reviewing — TLS verification behaviour, redirect handling and redirect-to-`file://`
-  confusion are the classic defects in a byte source used with a filesystem-facing API.
+  `webpki-roots`) and **opens and decodes remote `http(s)://` URIs**. The engine makes
+  outbound requests to whatever host the URL names; there is no allow-list, no redirect
+  restriction, and no scheme narrowing beyond `http`/`https` (a `file://` URI is never
+  resolved from a remote one). Fetching is windowed, so a large file is not buffered whole,
+  but a server that refuses `Range` forces a single full GET — the response is still not
+  stored beyond the sliding buffer. The byte source is worth reviewing on the classic
+  axes: TLS verification behaviour, redirect handling, and redirect-to-`file://` confusion.
+  Not in `default`; enabling it is an explicit decision to let a URL in a playlist cause an
+  outbound connection.
 - **`fingerprint`** — pulls `chromaprint-next`. The engine computes a fingerprint and
   **stops there**; it performs no network lookup. Note that completing the feature the
   way most hosts want — resolving that fingerprint against the AcoustID service — means
