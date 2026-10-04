@@ -24,14 +24,11 @@ below turns out to be wrong on your platform, fix this file in the same PR.
 
 `cargo install cargo-deny cargo-audit` if you do not have them.
 
-### There is no MSRV
+### MSRV is Rust 1.98
 
-`rust-toolchain.toml` pins `stable`, and **no `rust-version` is declared** in any
-manifest. The dependency floor is 1.89 (`lofty` → `ogg_pager`), but the tree does not
-currently build at 1.89 — it uses `#[allow(clippy::manual_is_multiple_of)]`, a later
-lint, and 1.89's clippy raises 18 extra warnings. Declaring an MSRV the tree does not
-satisfy would be a claim a user discovers at build time, so the field stays absent.
-Establishing a real MSRV is follow-up work; do not "fix" this by adding `rust-version`.
+`rust-toolchain.toml` pins `stable`, and **`rust-version = "1.98"`** is declared in
+every manifest. The MSRV is formally established at **Rust 1.98**, verified in CI
+under `--locked` with all warnings enforced (`-D warnings`).
 
 ---
 
@@ -110,7 +107,7 @@ cargo fuzz run <target> -- <fuzz-target>      # needs nightly for some targets
 
 `.github/workflows/ci.yml` runs: **fmt + clippy**, **feature combinations**, **supply
 chain** (`cargo deny` + `cargo audit` + lockfile freshness), **toolchain floor** (which
-*asserts* that no manifest declares an `rust-version` we do not honour), **test** (Linux
+*asserts* all manifests declare `rust-version = "1.98"` and checks under MSRV 1.98), **test** (Linux
 / macOS × default / all-features), **decode fixture corpus + opus conformance**,
 **realtime budget**, **release gate**, **benches**, **miri**, **coverage**
 (`cargo llvm-cov`), **rustdoc**, and **fuzz**.

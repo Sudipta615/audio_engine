@@ -500,3 +500,67 @@ pub fn run_qualification_pipeline() -> QualificationReport {
         checks,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_qualification_status_as_str_and_display() {
+        assert_eq!(QualificationStatus::Pass.as_str(), "PASS");
+        assert_eq!(QualificationStatus::Fail.as_str(), "FAIL");
+        assert_eq!(QualificationStatus::NotRun.as_str(), "NOT_RUN");
+        assert_eq!(QualificationStatus::Skipped.as_str(), "SKIPPED");
+        assert_eq!(QualificationStatus::Inconclusive.as_str(), "INCONCLUSIVE");
+
+        assert_eq!(format!("{}", QualificationStatus::Pass), "PASS");
+        assert_eq!(format!("{}", QualificationStatus::Fail), "FAIL");
+    }
+
+    #[test]
+    fn test_qualification_status_serde_roundtrip() {
+        let json = serde_json::to_string(&QualificationStatus::Pass).unwrap();
+        assert_eq!(json, "\"PASS\"");
+        let parsed: QualificationStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, QualificationStatus::Pass);
+    }
+
+    #[test]
+    fn test_qualification_report_json_and_text() {
+        let report = QualificationReport {
+            qualification_status: QualificationStatus::Pass,
+            engine_version: "0.9.1".into(),
+            timestamp: "2026-10-04T00:00:00Z".into(),
+            tests: QualificationStatus::Pass,
+            fuzzing: QualificationStatus::Pass,
+            realtime_allocations: 0,
+            xruns: 0,
+            determinism: QualificationStatus::Pass,
+            max_cpu_percent: 1.25,
+            latency_status: QualificationStatus::Pass,
+            spatial_quality: QualificationStatus::Pass,
+            checks: vec![QualificationCheck {
+                name: "Unit Test Check".into(),
+                status: QualificationStatus::Pass,
+                details: "All checks passed cleanly".into(),
+            }],
+        };
+
+        let json = report.to_json();
+        assert!(json.contains("\"qualification_status\": \"PASS\""));
+        assert!(json.contains("\"engine_version\": \"0.9.1\""));
+
+        let text = report.render_text();
+        assert!(text.contains("SHADOW DESKTOP ENGINE RELEASE QUALIFICATION: PASS"));
+        assert!(text.contains("Unit Test Check"));
+    }
+
+    #[test]
+    fn test_qualification_pipeline_runs() {
+        let report = run_qualification_pipeline();
+        assert_eq!(report.realtime_allocations, 0);
+        assert!(!report.checks.is_empty());
+        assert!(report.checks.iter().any(|c| c.name.contains("Determinism")));
+        assert!(report.checks.iter().any(|c| c.name.contains("Safety")));
+    }
+}

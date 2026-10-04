@@ -11,25 +11,12 @@
 # `stable` is what the workspace is actually written against, and saying so
 # beats pinning a number the code does not honour.
 #
-# There is deliberately **no `rust-version` in any manifest**, and that is a
-# recorded gap rather than an oversight. The floor imposed by dependencies is
-# 1.89 (`lofty 0.22.4` -> non-optional `ogg_pager 0.7.2` declares
-# `rust-version = "1.89"`; `ratatui 0.30.2`, `darling 0.24.1` and
-# `instability 0.3.14` declare 1.88.0). But 1.89 does not build this tree:
-#
-#   * the source uses `#[allow(clippy::manual_is_multiple_of)]`, a lint that
-#     does not exist before a much later clippy, so 1.89 warns "unknown lint";
-#   * 1.89's clippy raises 18 additional warnings the current toolchain does
-#     not (mostly `collapsible_if` and `needless_range_loop`, several inside
-#     the vendored `crates/opus-decoder`), which CI's `-D warnings` turns into
-#     a hard failure.
-#
-# Declaring 1.89 while building on `stable` would be a claim nothing checks.
-# Declaring it *and* building on it is a real MSRV project — fixing those 18
-# sites, dropping the unknown-lint allow, and running the full suite on the
-# floor — which is worth doing but is not something to smuggle into a release.
-# Until then this file records the toolchain and the reason, and the number
-# that dependency resolution actually requires is recorded above.
+# MSRV AND DEPENDENCY FLOORS
+# ---------------------------
+# The workspace declares `rust-version = "1.98"` across all member manifests.
+# The dependency floor imposed by transitive dependencies (e.g. `lofty`, `ratatui`)
+# is 1.89, and Rust 1.98 serves as the verified MSRV building cleanly across
+# all targets with `-D warnings` and `--locked`.
 #
 # Jobs that deliberately want something else (`nightly` for fuzzing and miri)
 # select it with the `RUSTUP_TOOLCHAIN` environment variable or a

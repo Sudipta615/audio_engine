@@ -313,15 +313,20 @@ jobs:
       - name: check (pinned toolchain, locked)
         run: cargo check --workspace --locked --all-targets
 
-      - name: Assert no manifest declares a rust-version we do not honour
+      - name: Assert all manifests declare rust-version 1.98
         run: |
-          if grep -rn '^rust-version' Cargo.toml crates/*/Cargo.toml; then
-            echo "::error::a crate declares rust-version but the toolchain is"
-            echo "::error::pinned to stable. Either build the floor and declare"
-            echo "::error::it, or remove the declaration — an unverified floor"
-            echo "::error::is worse than no floor."
-            exit 1
-          fi
+          for manifest in Cargo.toml crates/*/Cargo.toml; do
+            if ! grep -q '^rust-version = "1.98"' "$manifest"; then
+              echo "::error::$manifest does not declare rust-version = \"1.98\""
+              exit 1
+            fi
+          done
+
+      - name: Install MSRV toolchain (1.98)
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: check (MSRV 1.98 toolchain, locked)
+        run: cargo +1.98 check --workspace --locked --all-targets
 
       # Reports the real dependency-imposed floor. Not gating (it cannot be,
       # without a declared MSRV to compare against) but printed on every run so

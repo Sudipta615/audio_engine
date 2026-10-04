@@ -25,11 +25,8 @@ sudo apt-get install -y pkg-config libasound2-dev
 sudo usermod -aG audio "$USER"   # log out and back in
 ```
 
-**There is no MSRV to install.** `rust-toolchain.toml` pins `stable` and no
-`rust-version` is declared in any manifest. The dependency floor is 1.89 (`lofty` →
-`ogg_pager`), but the tree does not currently build at 1.89 — it uses
-`#[allow(clippy::manual_is_multiple_of)]`, a later lint, and 1.89's clippy raises 18
-extra warnings. Use current `stable`.
+**MSRV is Rust 1.98.** `rust-toolchain.toml` pins `stable` and `rust-version = "1.98"`
+is declared across all manifests, verified in CI under `--locked`.
 
 ### Install-time dependency
 

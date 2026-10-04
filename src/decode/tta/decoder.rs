@@ -130,18 +130,44 @@ pub(crate) fn parse_header(reader: &mut BufReader<File>) -> Result<TtaHeader, De
     }
 
     // Header integrity: CRC-32 over the first 18 bytes.
-    let stored_crc = u32::from_le_bytes(header[18..22].try_into().unwrap());
+    let stored_crc = header
+        .get(18..22)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA header CRC".into()))?;
     if crc32(&header[..18]) != stored_crc {
         return Err(DecodeError::UnsupportedFormat(
             "TTA header CRC mismatch".into(),
         ));
     }
 
-    let format = u16::from_le_bytes(header[4..6].try_into().unwrap());
-    let channels = u16::from_le_bytes(header[6..8].try_into().unwrap());
-    let bits_per_sample = u16::from_le_bytes(header[8..10].try_into().unwrap());
-    let sample_rate = u32::from_le_bytes(header[10..14].try_into().unwrap());
-    let data_length = u32::from_le_bytes(header[14..18].try_into().unwrap());
+    let format = header
+        .get(4..6)
+        .and_then(|s| s.try_into().ok())
+        .map(u16::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA header format".into()))?;
+    let channels = header
+        .get(6..8)
+        .and_then(|s| s.try_into().ok())
+        .map(u16::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA header channels".into()))?;
+    let bits_per_sample = header
+        .get(8..10)
+        .and_then(|s| s.try_into().ok())
+        .map(u16::from_le_bytes)
+        .ok_or_else(|| {
+            DecodeError::UnsupportedFormat("truncated TTA header bits_per_sample".into())
+        })?;
+    let sample_rate = header
+        .get(10..14)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA header sample_rate".into()))?;
+    let data_length = header
+        .get(14..18)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA header data_length".into()))?;
 
     if format != 1 {
         if format == 2 {
@@ -217,7 +243,11 @@ pub(crate) fn parse_size_table(
     let mut raw = vec![0u8; table_bytes as usize];
     reader.read_exact(&mut raw).map_err(DecodeError::Io)?;
 
-    let expected_crc = u32::from_le_bytes(raw[raw.len() - 4..].try_into().unwrap());
+    let expected_crc = raw
+        .get(raw.len().saturating_sub(4)..)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| DecodeError::UnsupportedFormat("truncated TTA size table CRC".into()))?;
     if crc32(&raw[..raw.len() - 4]) != expected_crc {
         return Err(DecodeError::UnsupportedFormat(
             "TTA size table CRC mismatch".into(),
@@ -417,8 +447,17 @@ impl TtaDecoder {
             })?;
 
             // Frame integrity: CRC-32 over the payload, trailer excluded.
+            if size < 4 {
+                self.current_frame += 1;
+                return Err(DecodeError::Decode(format!(
+                    "TTA frame {frame_idx} size too small ({size} bytes)"
+                )));
+            }
             let (payload, crc_bytes) = raw.split_at(size - 4);
-            let stored_crc = u32::from_le_bytes(crc_bytes.try_into().unwrap());
+            let stored_crc = crc_bytes
+                .try_into()
+                .map(u32::from_le_bytes)
+                .map_err(|_| DecodeError::Decode(format!("truncated TTA frame {frame_idx} CRC")))?;
             if crc32(payload) != stored_crc {
                 self.current_frame += 1;
                 return Err(DecodeError::Decode(format!(

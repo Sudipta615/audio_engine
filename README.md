@@ -2,7 +2,7 @@
 
 # Shadow Desktop — Independent Core Audio Engine
 
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg?style=flat-square)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.9.1-blue.svg?style=flat-square)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![Rust Edition](https://img.shields.io/badge/rustc-stable%20%7C%20edition%202021-orange.svg?style=flat-square)](Cargo.toml)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-output-backends--os-integration)
@@ -557,7 +557,7 @@ The alternative — renaming both crates to product-scoped names (`shadow-config
 
 ### Toolchain
 
-`rust-toolchain.toml` pins **`stable`**; **no `rust-version` is declared** in any manifest. This is a known gap, not a policy. The dependency floor is **1.89** (`lofty` → `ogg_pager`), but the tree does **not** currently build at 1.89: it uses `#[allow(clippy::manual_is_multiple_of)]`, a later lint, and 1.89's clippy raises 18 additional warnings. Declaring an MSRV the tree does not satisfy would be a lie a downstream user would discover at build time, so the honest state is "stable, ≥1.85 for edition 2024 support, MSRV undetermined". Establishing a real MSRV is follow-up work.
+`rust-toolchain.toml` pins **`stable`**, and **`rust-version = "1.98"`** is declared across all manifests. The MSRV is formally established at **Rust 1.98**, verified in CI under `--locked` with all warnings enforced (`-D warnings`). The dependency floor imposed by upstream crates (`lofty` → `ogg_pager`) is 1.89, and `crates/opus-decoder` uses edition 2024 (requiring Rust ≥ 1.85); both requirements are fully satisfied by Rust 1.98.
 
 ---
 

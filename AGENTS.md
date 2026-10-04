@@ -146,21 +146,15 @@ Because a required feature cannot be exercised by CI's `default` /
 `all-features` matrix alone, the `features` CI job checks the individual
 combinations explicitly. Add to it when a new feature is introduced.
 
-## Toolchain and MSRV — there is no MSRV story yet
+## Toolchain and MSRV — Rust 1.98
 
-`rust-toolchain.toml` pins **`stable`**, and **no `rust-version` is declared** in
-any workspace manifest. Do not write documentation implying a supported MSRV — there
-isn't one.
+`rust-toolchain.toml` pins **`stable`**, and **`rust-version = "1.98"`** is declared
+in all workspace manifests. The MSRV is formally established at **Rust 1.98**,
+verified in CI under `--locked` with all warnings enforced (`-D warnings`).
 
-The dependency floor is **1.89** (`lofty` → `ogg_pager` declares it), but the tree
-does **not** currently build at 1.89: it uses `#[allow(clippy::manual_is_multiple_of)]`,
-a later lint, and 1.89's clippy raises 18 additional warnings. Declaring
-`rust-version = "1.89"` would be a claim the tree does not honour, so the field stays
-absent. Establishing a real MSRV — by either removing the newer lint and the 18
-warnings or by raising the floor deliberately — is follow-up work.
-
-The one hard constraint that does hold: `crates/opus-decoder` is edition 2024, so the
-workspace needs `resolver = "2"` and **Rust ≥ 1.85**.
+The dependency floor imposed by upstream crates (`lofty` → `ogg_pager`) is 1.89,
+and `crates/opus-decoder` uses edition 2024 (requiring `resolver = "2"` and Rust ≥ 1.85);
+both requirements are fully satisfied by Rust 1.98.
 
 ## Distribution — GitHub, not crates.io
 
@@ -221,7 +215,7 @@ Fixing a limiter off-by-one bug = patch → `0.9.1`. Removing the `CpalOutput` t
 > **Under 1.0 there is no compatibility floor.** Strict SemVer's stability promise
 > begins at 1.0.0. Before then, a `y` bump may still carry a breaking change when
 > there is no alternative — but it must be called out in the CHANGELOG entry, not
-> left for a user to discover. This project is at 0.9.0; treat the API as unstable.
+> left for a user to discover. This project is at 0.9.1; treat the API as unstable.
 
 ## Modularity — no god files
 

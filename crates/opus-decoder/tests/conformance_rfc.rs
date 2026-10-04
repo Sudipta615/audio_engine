@@ -340,45 +340,6 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
                             packet_idx, max_delta, written, pkt_start, pkt_end
                         );
                     }
-                    if should_trace_debug_packet(packet_idx) || max_delta > 500 {
-                        let mut got_start8_csv = String::new();
-                        let mut exp_start8_csv = String::new();
-                        for i in pkt_start..(pkt_start + 8).min(compare_end) {
-                            if !got_start8_csv.is_empty() {
-                                got_start8_csv.push(';');
-                                exp_start8_csv.push(';');
-                            }
-                            got_start8_csv.push_str(&got_pcm[i].to_string());
-                            exp_start8_csv.push_str(&expected_pcm[i].to_string());
-                        }
-                        let data = format!(
-                            "{{\"packet_idx\":{},\"frame_size\":{},\"sample_start\":{},\"sample_end\":{},\"max_delta\":{},\"max_diff_idx\":{},\"max_diff_delta\":{},\"max_expected\":{},\"max_got\":{},\"first_diff_idx\":{},\"first_diff_delta\":{},\"first_expected\":{},\"first_got\":{},\"got_start8_csv\":\"{}\",\"exp_start8_csv\":\"{}\"}}",
-                            packet_idx,
-                            written,
-                            pkt_start,
-                            pkt_end,
-                            max_delta,
-                            max_diff_idx,
-                            max_diff_delta,
-                            max_expected,
-                            max_got,
-                            first_diff_idx,
-                            first_diff_delta,
-                            first_expected,
-                            first_got,
-                            got_start8_csv,
-                            exp_start8_csv
-                        );
-                        // #region agent log
-                        append_debug_log(
-                            "run-onset-map-v1",
-                            "H3",
-                            "crates/opus-decoder/tests/conformance_rfc.rs:run_vector",
-                            "packet_delta",
-                            &data,
-                        );
-                        // #endregion
-                    }
                 }
                 if trace_pkt0_pcm8 && packet_idx == 0 && written >= 8 {
                     eprintln!(
@@ -517,94 +478,11 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         let first_diff = (0..min_len).find(|&i| expected_pcm[i] != got_pcm[i]);
         if let Some(sample_idx) = first_diff {
             let packet_idx = packet_end_samples.partition_point(|&end| end <= sample_idx);
-            let mut diff_csv = String::new();
-            let mut logged = 0usize;
-            for i in sample_idx..min_len {
-                if expected_pcm[i] != got_pcm[i] {
-                    if !diff_csv.is_empty() {
-                        diff_csv.push(';');
-                    }
-                    let delta = got_pcm[i] as i32 - expected_pcm[i] as i32;
-                    diff_csv.push_str(&format!("{i}:{}:{}:{delta}", expected_pcm[i], got_pcm[i]));
-                    logged += 1;
-                    if logged == 16 {
-                        break;
-                    }
-                }
-            }
             eprintln!(
                 "[RUST] first_pcm_diff sample={} packet={} expected={} got={}",
                 sample_idx, packet_idx, expected_pcm[sample_idx], got_pcm[sample_idx]
             );
-            // #region agent log
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-            {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = format!(
-                    "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H18\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:223\",\"message\":\"first_pcm_diff\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"expected\":{},\"got\":{},\"expected_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
-                    sample_idx,
-                    packet_idx,
-                    expected_pcm[sample_idx],
-                    got_pcm[sample_idx],
-                    expected_pcm.len(),
-                    got_pcm.len(),
-                    diff_csv,
-                    ts
-                );
-                let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-            }
-            // #endregion
         }
-        let mut top = [(0i32, 0usize); 5];
-        for i in 0..min_len {
-            let d = (got_pcm[i] as i32 - expected_pcm[i] as i32).abs();
-            for slot in 0..5 {
-                if d > top[slot].0 {
-                    for shift in (slot + 1..5).rev() {
-                        top[shift] = top[shift - 1];
-                    }
-                    top[slot] = (d, i);
-                    break;
-                }
-            }
-        }
-        let mut top_csv = String::new();
-        for (d, i) in top {
-            if d == 0 {
-                continue;
-            }
-            if !top_csv.is_empty() {
-                top_csv.push(';');
-            }
-            let packet_idx = packet_end_samples.partition_point(|&end| end <= i);
-            top_csv.push_str(&format!(
-                "{i}:{packet_idx}:{}:{}:{}",
-                expected_pcm[i], got_pcm[i], d
-            ));
-        }
-        // #region agent log
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-        {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let line = format!(
-                "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H28\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:320\",\"message\":\"largest_pcm_deltas\",\"data\":{{\"top_deltas_csv\":\"{}\",\"min_len\":{}}},\"timestamp\":{}}}\n",
-                top_csv, min_len, ts
-            );
-            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-        }
-        // #endregion
         if trace_packet_max_delta {
             let mut range_start = 0usize;
             for (packet_idx, &packet_end) in packet_end_samples.iter().enumerate() {
@@ -642,45 +520,10 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
             let first_diff = (0..min_len).find(|&i| alt_pcm[i] != got_pcm[i]);
             if let Some(sample_idx) = first_diff {
                 let packet_idx = packet_end_samples.partition_point(|&end| end <= sample_idx);
-                let mut diff_csv = String::new();
-                let mut logged = 0usize;
-                for i in sample_idx..min_len {
-                    if alt_pcm[i] != got_pcm[i] {
-                        if !diff_csv.is_empty() {
-                            diff_csv.push(';');
-                        }
-                        let delta = got_pcm[i] as i32 - alt_pcm[i] as i32;
-                        diff_csv.push_str(&format!("{i}:{}:{}:{delta}", alt_pcm[i], got_pcm[i]));
-                        logged += 1;
-                        if logged == 16 {
-                            break;
-                        }
-                    }
-                }
-                // #region agent log
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-                {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let line = format!(
-                        "{{\"sessionId\":\"4200c5\",\"runId\":\"run-pcm-first-diff\",\"hypothesisId\":\"H27\",\"location\":\"crates/opus-decoder/tests/conformance_rfc.rs:271\",\"message\":\"first_pcm_diff_alt\",\"data\":{{\"sample_idx\":{},\"packet_idx\":{},\"alt\":{},\"got\":{},\"alt_len\":{},\"got_len\":{},\"first_diffs_csv\":\"{}\"}},\"timestamp\":{}}}\n",
-                        sample_idx,
-                        packet_idx,
-                        alt_pcm[sample_idx],
-                        got_pcm[sample_idx],
-                        alt_pcm.len(),
-                        got_pcm.len(),
-                        diff_csv,
-                        ts
-                    );
-                    let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-                }
-                // #endregion
+                eprintln!(
+                    "[RUST] first_pcm_diff_alt sample={} packet={} alt={} got={}",
+                    sample_idx, packet_idx, alt_pcm[sample_idx], got_pcm[sample_idx]
+                );
             }
         }
     }
@@ -722,39 +565,6 @@ fn run_vector(vectors_dir: &Path, v: &Vector) -> Result<(), Box<dyn std::error::
         q0.quality_percent, q0.internal_weighted_error
     )
     .into())
-}
-
-/// Decide whether a packet should emit extra debug logging.
-///
-/// Params: `packet_idx` packet number in the vector stream.
-/// Returns: true when explicit packet tracing is requested.
-fn should_trace_debug_packet(packet_idx: usize) -> bool {
-    std::env::var("OPUS_TRACE_PACKET_IDX")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        == Some(packet_idx)
-}
-
-/// Append one JSON debug line to the local trace log.
-///
-/// Params: `run_id`, `hypothesis_id`, `location`, `message`, and JSON `data`.
-/// Returns: nothing; errors are ignored because this is debug-only tracing.
-fn append_debug_log(run_id: &str, hypothesis_id: &str, location: &str, message: &str, data: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log")
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let line = format!(
-            "{{\"sessionId\":\"4200c5\",\"runId\":\"{}\",\"hypothesisId\":\"{}\",\"location\":\"{}\",\"message\":\"{}\",\"data\":{},\"timestamp\":{}}}\n",
-            run_id, hypothesis_id, location, message, data, ts
-        );
-        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
-    }
 }
 
 fn alt_dec_path(dec_path: &Path) -> Option<PathBuf> {

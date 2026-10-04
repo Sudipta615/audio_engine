@@ -25,7 +25,7 @@ There is **no published SLA**. Handle it as best-effort.
 
 ## Supported versions
 
-The project is at **0.9.0** and pre-1.0. Under SemVer, stability promises begin at
+The project is at **0.9.1** and pre-1.0. Under SemVer, stability promises begin at
 1.0.0; before that, a minor bump may carry a breaking change. Only the current release
 line is supported. There is no LTS branch and no backport policy.
 

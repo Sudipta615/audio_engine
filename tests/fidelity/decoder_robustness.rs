@@ -140,6 +140,27 @@ fn tta_garbage_bytes_are_rejected_cleanly() {
 }
 
 #[test]
+fn tta_truncated_headers_are_rejected_cleanly() {
+    // Tests that truncated headers (even with valid TTA1 magic) are rejected cleanly without panic
+    for len in 0..22 {
+        let mut bytes = vec![0u8; len];
+        if len >= 4 {
+            bytes[..4].copy_from_slice(b"TTA1");
+        }
+        let path = temp_path("tta");
+        write(&path, &bytes);
+        match Decoder::open(&path) {
+            Ok(_) => panic!("truncated TTA file of length {len} must not decode"),
+            Err(DecodeError::UnsupportedFormat(_))
+            | Err(DecodeError::FileOpen(_))
+            | Err(DecodeError::Io(_)) => {}
+            Err(other) => panic!("expected UnsupportedFormat, FileOpen, or Io, got {other}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[test]
 fn nonexistent_file_reports_io_error_not_panic() {
     let path = temp_path("flac");
     let _ = std::fs::remove_file(&path); // ensure absent

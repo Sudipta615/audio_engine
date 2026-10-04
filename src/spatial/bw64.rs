@@ -116,11 +116,25 @@ impl BextChunk {
         let origination_date = read_fixed_ascii(&data[320..330]);
         let origination_time = read_fixed_ascii(&data[330..338]);
 
-        let time_ref_low = u32::from_le_bytes(data[338..342].try_into().unwrap()) as u64;
-        let time_ref_high = u32::from_le_bytes(data[342..346].try_into().unwrap()) as u64;
+        let time_ref_low = data
+            .get(338..342)
+            .and_then(|s| s.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| Bw64Error::CorruptChunk("truncated time_ref_low in bext".into()))?
+            as u64;
+        let time_ref_high = data
+            .get(342..346)
+            .and_then(|s| s.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| Bw64Error::CorruptChunk("truncated time_ref_high in bext".into()))?
+            as u64;
         let time_reference = (time_ref_high << 32) | time_ref_low;
 
-        let version = u16::from_le_bytes(data[346..348].try_into().unwrap());
+        let version = data
+            .get(346..348)
+            .and_then(|s| s.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or_else(|| Bw64Error::CorruptChunk("truncated version in bext".into()))?;
         let mut umid = [0u8; 64];
         umid.copy_from_slice(&data[348..412]);
 
@@ -131,16 +145,44 @@ impl BextChunk {
         let mut max_short_term_lufs = None;
 
         if version >= 1 && data.len() >= 412 + 10 {
-            let lv = i16::from_le_bytes(data[412..414].try_into().unwrap());
-            let lr = i16::from_le_bytes(data[414..416].try_into().unwrap());
-            let tp = i16::from_le_bytes(data[416..418].try_into().unwrap());
+            let lv = data
+                .get(412..414)
+                .and_then(|s| s.try_into().ok())
+                .map(i16::from_le_bytes)
+                .ok_or_else(|| {
+                    Bw64Error::CorruptChunk("truncated loudness_value in bext".into())
+                })?;
+            let lr = data
+                .get(414..416)
+                .and_then(|s| s.try_into().ok())
+                .map(i16::from_le_bytes)
+                .ok_or_else(|| {
+                    Bw64Error::CorruptChunk("truncated loudness_range in bext".into())
+                })?;
+            let tp = data
+                .get(416..418)
+                .and_then(|s| s.try_into().ok())
+                .map(i16::from_le_bytes)
+                .ok_or_else(|| Bw64Error::CorruptChunk("truncated max_true_peak in bext".into()))?;
             loudness_value_lufs = Some(lv as f32 / 100.0);
             loudness_range_lu = Some(lr as f32 / 100.0);
             max_true_peak_dbtp = Some(tp as f32 / 100.0);
 
             if version >= 2 && data.len() >= 412 + 14 {
-                let mm = i16::from_le_bytes(data[418..420].try_into().unwrap());
-                let ms = i16::from_le_bytes(data[420..422].try_into().unwrap());
+                let mm = data
+                    .get(418..420)
+                    .and_then(|s| s.try_into().ok())
+                    .map(i16::from_le_bytes)
+                    .ok_or_else(|| {
+                        Bw64Error::CorruptChunk("truncated max_momentary in bext".into())
+                    })?;
+                let ms = data
+                    .get(420..422)
+                    .and_then(|s| s.try_into().ok())
+                    .map(i16::from_le_bytes)
+                    .ok_or_else(|| {
+                        Bw64Error::CorruptChunk("truncated max_short_term in bext".into())
+                    })?;
                 max_momentary_lufs = Some(mm as f32 / 100.0);
                 max_short_term_lufs = Some(ms as f32 / 100.0);
             }
@@ -237,8 +279,16 @@ impl ChnaChunk {
         if data.len() < 4 {
             return Err(Bw64Error::CorruptChunk("chna chunk too small".to_string()));
         }
-        let _num_tracks = u16::from_le_bytes(data[0..2].try_into().unwrap());
-        let num_uids = u16::from_le_bytes(data[2..4].try_into().unwrap());
+        let _num_tracks = data
+            .get(0..2)
+            .and_then(|s| s.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or_else(|| Bw64Error::CorruptChunk("truncated num_tracks in chna".into()))?;
+        let num_uids = data
+            .get(2..4)
+            .and_then(|s| s.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or_else(|| Bw64Error::CorruptChunk("truncated num_uids in chna".into()))?;
 
         let mut entries = Vec::with_capacity(num_uids as usize);
         let mut offset = 4;
@@ -247,7 +297,11 @@ impl ChnaChunk {
             if offset + 40 > data.len() {
                 break;
             }
-            let track_index = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+            let track_index = data
+                .get(offset..offset + 2)
+                .and_then(|s| s.try_into().ok())
+                .map(u16::from_le_bytes)
+                .ok_or_else(|| Bw64Error::CorruptChunk("truncated track_index in chna".into()))?;
             let uid = read_fixed_ascii(&data[offset + 2..offset + 14]);
             let track_format_id = read_fixed_ascii(&data[offset + 14..offset + 28]);
             let pack_format_id = read_fixed_ascii(&data[offset + 28..offset + 39]);
@@ -363,16 +417,35 @@ impl Bw64File {
         let mut chunk_hdr = [0u8; 8];
         while reader.read_exact(&mut chunk_hdr).is_ok() {
             let chunk_id = &chunk_hdr[0..4];
-            let chunk_size = u32::from_le_bytes(chunk_hdr[4..8].try_into().unwrap()) as u64;
+            let chunk_size =
+                u32::from_le_bytes([chunk_hdr[4], chunk_hdr[5], chunk_hdr[6], chunk_hdr[7]]) as u64;
 
             match chunk_id {
                 c if c == FMT_ID => {
                     let mut fmt_buf = vec![0u8; chunk_size as usize];
                     reader.read_exact(&mut fmt_buf)?;
                     if fmt_buf.len() >= 16 {
-                        channels = u16::from_le_bytes(fmt_buf[2..4].try_into().unwrap());
-                        sample_rate = u32::from_le_bytes(fmt_buf[4..8].try_into().unwrap());
-                        bits_per_sample = u16::from_le_bytes(fmt_buf[14..16].try_into().unwrap());
+                        channels = fmt_buf
+                            .get(2..4)
+                            .and_then(|s| s.try_into().ok())
+                            .map(u16::from_le_bytes)
+                            .ok_or_else(|| {
+                                Bw64Error::CorruptChunk("truncated channels in fmt".into())
+                            })?;
+                        sample_rate = fmt_buf
+                            .get(4..8)
+                            .and_then(|s| s.try_into().ok())
+                            .map(u32::from_le_bytes)
+                            .ok_or_else(|| {
+                                Bw64Error::CorruptChunk("truncated sample_rate in fmt".into())
+                            })?;
+                        bits_per_sample = fmt_buf
+                            .get(14..16)
+                            .and_then(|s| s.try_into().ok())
+                            .map(u16::from_le_bytes)
+                            .ok_or_else(|| {
+                                Bw64Error::CorruptChunk("truncated bits_per_sample in fmt".into())
+                            })?;
                     }
                 }
                 c if c == BEXT_ID => {
@@ -572,5 +645,28 @@ mod tests {
         assert_eq!(chna.entries[1].track_index, 2);
 
         assert!(parsed.metadata.axml.is_some());
+    }
+
+    #[test]
+    fn test_truncated_chunks_rejected_cleanly() {
+        // Test bext chunk truncation for lengths less than header base size (412)
+        for len in 0..412 {
+            let data = vec![0u8; len];
+            let res = BextChunk::parse(&data);
+            assert!(
+                res.is_err(),
+                "truncated bext of length {len} must return Err"
+            );
+        }
+
+        // Test chna chunk truncation for lengths less than base size (4)
+        for len in 0..4 {
+            let data = vec![0u8; len];
+            let res = ChnaChunk::parse(&data);
+            assert!(
+                res.is_err(),
+                "truncated chna of length {len} must return Err"
+            );
+        }
     }
 }

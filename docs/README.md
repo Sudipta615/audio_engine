@@ -44,6 +44,6 @@ premise.
 
 Several documents were inherited from a different product lineage and carried `Phase N`
 and `v3.x` / `v4.x` tags. **No `v3.x` or `v4.x` release of this repository has ever
-existed** — the real tags are `v0.1.0`, `v0.2.0`, `v0.7.0`, `v0.9.0`. The phase tags
+existed** — the real tags are `v0.1.0`, `v0.2.0`, `v0.7.0`, `v0.9.0`, `v0.9.1`. The phase tags
 survive only inside [`HISTORY.md`](HISTORY.md), which is an archive. Do not copy them
 into new prose.

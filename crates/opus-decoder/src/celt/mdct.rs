@@ -76,38 +76,6 @@ impl MdctBackward {
             return Err("mdct backward window length mismatch");
         }
 
-        // #region agent log
-        let lm0_trace = false;
-        if lm0_trace {
-            let old_sum: f32 = out[..overlap.min(out.len())].iter().map(|x| x.abs()).sum();
-            let first8: String = (0..8.min(out.len()))
-                .map(|i| format!("{:.6}", out[i]))
-                .collect::<Vec<_>>()
-                .join(",");
-            let line = format!(
-                r#"{{"sessionId":"bea564","runId":"lm0_imdct","hypothesisId":"H2","location":"mdct.rs:backward_entry","message":"lm0_old_overlap","data":{{"n":{},"n2":{},"overlap":{},"old_sum":{},"old_first8":[{}]}},"timestamp":{}}}"#,
-                n,
-                n2,
-                overlap,
-                old_sum,
-                first8,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            );
-            let log_path = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".cursor")
-                .join("debug-bea564.log");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, (line + "\n").as_bytes()));
-        }
-        // #endregion
-
         let trace_fft = false;
         if trace_fft {
             debug_trace!(
@@ -268,37 +236,7 @@ impl MdctBackward {
 
         let ov2 = overlap >> 1;
         out[ov2..ov2 + n2].copy_from_slice(&f2_out[..n2]);
-        // #region agent log
-        if lm0_trace {
-            let after_sum: f32 = out[ov2..ov2 + n2.min(out.len().saturating_sub(ov2))]
-                .iter()
-                .map(|x| x.abs())
-                .sum();
-            let after_first8: String = (ov2..(ov2 + 8).min(out.len()))
-                .map(|i| format!("{:.6}", out[i]))
-                .collect::<Vec<_>>()
-                .join(",");
-            let line = format!(
-                r#"{{"sessionId":"bea564","runId":"lm0_imdct","hypothesisId":"H3","location":"mdct.rs:after_copy","message":"after_copy_from_slice","data":{{"ov2":{},"after_sum":{},"out_60_68":[{}]}},"timestamp":{}}}"#,
-                ov2,
-                after_sum,
-                after_first8,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            );
-            let log_path = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".cursor")
-                .join("debug-bea564.log");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, (line + "\n").as_bytes()));
-        }
-        // #endregion
+
         let mut p0 = ov2;
         let mut p1 = ov2 + n2 - 2;
         for i in 0..((n4 + 1) >> 1) {
@@ -368,97 +306,14 @@ impl MdctBackward {
                 out[63]
             );
         }
-        // #region agent log
-        if lm0_trace {
-            let post_rot_left: f32 = out[..ov2.min(out.len())].iter().map(|x| x.abs()).sum();
-            let post_rot_right: f32 = out[ov2..overlap.min(out.len())]
-                .iter()
-                .map(|x| x.abs())
-                .sum();
-            let right_first8: String = (ov2..(ov2 + 8).min(out.len()))
-                .map(|i| format!("{:.6}", out[i]))
-                .collect::<Vec<_>>()
-                .join(",");
-            let line = format!(
-                r#"{{"sessionId":"bea564","runId":"lm0_imdct","hypothesisId":"H7","location":"mdct.rs:after_post_rot","message":"before_window","data":{{"post_rot_left_sum":{},"post_rot_right_sum":{},"right_first8":[{}]}},"timestamp":{}}}"#,
-                post_rot_left,
-                post_rot_right,
-                right_first8,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            );
-            let log_path = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".cursor")
-                .join("debug-bea564.log");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, (line + "\n").as_bytes()));
-        }
-        // #endregion
 
         for i in 0..(overlap / 2) {
             let x1 = out[overlap - 1 - i];
             let x2 = out[i];
             out[i] = x2 * window[overlap - 1 - i] - x1 * window[i];
             out[overlap - 1 - i] = x2 * window[i] + x1 * window[overlap - 1 - i];
-            // #region agent log
-            if lm0_trace && (i == 0 || i == overlap / 2 - 1) {
-                let line = format!(
-                    r#"{{"sessionId":"bea564","runId":"lm0_imdct","hypothesisId":"H4","location":"mdct.rs:window_loop","message":"window_iter","data":{{"i":{},"x1":{},"x2":{},"out_i":{},"out_119_i":{}}},"timestamp":{}}}"#,
-                    i,
-                    x1,
-                    x2,
-                    out[i],
-                    out[overlap - 1 - i],
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis()
-                );
-                let log_path = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(".cursor")
-                    .join("debug-bea564.log");
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, (line + "\n").as_bytes()));
-            }
-            // #endregion
         }
-        // #region agent log
-        if lm0_trace {
-            let frame_sum: f32 = out[..overlap.min(out.len())].iter().map(|x| x.abs()).sum();
-            let frame_first8: String = (0..8.min(out.len()))
-                .map(|i| format!("{:.6}", out[i]))
-                .collect::<Vec<_>>()
-                .join(",");
-            let line = format!(
-                r#"{{"sessionId":"bea564","runId":"lm0_imdct","hypothesisId":"H5","location":"mdct.rs:backward_exit","message":"lm0_after_window","data":{{"frame_sum":{},"frame_first8":[{}]}},"timestamp":{}}}"#,
-                frame_sum,
-                frame_first8,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            );
-            let log_path = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".cursor")
-                .join("debug-bea564.log");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, (line + "\n").as_bytes()));
-        }
-        // #endregion
+
         Ok(())
     }
 

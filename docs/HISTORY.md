@@ -10,7 +10,7 @@ changelog and had started describing modules that no longer exist.
 
 The phase tags below (`Phase 25`, `v3.27`, `Phase 48 / v4.0.0`, …) come from a
 versioning lineage this repository **never published**. The git tags that have ever
-existed here are `v0.1.0`, `v0.2.0`, `v0.7.0` and now `v0.9.0` — there has never been a
+existed here are `v0.1.0`, `v0.2.0`, `v0.7.0`, `v0.9.0` and now `v0.9.1` — there has never been a
 `v3.x` or `v4.x` release. The tags are kept verbatim in the archive below because
 rewriting history in an archive is worse than annotating it, and because they are the
 only handle a contributor has to the ordering of work. **Do not copy them forward into
@@ -172,4 +172,4 @@ The `v3.x` / `v4.x` labels above are inherited from a different product lineage 
 not correspond to any release of this repository. New prose — module comments, README
 sections, new documents — should refer to **behaviour and code paths**, not to phase or
 version numbers. `CHANGELOG.md` is the only place a version number belongs, and it
-carries the real line: 0.1.0 → 0.2.0 → 0.7.0 → 0.9.0.
+carries the real line: 0.1.0 → 0.2.0 → 0.7.0 → 0.9.0 → 0.9.1.

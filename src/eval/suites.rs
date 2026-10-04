@@ -680,3 +680,64 @@ pub fn spatial_cost(reg: &ReferenceVectorRegistry) -> ComponentReport {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_vectors_are_valid() {
+        let v = "0.9.1".to_string();
+        let p = def_pipeline(v.clone());
+        assert_eq!(p.id, "dsp-pipeline");
+        assert_eq!(p.checks.len(), 2);
+
+        let b = def_parametric_eq(v.clone());
+        assert_eq!(b.id, "parametric-eq");
+
+        let l = def_limiter(v.clone());
+        assert_eq!(l.id, "limiter");
+
+        let m = def_loudness(v.clone());
+        assert_eq!(m.id, "loudness");
+
+        let c = def_convolution(v.clone());
+        assert_eq!(c.id, "convolution");
+
+        let s = def_binaural(v.clone());
+        assert_eq!(s.id, "binaural");
+
+        let sc = def_spatial_cost(v.clone());
+        assert_eq!(sc.id, "spatial_cost");
+    }
+
+    #[test]
+    fn suites_measure_with_registry() {
+        let reg = ReferenceVectorRegistry::build();
+
+        let r_pipe = dsp_pipeline(&reg);
+        assert_eq!(r_pipe.component, "DspPipeline (bit-exact passthrough)");
+        assert!(r_pipe
+            .checks
+            .iter()
+            .all(|c| c.verdict == crate::eval::Verdict::Pass));
+
+        let r_cost = spatial_cost(&reg);
+        assert!(r_cost
+            .checks
+            .iter()
+            .all(|c| c.verdict == crate::eval::Verdict::Pass));
+
+        let r_eq = parametric_eq(&reg);
+        assert!(r_eq
+            .checks
+            .iter()
+            .all(|c| c.verdict == crate::eval::Verdict::Pass));
+
+        let r_lim = limiter(&reg);
+        assert!(r_lim
+            .checks
+            .iter()
+            .all(|c| c.verdict == crate::eval::Verdict::Pass));
+    }
+}

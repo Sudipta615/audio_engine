@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-10-04
+
+Follow-up release filling the known gaps identified in the 0.9.0 audit.
+
+### Added
+- **MSRV declared at Rust 1.98**: All manifests declare `rust-version = "1.98"`, and the CI `toolchain-floor` workflow now verifies compilation on Rust 1.98 with `--locked`.
+- **Unit test suites for `src/eval/`**: Added comprehensive test coverage for `suites.rs`, `qualification.rs`, and `performance_matrix.rs`.
+
+### Fixed
+- **Decode loop output write path is now fully lock-free**: Replaced `std::sync::Mutex` in `AudioAnalyzer` with an atomic CAS entry guard and a lock-free triple buffer matching `ProfessionalMeters`, backed by a preallocated circular buffer that eliminates all heap allocations on the audio path.
+- **Parsing `unwrap()` sites eliminated**: Converted all 23 `try_into().unwrap()` sites in `src/spatial/bw64.rs` (BW64/ADM chunk parsing) and `src/decode/tta/decoder.rs` (TTA header parsing) to return structured `Bw64Error` and `DecodeError` errors on truncated inputs.
+- **Opus debug scaffolding removed**: Stripped all 93 upstream `#region agent log` blocks and foreign log file paths from `crates/opus-decoder`.
+
+### Known gaps
+- **No repository remote is configured.** (Deferred).
+
 ## [0.9.0] — 2026-10-03
 
 The release where the project stops claiming things it cannot do.

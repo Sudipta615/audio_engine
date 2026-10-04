@@ -2397,3 +2397,33 @@ fn realtime_plan_driven_swap_does_not_allocate_on_audio_thread() {
         "a plan-driven generation swap allocated on the audio thread"
     );
 }
+
+#[test]
+fn analyzer_update_performs_zero_allocations() {
+    let analyzer = engine::dsp::AudioAnalyzer::new_default();
+    analyzer.set_sample_rate(48_000);
+
+    // Warm-up
+    let dummy_block = [0.25f32; 1024];
+    for _ in 0..10 {
+        analyzer.update(&dummy_block, 2);
+    }
+
+    ARMED.with(|a| a.set(true));
+    THREAD_ALLOCS.with(|c| c.set(0));
+
+    // Process 10,000 blocks through the analyzer, crossing multiple spectrum update windows
+    for b in 0..10_000 {
+        let sample = (b as f32 * 0.05).sin() * 0.5;
+        let block = [sample; 512];
+        analyzer.update(&block, 2);
+    }
+
+    ARMED.with(|a| a.set(false));
+    let allocations = THREAD_ALLOCS.with(|c| c.get());
+
+    assert_eq!(
+        allocations, 0,
+        "AudioAnalyzer::update must perform strictly 0 allocations on the audio path, got {allocations}"
+    );
+}

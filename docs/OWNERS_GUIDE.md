@@ -1,6 +1,6 @@
 # Shadow Desktop Audio Engine — Owner's Guide & Architectural Map
 
-**Version:** 0.9.0 (engine + config + plugin-abi + plugin-test-echo + engine-tui in lockstep)
+**Version:** 0.9.1 (engine + config + plugin-abi + plugin-test-echo + engine-tui in lockstep)
 **License:** Apache-2.0
 **Language:** Rust, with no C/C++ codec SDKs. (Linux `alsa` binds the C `libasound`;
 the WASAPI/ASIO backends are COM FFI and CoreAudio is ObjC FFI — OS audio APIs, not codecs.)
@@ -224,7 +224,7 @@ still present:
 
 ## 1.8 Current maturity level
 
-- Version 0.9.0, semantic versioning (pre-1.0: the API is explicitly
+- Version 0.9.1, semantic versioning (pre-1.0: the API is explicitly
   unstable; see `AGENTS.md`).
 - 187,544 lines of Rust across the six workspace members (`src/` + `crates/`,
   excluding `fuzz/` and `tests/`).

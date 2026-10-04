@@ -397,3 +397,105 @@ pub fn execute_performance_matrix(config: &PerformanceMatrixConfig) -> Performan
         passed_deadline,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_matrix_format_channels_and_names() {
+        assert_eq!(MatrixFormat::Mono.channel_count(), 1);
+        assert_eq!(MatrixFormat::Stereo.channel_count(), 2);
+        assert_eq!(MatrixFormat::TwoPointOne.channel_count(), 3);
+        assert_eq!(MatrixFormat::Multichannel5Point1.channel_count(), 6);
+        assert_eq!(MatrixFormat::Multichannel7Point1.channel_count(), 8);
+        assert_eq!(MatrixFormat::Multichannel7Point1Point4.channel_count(), 12);
+        assert_eq!(MatrixFormat::Multichannel9Point1Point6.channel_count(), 16);
+        assert_eq!(MatrixFormat::BinauralHrtf.channel_count(), 2);
+        assert_eq!(MatrixFormat::HoaOrder1.channel_count(), 4);
+        assert_eq!(MatrixFormat::HoaOrder2.channel_count(), 9);
+        assert_eq!(MatrixFormat::HoaOrder3.channel_count(), 16);
+
+        assert_eq!(MatrixFormat::Stereo.name(), "Stereo (2ch)");
+        assert_eq!(MatrixFormat::BinauralHrtf.name(), "Binaural HRTF (2ch)");
+    }
+
+    #[test]
+    fn test_matrix_entry_result_serde() {
+        let entry = MatrixEntryResult {
+            block_size: 256,
+            sample_rate: 48000.0,
+            format: MatrixFormat::Stereo,
+            channels: 2,
+            block_deadline_us: 5333.3,
+            mean_callback_us: 12.5,
+            worst_callback_us: 20.0,
+            mean_cpu_percent: 0.23,
+            worst_cpu_percent: 0.38,
+            ns_per_sample: 24.4,
+            est_cycles_per_sample: 73.2,
+            allocations: 0,
+            memory_footprint_bytes: 4096,
+            timing_jitter_us: 1.2,
+            iterations: 100,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: MatrixEntryResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn test_performance_matrix_report_render() {
+        let report = PerformanceMatrixReport {
+            engine_version: "0.9.1".to_string(),
+            timestamp: "2026-10-04T00:00:00Z".to_string(),
+            entries: vec![MatrixEntryResult {
+                block_size: 256,
+                sample_rate: 48000.0,
+                format: MatrixFormat::Stereo,
+                channels: 2,
+                block_deadline_us: 5333.3,
+                mean_callback_us: 12.5,
+                worst_callback_us: 20.0,
+                mean_cpu_percent: 0.23,
+                worst_cpu_percent: 0.38,
+                ns_per_sample: 24.4,
+                est_cycles_per_sample: 73.2,
+                allocations: 0,
+                memory_footprint_bytes: 4096,
+                timing_jitter_us: 1.2,
+                iterations: 10,
+            }],
+            total_allocations: 0,
+            max_cpu_percent_observed: 0.38,
+            worst_callback_us_observed: 20.0,
+            passed_deadline: true,
+        };
+
+        let json = report.to_json();
+        assert!(json.contains("\"engine_version\": \"0.9.1\""));
+        assert!(json.contains("\"passed_deadline\": true"));
+
+        let table = report.render_table();
+        assert!(table.contains("SHADOW DESKTOP ENGINE FORMAL PERFORMANCE MATRIX"));
+        assert!(table.contains("Stereo (2ch)"));
+    }
+
+    #[test]
+    fn test_execute_minimal_performance_matrix() {
+        let config = PerformanceMatrixConfig {
+            block_sizes: vec![128],
+            sample_rates: vec![48000.0],
+            formats: vec![MatrixFormat::Stereo],
+            iterations_per_cell: 2,
+            warmup_iterations: 1,
+            cpu_nominal_ghz: 3.0,
+        };
+
+        let report = execute_performance_matrix(&config);
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].allocations, 0);
+        assert!(report.passed_deadline);
+    }
+}

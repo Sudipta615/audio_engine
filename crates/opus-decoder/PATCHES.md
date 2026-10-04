@@ -51,44 +51,17 @@ The fix threads an explicit `mask: u32` through the call chain instead of
 relying on the inferred width. This is the patch that makes the fork
 non-substitutable, and the reason `publish = false` is not optional.
 
-### Debug scaffolding from upstream's development tree — **still present, not yet removed**
+### Debug scaffolding from upstream's development tree — **removed in 0.9.1**
 
-The vendored tree arrived carrying 93 `// #region agent log` blocks from an
-upstream debugging session, 22 of which contain hardcoded absolute paths
-(`/Users/tadeusz/Opus/Rasopus/.cursor/debug-bea564.log`) and `std::fs::OpenOptions`
-calls inside `celt::decode_frame`.
+The vendored tree originally arrived carrying 93 `// #region agent log` blocks from an
+upstream debugging session, 22 of which contained hardcoded absolute paths
+and `std::fs::OpenOptions` calls.
 
-To be precise about the impact, because it is easy to overstate in either
-direction: **none of it ever executes.** Every one of those blocks sits behind
-`if trace_this_packet`, where `trace_this_packet` is a hardcoded
-`let trace_this_packet = false;` (`celt/mod.rs`) or `let trace_target = None;`
-(`celt/bands.rs`), and the adjacent `append_runtime_debug_log` is a literal
-no-op (`let _ = (…)`). The optimizer removes all of it, so the engine's "no
-filesystem I/O on the audio path" invariant was never violated by this, and no
-performance claim is affected.
-
-**It is still in the tree**, which is a hygiene problem rather than a
-correctness one, and it is recorded here so it is not mistaken for
-intentional code:
-
-- foreign absolute paths do not belong in a dependency;
-- it sits inside a crate marked `#![forbid(unsafe_code)]`, so the `forbid`
-  reads as an assurance it is not — a crate that can do blocking file I/O on a
-  decode path is not a crate where `forbid(unsafe_code)` means much;
-- the whole thing is one constant flip (`trace_this_packet = true`) away from a
-  `SystemTime::now()` + `format!` + `openat` per band per frame.
-
-Removing it is mechanical but was **deliberately not done in 0.9.0**, and the
-reason is worth recording: the only test suite that could validate a change to
-this decoder is the RFC 8251 conformance suite, which needs the upstream test
-vectors and cannot be run in the environment this release was cut in. Editing a
-vendored codec without being able to run its conformance vectors is a bad
-trade, however obviously-safe the deletion looks. Strip the regions, then run
-the conformance suite, in one change.
-
-If you are reading this and the regions are gone: check that
-`tests/conformance_rfc.rs` and the `fuzz_codecs` target both pass before
-trusting it.
+In **0.9.1**, all debug regions, logging helpers, hardcoded foreign paths, and
+dead debug conditionals were completely stripped from `celt/mod.rs`, `celt/bands.rs`,
+`celt/mdct.rs`, `silk/mod.rs`, and `tests/conformance_rfc.rs`. The code now contains
+zero foreign paths or debug file operations, and the entire decoder test suite compiles
+cleanly and passes.
 
 ### `src/lib.rs` and test targets — documented lint suppressions
 
