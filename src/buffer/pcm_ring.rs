@@ -186,8 +186,16 @@ impl<T: Copy + Default + Send + Sync + 'static> PcmRingBuffer<T> {
         if n == 0 {
             return 0;
         }
-        self.push_block(&samples[..n]);
-        n_frames
+        // Report what `push_block` ACTUALLY wrote, not what we asked for.
+        //
+        // `free_slots()` is reset-aware (it takes `max(reset_head, tail)`) while
+        // `push_block` uses the raw `tail`. Those differ while a reset is
+        // outstanding, and the raw `tail` is the lower of the two — so
+        // `push_block` legitimately writes fewer slots than `free_slots()`
+        // promised. Returning the precomputed `n_frames` reported frames the
+        // ring never moved, to a caller sizing its next push.
+        let written = self.push_block(&samples[..n]);
+        written / channels
     }
 
     /// Pop whole frames of interleaved samples (each frame is `channels`
@@ -207,8 +215,9 @@ impl<T: Copy + Default + Send + Sync + 'static> PcmRingBuffer<T> {
         if n == 0 {
             return 0;
         }
-        self.pop_block(&mut out[..n]);
-        n_frames
+        // As in `write_interleaved`: report the actual read, not the intent.
+        let read = self.pop_block(&mut out[..n]);
+        read / channels
     }
 
     /// Request that the ring be reset to empty.
@@ -287,17 +296,21 @@ impl<T: Copy + Default + Send + Sync + 'static> PcmRingBuffer<T> {
 //
 //   * exactly one thread calls `push_block` (it owns `head`)
 //   * exactly one thread calls `pop_block` (it owns `tail`)
-//   * `reset()` is a producer-side operation and must not race the consumer's
-//     `pop_block` — see its doc
+//   * `reset()` may be called from any thread, including while the consumer is
+//     popping — it only records an epoch that the consumer applies on its next
+//     `pop_block`, and never writes `tail`. See its doc.
 //
 // Two producers calling `push_block` would both read `head`, compute
 // overlapping `start` indices, and store `head`, which is UB reachable from
 // safe code now that `push_block` takes `&self`. The crate's own
 // `Graph2ControlHandle` is `Clone` and documents "one handle per producer
-// thread", so two clones driving the same queue would do exactly that. The
-// type cannot express the restriction without an API change (a producer /
-// consumer token split), which is a larger refactor than this fix; the
-// contract is documented here and at each method instead.
+// thread", so two clones driving the same queue would do exactly that.
+//
+// The type cannot express the restriction without an API change (a producer /
+// consumer token split, or `&mut self` push against `&self` pop), which is a
+// larger refactor than this fix; the contract is documented here and at each
+// method instead. Anything that can reach a `PcmRingBuffer` through a
+// cloneable handle must therefore be treated as single-producer.
 unsafe impl<T: Copy + Default + Send + Sync + 'static> Send for PcmRingBuffer<T> {}
 unsafe impl<T: Copy + Default + Send + Sync + 'static> Sync for PcmRingBuffer<T> {}
 

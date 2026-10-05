@@ -5,8 +5,18 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Least privilege at workflow scope. The build matrix below runs
+# `cargo build --all-features`, which executes every dependency `build.rs` in the
+# graph — a write-scoped GITHUB_TOKEN in scope of that step hands arbitrary
+# third-party build scripts the ability to push releases. The token is granted
+# only to the `publish` job, which consumes an already-built artifact.
 permissions:
-  contents: write
+  contents: read
+
+# Two rapid tag pushes must not race two publish jobs.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,12 +45,15 @@ jobs:
 
       - name: Install ALSA (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --workspace --release --all-features --bins
+        # `--locked`: a release must be built from the committed Cargo.lock.
+        # Without it a semver-compatible dependency release silently changes
+        # what ships, and the lockfile's reproducibility guarantee is void.
+        run: cargo build --workspace --release --all-features --bins --locked
 
       - name: Package binaries (Unix)
         if: runner.os != 'Windows'
@@ -49,6 +62,8 @@ jobs:
           cp target/release/audio-engine-cli dist/
           cp target/release/replaygain-scanner dist/
           cp target/release/engine-tui dist/
+          cp target/release/release-qualification dist/ 2>/dev/null || \
+            echo "note: release-qualification not built (needs all optional features)"
 
       - name: Package binaries (Windows)
         if: runner.os == 'Windows'
@@ -58,6 +73,8 @@ jobs:
           cp target/release/audio-engine-cli.exe dist/
           cp target/release/replaygain-scanner.exe dist/
           cp target/release/engine-tui.exe dist/
+          cp target/release/release-qualification.exe dist/ 2>/dev/null || \
+            echo "note: release-qualification not built (needs all optional features)"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -70,3 +87,34 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: dist/*
+  publish:
+    name: Publish to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: audio-engine-*-${{ github.ref_name }}
+          merge-multiple: true
+
+      # A checksum manifest so a downloaded artifact can be verified against
+      # something other than the same host that produced it. Previously the
+      # publish step globbed the build job's working directory instead of
+      # consuming a named artifact, so nothing tied the published bits to the
+      # built bits.
+      - name: Generate checksum manifest
+        run: |
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*

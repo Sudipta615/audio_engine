@@ -361,74 +361,115 @@ pub(crate) struct ControlBus {
 /// block. (The field doc previously claimed the write was control-side only;
 /// that was wrong and the mutex was genuinely on the audio path.)
 ///
-/// Instead it is a seqlock over plain data. The writer bumps `seq` to an odd
-/// value, stores the batch, then bumps it to the next even value; a reader
-/// retries while `seq` is odd or changed across its copy. There is exactly
-/// one writer (the audio thread) and readers are control-side, so the copy
-/// can only ever race a torn read, which the version check discards.
+/// ── Why this is not a seqlock over plain data ────────────────────────────
 ///
-/// # Safety
+/// It was, and it was undefined behaviour. The payload used to live in an
+/// `UnsafeCell<PluginParams>` and both sides copied it non-atomically (a
+/// ~516-byte `memcpy` racing a `memcpy`). A non-atomic read racing a
+/// non-atomic write *is* the data race — discarding the torn result afterwards
+/// does not undo it, and LLVM may hoist or widen the copy out of the `seq`
+/// window entirely, which is exactly what the version check existed to
+/// prevent. The `# Safety` block claimed "no reader can be copying at the
+/// same time"; that was a non-sequentially-consistent assumption, not a
+/// property the code had. Real seqlocks are only sound over atomic or
+/// immutable payloads.
 ///
-/// `value` is written only by the single audio-thread writer while `seq` is
-/// odd, and read only by control-side readers that re-validate `seq`
-/// afterwards. A reader that observes a stable even `seq` across its copy is
-/// guaranteed to have read a fully-published `PluginParams`. Nothing else
-/// touches `value`.
+/// So the payload is atomic *at the word level*. `PluginParams` is a
+/// fixed-capacity array of `{index: u32, value: f32}` plus a `len`, so it
+/// round-trips exactly through `[AtomicU32; …]` — `value.to_bits()` and back
+/// are bit-preserving, including NaN payloads and signed zero. Two buffers are
+/// published alternately so that a reader is never reading the buffer being
+/// written; the `seq` re-check still discards a torn *snapshot*, but now a
+/// torn snapshot is merely stale data rather than undefined behaviour.
+///
+/// Allocation-free on both sides, which is the property the seqlock was
+/// reaching for.
 struct PluginParamsSlot {
-    /// Even = quiescent, odd = write in progress.
+    /// Even = quiescent, odd = write in progress. Monotonic; never wraps in
+    /// practice and correctness does not depend on it not wrapping.
     seq: AtomicU32,
-    value: std::cell::UnsafeCell<plugin_abi::PluginParams>,
+    /// Which of the two buffers a reader must use.
+    published: AtomicU32,
+    /// `[index, value.to_bits()]` per slot, plus the trailing length word.
+    buf: [[AtomicU32; PAYLOAD_WORDS]; 2],
 }
 
-// SAFETY: see the type doc. The single-writer seqlock protocol means `value`
-// is only dereferenced mutably by the audio thread between the two `seq`
-// bumps, and only immutably by a reader that has verified `seq` is even and
-// unchanged across its copy.
-unsafe impl Sync for PluginParamsSlot {}
+/// `MAX_PLUGIN_PARAMS` slots × 2 words each, plus one word for `len`.
+const PAYLOAD_WORDS: usize = plugin_abi::MAX_PLUGIN_PARAMS * 2 + 1;
+/// Byte offset of the `len` word inside a payload buffer.
+const LEN_WORD: usize = PAYLOAD_WORDS - 1;
 
 impl PluginParamsSlot {
     fn new() -> Self {
         Self {
             seq: AtomicU32::new(0),
-            value: std::cell::UnsafeCell::new(plugin_abi::PluginParams::empty()),
+            published: AtomicU32::new(0),
+            // `AtomicU32` is not `Copy`, so this cannot be an array-repeat expression.
+            buf: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU32::new(0))),
         }
     }
 
     /// Publish a new batch. Audio thread only (single writer).
     fn store(&self, batch: plugin_abi::PluginParams) {
-        // AcqRel: the odd store must be visible before the payload write, and
-        // the even store must not be reordered before it.
-        self.seq.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        // SAFETY: single writer, and it is the only thread that ever takes
-        // this path. No reader can be copying at the same time because they
-        // only copy while `seq` reads even, and it is odd here.
-        unsafe { *self.value.get() = batch };
-        self.seq.fetch_add(1, std::sync::atomic::Ordering::Release);
+        use std::sync::atomic::Ordering;
+        // Write the buffer that is NOT currently published, so a reader
+        // copying the published one never races these stores.
+        let slot = 1 - (self.published.load(Ordering::Relaxed) & 1);
+        let dst = &self.buf[slot as usize];
+        // Odd while in flight: a reader that observes this retries rather than
+        // believing it read a settled buffer.
+        self.seq.fetch_add(1, Ordering::AcqRel);
+        for (i, v) in batch.iter().enumerate().take(plugin_abi::MAX_PLUGIN_PARAMS) {
+            dst[i * 2].store(v.index, Ordering::Relaxed);
+            dst[i * 2 + 1].store(v.value.to_bits(), Ordering::Relaxed);
+        }
+        dst[LEN_WORD].store(batch.len() as u32, Ordering::Release);
+        // Release: the payload stores above must be visible before the buffer
+        // is advertised as the one to read.
+        self.published.store(slot, Ordering::Release);
+        self.seq.fetch_add(1, Ordering::Release);
     }
 
     /// Read the last published batch. Control side.
     fn load(&self) -> plugin_abi::PluginParams {
         use std::sync::atomic::Ordering;
-        // Bounded retries: a writer that is preempted mid-publish can spin
-        // this, but the write is a 516-byte copy, so the window is tiny and
-        // the fallback below keeps the control thread from hanging.
-        for _ in 0..8 {
+        let mut out = plugin_abi::PluginParams::empty();
+        // Bounded retries: a writer preempted mid-publish can spin this, but the
+        // window is a few dozen word stores, so it is microseconds at worst.
+        // The fallback is safe rather than merely stale: every read below is
+        // atomic, so the worst case is a mixed-generation batch.
+        for attempt in 0..8 {
             let before = self.seq.load(Ordering::Acquire);
             if before & 1 != 0 {
                 std::hint::spin_loop();
                 continue;
             }
-            // SAFETY: `seq` was even, so no write is in flight; a writer
-            // starting now bumps `seq` odd before touching `value`, which the
-            // re-check below detects.
-            let copy = unsafe { *self.value.get() };
+            let slot = (self.published.load(Ordering::Acquire) & 1) as usize;
+            let src = &self.buf[slot];
+            let mut scratch = [0.0f32; plugin_abi::MAX_PLUGIN_PARAMS];
+            let mut indices = [0u32; plugin_abi::MAX_PLUGIN_PARAMS];
+            for i in 0..plugin_abi::MAX_PLUGIN_PARAMS {
+                indices[i] = src[i * 2].load(Ordering::Relaxed);
+                scratch[i] = f32::from_bits(src[i * 2 + 1].load(Ordering::Relaxed));
+            }
+            let len =
+                (src[LEN_WORD].load(Ordering::Acquire) as usize).min(plugin_abi::MAX_PLUGIN_PARAMS);
             if self.seq.load(Ordering::Acquire) == before {
-                return copy;
+                for i in 0..len {
+                    out.push(indices[i], scratch[i]);
+                }
+                return out;
+            }
+            if attempt == 7 {
+                // Contended: return what we read rather than spinning forever
+                // on a control path. `push` re-validates finiteness and
+                // capacity, so this cannot panic.
+                for i in 0..len {
+                    out.push(indices[i], scratch[i]);
+                }
             }
         }
-        // Persistently contended (or a hostile scheduler). Report the last
-        // known-good state rather than spinning forever on a control path.
-        unsafe { *self.value.get() }
+        out
     }
 }
 
@@ -906,11 +947,14 @@ impl GraphControlHandle {
             self.bus.reclaimed.fetch_add(1, Ordering::Relaxed);
         }
         // Drain the overflow stack the audio thread parked displaced
-        // generations in (see `hand_back_retired`). Reset the cursor only after
-        // the slots have been taken, so a concurrent producer either sees a
-        // free slot or lands on an index we are about to reuse only after its
-        // own `fetch_add` returned — the AcqRel pair orders the store against
-        // this load.
+        // generations in (see `hand_back_retired`).
+        //
+        // The producer publishes the cursor LAST, so a consumer that observes
+        // `n` entries is guaranteed to see all `n` slot stores. (It used to
+        // `fetch_add` the cursor *before* storing its slot: the `AcqRel` pair
+        // ordered only what was sequenced before the increment, so a consumer
+        // could see a non-zero cursor with a still-null slot, take nothing, and
+        // reset the cursor — permanently orphaning that generation.)
         let n = self
             .bus
             .retired_overflow_len
@@ -926,7 +970,17 @@ impl GraphControlHandle {
             }
         }
         if n > 0 {
-            self.bus.retired_overflow_len.store(0, Ordering::Release);
+            // Compare-and-swap, not `store(0)`: a producer may have published
+            // further entries while the loop above was draining, and a blind
+            // reset would discard that cursor and leak those generations. On
+            // failure the entries stay queued and the next drain re-scans them —
+            // every slot is taken with `swap(null)`, so a rescan is idempotent.
+            let _ = self.bus.retired_overflow_len.compare_exchange(
+                n,
+                0,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
         }
     }
 
@@ -1723,9 +1777,16 @@ impl DspGraph {
         if displaced.is_null() {
             return;
         }
-        let idx = self.bus.retired_overflow_len.fetch_add(1, Ordering::AcqRel);
+        // Single writer (the audio thread), so a load/store pair is enough — and it
+        // is required to be a load/store pair rather than an RMW: the cursor
+        // must be published AFTER the slot it counts, so that a consumer
+        // seeing this value also sees the slot. See `reclaim_retired`.
+        let idx = self.bus.retired_overflow_len.load(Ordering::Relaxed);
         if idx < RETIRE_OVERFLOW_SLOTS {
-            self.bus.retired_overflow[idx].store(displaced, Ordering::Release);
+            self.bus.retired_overflow[idx].store(displaced, Ordering::Relaxed);
+            self.bus
+                .retired_overflow_len
+                .store(idx + 1, Ordering::Release);
         } else {
             // Out of overflow slots. The audio thread must not free, so this
             // is counted and leaked deliberately — the one outcome strictly

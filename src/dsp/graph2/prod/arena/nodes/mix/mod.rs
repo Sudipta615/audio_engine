@@ -20,8 +20,36 @@
 //! Realtime contract: the node owns one pair of secondary-input planes per
 //! input (preallocated at construction), advances every input's state
 //! exactly once per processed block, and performs no allocation on the hot
-//! Path. sums secondary inputs into the stereo front pair only;
-//! Multichannel bus mixing is.
+//! path. [`sum`] sums secondary inputs into the stereo front pair only;
+//! multichannel bus mixing lives in the arena's multichannel plan steps.
+//!
+//! ── Summation gain law ─────────────────────────────────────────────────────
+//!
+//! The bus sums its inputs at their **per-input user gain, with no automatic
+//! headroom compensation**: there is no `-6 dB`/slot or `1/√N` law applied
+//! anywhere in this module, and none is documented as a default elsewhere in
+//! the project. This is stated here because it is a deliberate property of the
+//! current design AND the single most important thing to know when adding
+//! lanes:
+//!
+//!   * `MAX_MIX_SLOTS` is 8, and each input's `gain` defaults to `1.0`.
+//!   * 8 unity-gain inputs summing **coherently** reach **+18.1 dB**;
+//!     summing **incoherently** (uncorrelated material, the normal case for
+//!     independent tracks) reaches **+9.0 dB**.
+//!   * The only thing downstream bounding that is the lookahead limiter, so
+//!     enabling lanes shows up as permanent gain reduction, and the mix level
+//!     depends on how many lanes happen to be active.
+//!
+//! Two inputs — the primary plus its crossfade partner, which is the
+//! overwhelmingly common configuration, and the one the bit-exact equivalence
+//! suite pins — are unaffected: a crossfade cross-fades the pair rather than
+//! summing them at unity, so the bus peak is unchanged.
+//!
+//! Changing this to a normalised law is a *sound* change for every existing
+//! user and would have to be mirrored in the frozen `dsp::pipeline` oracle to
+//! keep `tests/fidelity/graph_pipeline_equivalence` meaningful, so it is not
+//! something to change incidentally. The available levers for a host are
+//! per-input `gain` and `SlotSend::master_gain`.
 
 pub mod envelope;
 pub mod sum;
@@ -512,7 +540,23 @@ fn pan_gains(pan: f32, law: PanLaw) -> (f32, f32) {
                 (1.0, 1.0 + pan)
             }
         }
-        PanLaw::Center => (1.0 - pan.abs(), 1.0 - pan.abs()),
+        // Balance law: taper the side being moved AWAY from centre, hold the
+        // other at unity.
+        //
+        // This used to be `(1 - |pan|, 1 - |pan|)`, which is not a pan law at
+        // all: both outputs were identical at every position (so there was no
+        // stereo image, just an identical level cut of both channels), and at
+        // `|pan| = 1` it produced `(0, 0)` — total silence. Correct balance
+        // keeps the far side at unity:
+        //   pan = +1.0 → (1, 0)  hard left
+        //   pan = +0.5 → (0.5, 1)  left attenuated, right untouched
+        PanLaw::Center => {
+            if pan >= 0.0 {
+                (1.0 - pan, 1.0)
+            } else {
+                (1.0, 1.0 + pan)
+            }
+        }
     }
 }
 

@@ -158,12 +158,31 @@ fn sh_n_high_order(order: u8, x: f32, y: f32, z: f32, out: &mut [f32]) {
                 * two_l_1)
                 .sqrt();
             let p_val = plm[l][m_abs];
+            // Remove the Condon-Shortley phase.
+            //
+            // The recurrence above is the textbook *associated* Legendre form,
+            // which carries the `(−1)^m` Condon-Shortley factor — it yields
+            // `P₁¹ = −sinθ`. The ACN convention used by the hardcoded orders
+            // 1–3 above omits that factor (`out[3] = +√3·x`, not `−√3·x`).
+            //
+            // Left uncorrected, every ODD-m channel of order ≥ 4 came out with
+            // the opposite sign to the same basis function's lower-order
+            // siblings: ACN 5, 12, 14, … were mirrored relative to ACN/SN3D.
+            // A self-consistent encode/decode pair cancels the error, but any
+            // standard ACN HOA stream fed to this engine decodes to a mirrored
+            // image from order 4 up, and a band-limited or order-crossover
+            // rotation sees a sign discontinuity at the order-3/4 seam.
+            //
+            // Spot-check after the fix, for l=4, m=1 against the published
+            // ACN value: `norm · |P₄¹| · cosφ` reduces to
+            // `16.5917·x·z³ − 7.1105·x·z`. ✔
+            let cs_phase = if m_abs.is_multiple_of(2) { 1.0 } else { -1.0 };
             let trig = if signed_m < 0 {
                 sin_mphi[m_abs]
             } else {
                 cos_mphi[m_abs]
             };
-            out[acn] = (norm * p_val * trig) as f32;
+            out[acn] = (norm * cs_phase * p_val * trig) as f32;
         }
     }
 }

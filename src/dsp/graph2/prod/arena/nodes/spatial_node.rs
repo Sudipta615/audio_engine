@@ -338,6 +338,21 @@ impl SpatialNode {
             .prepare(&speakers, rate)
             .is_ok();
         self.mc_speakers = if ok { Some(speakers) } else { None };
+        // The f64 multichannel path demotes into a channel-major scratch before
+        // rendering. Size it HERE, on the control path, rather than lazily in
+        // `render_block_multichannel_f64`: a lazy growth put up to
+        // `MAX_CHANNELS * MAX_AUDIO_BLOCK_FRAMES` f32 (256 KiB) of `malloc`
+        // on the first multichannel block, on the audio thread, which is the
+        // one place this crate forbids it.
+        //
+        // `self.out` is already allocated to exactly this width at
+        // construction, so a multichannel node now costs two such planes and a
+        // stereo node still costs neither (both early-returns above run before
+        // this line).
+        if ok && self.mc_planes.len() < MAX_CHANNELS * MAX_AUDIO_BLOCK_FRAMES {
+            self.mc_planes
+                .resize(MAX_CHANNELS * MAX_AUDIO_BLOCK_FRAMES, 0.0);
+        }
         self.mc_prepared = ok && self.mc_bed.is_some();
         self.mc_prepared
     }
@@ -374,6 +389,12 @@ impl SpatialNode {
             return;
         }
         let channels = planes.len();
+        // `need > self.out.len()` does NOT imply this: a 64-channel block of
+        // 100 frames fits the out-scratch while still exceeding MAX_CHANNELS.
+        // The bed list is a fixed-size stack array, so bound the width here.
+        if channels > MAX_CHANNELS {
+            return;
+        }
         let Some(layout) = self.mc_layout.as_ref() else {
             return;
         };
@@ -395,20 +416,29 @@ impl SpatialNode {
         // otherwise the previous block's samples leak into this one.
         self.out[..need].fill(0.0);
 
-        let bed_inputs: Vec<&[f32]> = planes.iter().map(|p| &p[..frames]).collect();
-        let inputs = HybridBlockInputs {
-            objects: &[],
-            beds: &bed_inputs,
-            fields: &[],
-        };
-        let Some(renderer) = self.mc_renderer.as_mut() else {
-            return;
-        };
-        let result =
-            renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
-        self.restore_program(&snap);
-        if result.is_err() {
-            return;
+        // A fixed-size stack array, not a `collect()`: this runs once per block
+        // on the audio thread, and a `Vec` here put one malloc/free pair per
+        // block on the hottest path in the spatial renderer.
+        let mut bed_storage: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
+        {
+            let bed_inputs = &mut bed_storage[..channels];
+            for (dst, plane) in bed_inputs.iter_mut().zip(planes.iter()) {
+                *dst = &plane[..frames];
+            }
+            let inputs = HybridBlockInputs {
+                objects: &[],
+                beds: bed_inputs,
+                fields: &[],
+            };
+            let Some(renderer) = self.mc_renderer.as_mut() else {
+                return;
+            };
+            let result =
+                renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
+            self.restore_program(&snap);
+            if result.is_err() {
+                return;
+            }
         }
 
         for (ch, plane) in planes.iter_mut().enumerate() {
@@ -431,6 +461,9 @@ impl SpatialNode {
             return;
         }
         let channels = planes.len();
+        if channels > MAX_CHANNELS {
+            return;
+        }
         let Some(layout) = self.mc_layout.as_ref() else {
             return;
         };
@@ -441,11 +474,12 @@ impl SpatialNode {
         if need > self.out.len() {
             return;
         }
-        // Allocated with the renderer rather than at construction: 16 x
-        // MAX_AUDIO_BLOCK_FRAMES f32 is 256 KiB, and a stereo graph must not pay
-        // for a multichannel path it never takes.
+        // Sized on the control path in `set_multichannel_layout`. This used to
+        // grow lazily, which put a 256 KiB `malloc` on the audio thread on the
+        // first multichannel f64 block. A short scratch is now a refuse, not a
+        // grow — the same policy `arena/process.rs` applies to under-allocation.
         if self.mc_planes.len() < need {
-            self.mc_planes.resize(need, 0.0);
+            return;
         }
 
         let block_secs = frames as f32 / self.sample_rate;
@@ -463,22 +497,26 @@ impl SpatialNode {
         }
 
         self.out[..need].fill(0.0);
-        let bed_inputs: Vec<&[f32]> = (0..channels)
-            .map(|ch| &self.mc_planes[ch * frames..(ch + 1) * frames])
-            .collect();
-        let inputs = HybridBlockInputs {
-            objects: &[],
-            beds: &bed_inputs,
-            fields: &[],
-        };
-        let Some(renderer) = self.mc_renderer.as_mut() else {
-            return;
-        };
-        let result =
-            renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
-        self.restore_program(&snap);
-        if result.is_err() {
-            return;
+        let mut bed_storage: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
+        {
+            let bed_inputs = &mut bed_storage[..channels];
+            for (ch, dst) in bed_inputs.iter_mut().enumerate() {
+                *dst = &self.mc_planes[ch * frames..(ch + 1) * frames];
+            }
+            let inputs = HybridBlockInputs {
+                objects: &[],
+                beds: bed_inputs,
+                fields: &[],
+            };
+            let Some(renderer) = self.mc_renderer.as_mut() else {
+                return;
+            };
+            let result =
+                renderer.process_hybrid_block(&self.scene, &inputs, frames, &mut self.out[..need]);
+            self.restore_program(&snap);
+            if result.is_err() {
+                return;
+            }
         }
 
         for (ch, plane) in planes.iter_mut().enumerate() {

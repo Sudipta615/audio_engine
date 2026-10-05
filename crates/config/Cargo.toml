@@ -1,10 +1,10 @@
 [package]
 name = "config"
-version = "0.9.2"
+version = "0.9.3"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/Sudipta615/ultimate-engine"
+repository = "https://github.com/Sudipta615/audio_engine"
 description = "Shadow Desktop engine configuration model: Serde-serializable engine, DSP, output and spatial settings with versioned load/save"
 readme = "../../README.md"
 keywords = ["audio", "dsp", "config", "serde", "audiophile"]

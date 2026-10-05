@@ -1,8 +1,28 @@
-//! Realtime-safe plugin sandbox wrapper (§12.1, Item 32).
+//! Realtime-safe plugin fault-tolerance wrapper (§12.1, Item 32).
 //!
-//! Provides isolated, fault-tolerant execution around `plugin_abi::PluginInstance`
+//! Provides fault-tolerant execution around `plugin_abi::PluginInstance`
 //! with a execution watchdog timer, panic-catching boundary, sample corruption
 //! verification, instantaneous dry-passthrough failover, and auto-restart backoff.
+//!
+//! ── This is NOT an isolation boundary ─────────────────────────────────────
+//!
+//! Nothing in this module contains untrusted native code. "Sandbox" here means
+//! *fault containment*: a plugin that panics, hangs, or emits NaN is detected
+//! and bypassed rather than allowed to damage the stream. A plugin that calls
+//! `abort()`, segfaults, or corrupts its own heap still takes the host process
+//! with it — `catch_unwind` cannot catch a signal or an abort.
+//!
+//! The production graph does not use this module at all: the slot the arena
+//! builds is [`PluginHostNode`](super::plugin_host_node::PluginHostNode), whose
+//! only mitigation is the `catch_unwind` inside `PluginInstance::process`. The
+//! types here are reachable from the fidelity suites and from the
+//! `--plugin-worker` CLI path, and nothing else.
+//!
+//! `PluginProcessSandbox` additionally models an out-of-process worker. It is
+//! NOT a working isolation transport: `plugin_abi::PluginSandboxConfig::validate`
+//! rejects every isolated mode, and the crate that owns the policy says so
+//! explicitly (see `crates/plugin-abi/src/sandbox.rs`). Treat `plugin-dylib` as
+//! a trust decision, not a sandboxed one.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
@@ -13,8 +33,6 @@ use plugin_abi::{
 };
 
 use crate::buffer::MAX_AUDIO_BLOCK_FRAMES;
-use crate::dsp::graph2::prod::arena::node::DspNode;
-use crate::dsp::pipeline::{DspStageCapability, StageChannelSupport, StagePrecision};
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -263,130 +281,6 @@ impl SandboxedPluginInstance {
         for (ch, plane) in planes[..num_channels].iter_mut().enumerate() {
             let dry_slice = &self.dry_scratch[ch][..num_frames];
             plane[..num_frames].copy_from_slice(dry_slice);
-        }
-    }
-}
-
-/// A standalone DspNode hosting a sandboxed plugin.
-#[allow(dead_code)]
-pub struct PluginSandboxNode {
-    sandbox: SandboxedPluginInstance,
-    enabled: bool,
-    sample_rate: f32,
-    max_channels: usize,
-    now_ms_counter: u64,
-}
-
-#[allow(dead_code)]
-impl PluginSandboxNode {
-    /// Create a new sandboxed plugin node.
-    pub fn new(instance: PluginInstance, config: PluginSandboxConfig, sample_rate: f32) -> Self {
-        Self {
-            sandbox: SandboxedPluginInstance::new(instance, config, sample_rate),
-            enabled: true,
-            sample_rate,
-            max_channels: 2,
-            now_ms_counter: 0,
-        }
-    }
-
-    /// Access internal sandbox.
-    pub fn sandbox(&self) -> &SandboxedPluginInstance {
-        &self.sandbox
-    }
-
-    /// Mutable access to internal sandbox.
-    pub fn sandbox_mut(&mut self) -> &mut SandboxedPluginInstance {
-        &mut self.sandbox
-    }
-
-    /// Set node enabled status.
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-}
-
-impl DspNode for PluginSandboxNode {
-    fn capability(&self) -> DspStageCapability {
-        DspStageCapability {
-            name: "plugin_sandbox",
-            channel_support: StageChannelSupport::AllChannels,
-            position: "insert seam",
-            stateful: true,
-            realtime_safe: true,
-            bit_perfect_compatible: false,
-            sample_rate_sensitive: true,
-            precision: StagePrecision::Any,
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.enabled && self.sandbox.state().active
-    }
-
-    fn latency_samples(&self) -> usize {
-        0
-    }
-
-    fn tail_samples(&self) -> usize {
-        0
-    }
-
-    fn reset(&mut self) {
-        self.sandbox.reset();
-    }
-
-    fn prepare(&mut self, sample_rate: f32, max_channels: usize) {
-        self.sample_rate = sample_rate;
-        self.max_channels = max_channels;
-        let _ = self.sandbox.prepare(max_channels, MAX_AUDIO_BLOCK_FRAMES);
-    }
-
-    fn process_block_f32(&mut self, planes: &mut [&mut [f32]]) {
-        if !self.enabled {
-            return;
-        }
-        // Approximate time counter increment based on block frames (e.g., 256 samples @ 48kHz ~ 5.3ms)
-        let frames = planes.first().map(|p| p.len()).unwrap_or(0);
-        let block_ms = ((frames as f64 / self.sample_rate as f64) * 1000.0).max(1.0) as u64;
-        self.now_ms_counter += block_ms;
-
-        let _ = self.sandbox.process(planes, self.now_ms_counter);
-    }
-
-    fn process_block_f64(&mut self, planes: &mut [&mut [f64]]) {
-        if !self.enabled {
-            return;
-        }
-        let frames = planes.first().map(|p| p.len()).unwrap_or(0);
-        if frames == 0 || frames > MAX_AUDIO_BLOCK_FRAMES {
-            return;
-        }
-        let mut l32 = [0f32; MAX_AUDIO_BLOCK_FRAMES];
-        let mut r32 = [0f32; MAX_AUDIO_BLOCK_FRAMES];
-        if let Some(p) = planes.first() {
-            for (d, s) in l32.iter_mut().zip(p.iter()) {
-                *d = *s as f32;
-            }
-        }
-        if let Some(p) = planes.get(1) {
-            for (d, s) in r32.iter_mut().zip(p.iter()) {
-                *d = *s as f32;
-            }
-        }
-        {
-            let mut pair: [&mut [f32]; 2] = [&mut l32[..frames], &mut r32[..frames]];
-            self.process_block_f32(&mut pair);
-        }
-        if let Some(dst) = planes.first_mut() {
-            for (d, s) in dst.iter_mut().zip(l32[..frames].iter()) {
-                *d = *s as f64;
-            }
-        }
-        if let Some(dst) = planes.get_mut(1) {
-            for (d, s) in dst.iter_mut().zip(r32[..frames].iter()) {
-                *d = *s as f64;
-            }
         }
     }
 }

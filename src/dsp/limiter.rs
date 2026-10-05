@@ -156,6 +156,25 @@ pub struct LookaheadLimiter {
 
     // ── Gain smoothing ─────────────────────────────────────────────────────
     current_gain: f32,
+    /// Per-channel gain state for the *unlinked* detector, one smoothed gain
+    /// per channel.
+    ///
+    /// This MUST be struct state, not a per-sample local. It used to be
+    /// declared as `let mut per_channel_gain = [1.0; MAX_CHANNELS];` inside
+    /// `process_sample_multichannel`, which re-seeded it to unity on every
+    /// sample and made the one-pole smoothing memoryless:
+    ///
+    ///     g = desired + (1.0 - desired) * coeff
+    ///
+    /// At the documented defaults (48 kHz, 0.5 ms attack, 100 ms release)
+    /// `attack_coeff = exp(-1/24) = 0.9592`, so the gain converged to
+    /// `1 − 0.0408·(1 − desired)` — about **4 % of the required reduction**
+    /// during attack and **0.02 %** during release. With `stereo_link < 1.0`
+    /// the unlinked path therefore barely limited at all and the result fell
+    /// through to the hard clip at the ceiling: the "limiter" was a clipper.
+    /// Moving `link` from 1.0 also stepped the applied gain discontinuously,
+    /// which is the one thing the module doc says a limiter must never do.
+    channel_gains: [f32; crate::buffer::MAX_CHANNELS],
     attack_coeff: f32,
     release_coeff: f32,
     stereo_link: f32,
@@ -311,6 +330,7 @@ impl LookaheadLimiter {
             }),
             sample_counter: 0,
             current_gain: 1.0,
+            channel_gains: [1.0; crate::buffer::MAX_CHANNELS],
             attack_coeff,
             release_coeff,
             stereo_link: 1.0,
@@ -719,12 +739,18 @@ impl LookaheadLimiter {
         // default configuration is bit-identical to a limiter that has no
         // stereo-link control at all.
         let link = self.stereo_link.clamp(0.0, 1.0);
-        let mut per_channel_gain = [1.0f32; crate::buffer::MAX_CHANNELS];
         if link < 1.0 {
-            // Each channel gets its own sliding-window maximum. At `link == 0`
-            // this is the whole gain; between 0 and 1 the two are blended, so
-            // the control is continuous rather than a switch that pops.
-            for (i, gain) in per_channel_gain.iter_mut().take(ch).enumerate() {
+            // Each channel gets its own sliding-window maximum, smoothed into
+            // `self.channel_gains` — persistent state, so the one-pole actually
+            // integrates across samples. At `link == 0` this is the whole gain;
+            // between 0 and 1 the two are blended, so the control is continuous
+            // rather than a switch that pops.
+            // Indexed rather than `iter_mut()`: holding an `iter_mut()` borrow of
+            // `self.channel_gains` across `self.push_link_deque(...)` — a
+            // `&mut self` method — is a double mutable borrow of `self`. Read
+            // the previous gain by value, do the `self` work, then write the
+            // field last.
+            for i in 0..ch {
                 // Reuse the peak already computed in step 3. Calling
                 // `channel_peak` here would advance `fir_meters[i]` a SECOND
                 // time for this sample (step 3 already did, for the linked
@@ -747,14 +773,18 @@ impl LookaheadLimiter {
                     1.0
                 };
                 // The linked gain is already smoothed; smooth this one the
-                // same way so the blend between them is not a step.
-                let coeff = if desired < *gain {
+                // same way so the blend between them is not a step. `prev` is
+                // the *persisted* gain for this channel, which is the whole
+                // point: it is what makes this a one-pole filter rather than a
+                // per-sample recomputation.
+                let prev = self.channel_gains[i];
+                let coeff = if desired < prev {
                     self.attack_coeff
                 } else {
                     self.release_coeff
                 };
-                *gain = desired + (*gain - desired) * coeff;
-                *gain = crate::buffer::flush_denormal(*gain).clamp(0.0, 1.0);
+                let smoothed = desired + (prev - desired) * coeff;
+                self.channel_gains[i] = crate::buffer::flush_denormal(smoothed).clamp(0.0, 1.0);
             }
         }
 
@@ -782,7 +812,7 @@ impl LookaheadLimiter {
             };
             self.delay_lines[i][self.delay_write_pos] = write_sample;
             let gain = if link < 1.0 {
-                (self.current_gain * link + per_channel_gain[i] * (1.0 - link)) as f64
+                (self.current_gain * link + self.channel_gains[i] * (1.0 - link)) as f64
             } else {
                 self.current_gain as f64
             };
@@ -977,6 +1007,7 @@ impl LookaheadLimiter {
         }
         self.sample_counter = 0;
         self.current_gain = 1.0;
+        self.channel_gains = [1.0; crate::buffer::MAX_CHANNELS];
         for meter in &mut self.fir_meters {
             meter.reset();
         }
@@ -1039,6 +1070,7 @@ impl LookaheadLimiter {
         }
         self.sample_counter = 0;
         self.current_gain = 1.0;
+        self.channel_gains = [1.0; crate::buffer::MAX_CHANNELS];
         for meter in &mut self.fir_meters {
             meter.reset();
         }

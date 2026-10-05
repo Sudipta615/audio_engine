@@ -883,7 +883,7 @@ layout. **Processing.** ITU-R BS.775 templates, custom matrices, upmix
 modes. **Outputs.** Channel-mapped planes. **Depends on.** decode. **Used
 by.** decode loop, output. **Limitations.** `ChannelPolicy::PassThrough` is
 conditional (see 2.7). **Location.** `src/decode/channel_layout.rs`,
-`channel_mix.rs`, `src/spatial/upmix.rs`.
+`src/decode/channel_mix.rs`.
 
 ## 5.5 PlaybackStream & the decode loop
 
@@ -925,7 +925,7 @@ gain. **Used by.** decode loop (every block). **Runtime.** tick thread, zero
 alloc. **Performance.** O(slots × frames); disabled slots skip entirely.
 **User effect.** Track levels, panning, ducking, automation, sends.
 **Limitations.** Slot count 2–8 (default 2; lanes need ≥ 2). **Location.**
-`src/dsp/graph/nodes/mix/` (mod/envelope/sum).
+`src/dsp/graph2/prod/arena/nodes/mix/` (mod/envelope/sum).
 
 ## 5.8 Aux bus (AuxBusNode) + insert
 
@@ -940,7 +940,7 @@ planes returned into the master. **Depends on.** mix bus, convolution.
 **Used by.** decode loop. **Runtime.** tick thread. **User effect.**
 Headphone reverb buses, shared room effects, sends-only mixing.
 **Limitations.** Insert = one convolution; disabled = bit-exact. **Location.**
-`src/dsp/graph/nodes/aux_node.rs`, `nodes/mix/sends.rs`.
+``src/dsp/graph2/prod/arena/nodes/aux_node.rs` (the send-level struct is `SlotSend` in `nodes/mix/mod.rs`).
 
 ## 5.9 Equalization family
 
@@ -953,7 +953,7 @@ plan (EQ step). **Runtime.** tick thread. **Performance.** Cheap per band;
 64 bands is the max. **User effect.** Everything tonal. **Limitations.**
 Graphic EQ is a layer over parametric, not a separate filter bank.
 **Location.** `src/dsp/equalizer/`, `graphic_eq.rs`, `autoeq.rs`,
-`nodes/eq_node.rs`.
+`src/dsp/graph2/prod/arena/nodes/eq_node.rs`.
 
 ## 5.10 Dynamics (multiband compressor)
 
@@ -964,7 +964,7 @@ threshold/ratio/attack/release/makeup, peak or RMS detector. **Outputs.**
 Compressed planes. **Depends on.** dsp core. **Used by.** graph plan
 (DYNAMICS step). **Runtime.** tick thread. **User effect.** Punch, glue,
 consistency. **Limitations.** Fixed 3 bands. **Location.**
-`src/dsp/multiband_compressor.rs`, `nodes/dynamics_node.rs`.
+`src/dsp/multiband_compressor.rs`, `src/dsp/graph2/prod/arena/nodes/dynamics_node.rs`.
 
 ## 5.11 Convolution engine
 
@@ -994,7 +994,7 @@ based instead. **Runtime.** tick thread. **Performance.** Search cost
 scales with tier; algorithmic latency scales with window. **User effect.**
 Podcast speed, DJ varispeed, vocal pitch. **Limitations.** Core runs f32 in
 both precision modes (documented trade-off). **Location.**
-`src/dsp/timestretch.rs`, `nodes/timestretch_node.rs`.
+`src/dsp/timestretch/` (directory: `mod.rs`, `stretcher.rs`, `transient.rs`, `phase_vocoder.rs`).
 
 ---
 
@@ -1048,7 +1048,7 @@ thread + per-endpoint workers. **Performance.** Resampler quality tier is
 the big knob (see 12). **User effect.** No clipping, no distortion,
 correct rate, clean low-level detail. **Limitations.** Limiter and dither
 are f32 in both precision modes (deliberate). **Location.**
-`src/dsp/graph/limiter.rs`, `resampler/`, `true_peak.rs`, `dither.rs`,
+``src/dsp/graph2/prod/arena/limiter.rs`, `resampler/`, `true_peak.rs`, `dither.rs`,
 `nodes/resampler_node.rs`/`limiter_node.rs`/`dither_node.rs`.
 
 ## 5.16 Output backends & endpoint workers
@@ -1124,7 +1124,7 @@ next/previous/repeat/shuffle. **Processing.** Ordered queue, shuffle cycle
 Previous. **Outputs.** `PlaylistChanged` events + `PlaybackInfo`
 index/length. **Used by.** tick. **Limitations.** No cross-session
 persistence of queues (that's the host's job). **Location.**
-`src/playlist.rs`.
+`src/playlist/` (directory: `mod.rs`, `io.rs`, `tests.rs`).
 
 ## 5.21 Lane registry
 

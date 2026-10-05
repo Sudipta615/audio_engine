@@ -24,7 +24,7 @@ pub use encode::{encode_plane_wave, encode_plane_wave_n, AmbisonicEncoder};
 pub use hoa::{
     HoaConfig, HoaDecoder, HoaDecoding, HoaEncoder, NearFieldCompensation, PerSpeakerDelay,
 };
-pub use rotation::{rotate_bus_frame, rotate_bus_frame_n};
+pub use rotation::{rotate_bus_frame, rotate_bus_frame_n, rotation_supported, MAX_ROTATABLE_ORDER};
 
 #[cfg(test)]
 mod tests {

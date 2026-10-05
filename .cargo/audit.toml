@@ -1,9 +1,9 @@
 # cargo-audit policy for the `audio-engine` workspace.
 #
 # cargo-audit reads this file automatically from `.cargo/audit.toml`; the
-# `supply-chain` CI job runs it with no `--config` override, so this IS the
-# policy in force. Until this file existed, the enforced advisory-ignore list
-# lived nowhere in the repository.
+# `audit` CI job (rustsec/audit-check) runs it with no `--config` override,
+# so this IS the policy in force. Until this file existed, the enforced
+# advisory-ignore list lived nowhere in the repository.
 #
 # ── Policy for adding an ignore entry ──────────────────────────────────────
 #
@@ -28,7 +28,7 @@
 #            URL in the reason.
 #
 # Note that cargo-deny also has an `[advisories] ignore` list in `deny.toml`,
-# and the same `supply-chain` job runs both tools. The two lists must stay in
+# and the `deny` job runs cargo-deny against the sibling list. They must stay in
 # sync: an id ignored in one and not the other is a hole in whichever tool runs
 # first, and a confusing failure in whichever runs second. Add to both in the
 # same commit, with the same four fields.

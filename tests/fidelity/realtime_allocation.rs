@@ -395,6 +395,13 @@ fn realtime_graph_plan_quality_mode_does_not_allocate() {
 fn realtime_graph_plan_multichannel_does_not_allocate() {
     let mut cfg = full_chain_config();
     cfg.precision_mode = config::PrecisionMode::Performance;
+    // Spatial ON. Without this the test never reached
+    // `SpatialNode::render_block_multichannel`, because the node returns
+    // immediately when `!enabled` — and that function used to allocate a
+    // `Vec<&[f32]>` per block. The multichannel allocation assertions were
+    // therefore green while the multichannel path allocated on the audio
+    // thread. Enabling it here is what actually covers the path.
+    cfg.spatial.enabled = true;
     cfg.channel_trim.enabled = true;
     cfg.channel_trim.entries = vec![config::ChannelTrimEntry {
         channel: 0,
@@ -1503,6 +1510,8 @@ fn realtime_graph2_prod_stereo_does_not_allocate() {
 fn realtime_graph2_prod_multichannel_does_not_allocate() {
     let mut cfg = full_chain_config();
     cfg.precision_mode = config::PrecisionMode::Performance;
+    // Spatial ON — see the note in `realtime_graph_plan_multichannel_does_not_allocate`.
+    cfg.spatial.enabled = true;
     cfg.channel_trim.enabled = true;
     cfg.channel_trim.entries = vec![config::ChannelTrimEntry {
         channel: 0,

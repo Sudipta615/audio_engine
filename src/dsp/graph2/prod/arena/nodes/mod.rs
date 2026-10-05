@@ -34,8 +34,7 @@ pub use mix::{
 pub use plugin_host_node::{PluginHostNode, MAX_PLUGIN_SLOTS};
 #[allow(unused_imports)]
 pub use plugin_sandbox::{
-    run_plugin_worker_stdio, PluginProcessSandbox, PluginSandboxNode, SandboxedPluginInstance,
-    MAX_SANDBOX_CHANNELS,
+    run_plugin_worker_stdio, PluginProcessSandbox, SandboxedPluginInstance, MAX_SANDBOX_CHANNELS,
 };
 pub use resampler_node::ResamplerNode;
 pub use routing_node::RoutingNode;

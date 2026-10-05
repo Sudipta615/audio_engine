@@ -166,6 +166,47 @@ mod network {
     /// How long to wait for each subsequent Range GET.
     const FETCH_TIMEOUT_SECS: u64 = 10;
 
+    /// Hard ceiling on a single Range GET response body (64 MiB).
+    ///
+    /// A Range GET asks for one block, so anything approaching this is a server
+    /// that ignored the `Range` header and is streaming the whole file.
+    const MAX_RANGE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+    /// Hard ceiling on a whole-resource GET (512 MiB).
+    ///
+    /// Generous enough for a large DSD or lossless file, bounded so a hostile
+    /// or malfunctioning endpoint cannot drive the process into the OOM killer.
+    const MAX_FULL_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
+
+    /// Read a response body, refusing anything over `cap` bytes.
+    ///
+    /// `read_to_end` on an HTTP response is unbounded, which made this a remote
+    /// OOM: a server answering a `Range: bytes=…` request with `200 OK` and a
+    /// multi-gigabyte body was read entirely into RAM before the caller decided
+    /// what to do with it. The 16 MiB `MAX_STREAM_BUFFER_SIZE` sliding window
+    /// did not help — it is gated on `accepts_ranges`, and both of the paths
+    /// that buffer without bound *set* `accepts_ranges = false` precisely
+    /// because they had the whole body.
+    ///
+    /// The limit is a hard error, never a silent truncation: a truncated body
+    /// would decode as corrupt audio with no indication of why.
+    fn read_body_capped<R: std::io::Read>(reader: R, cap: u64, what: &str) -> io::Result<Vec<u8>> {
+        let mut body = Vec::new();
+        // `cap + 1` so a body of exactly `cap` is accepted and anything larger
+        // is detectable rather than indistinguishable from a full read.
+        reader.take(cap.saturating_add(1)).read_to_end(&mut body)?;
+        if body.len() as u64 > cap {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "{what} exceeded the {}-byte response limit; refusing rather \
+                     than truncating",
+                    cap
+                ),
+            ));
+        }
+        Ok(body)
+    }
+
     /// A seekable byte source backed by an HTTP(S) URL using Range requests.
     ///
     /// The source maintains a bounded sliding-window buffer. When the
@@ -375,7 +416,12 @@ mod network {
 
                 let status = resp.status();
                 let mut body_bytes = Vec::new();
-                if let Err(e) = resp.into_reader().read_to_end(&mut body_bytes) {
+                let read = read_body_capped(
+                    resp.into_reader(),
+                    MAX_RANGE_RESPONSE_BYTES,
+                    "range response",
+                );
+                if let Err(e) = read.map(|b| body_bytes = b) {
                     last_error = Some(format!("reading response body for {}: {}", range_value, e));
                     if attempt < MAX_RETRIES {
                         std::thread::sleep(backoff);
@@ -446,8 +492,12 @@ mod network {
                     )
                 })?;
 
-            let mut body = Vec::new();
-            resp.into_reader().read_to_end(&mut body).map_err(|e| {
+            let body = read_body_capped(
+                resp.into_reader(),
+                MAX_FULL_RESPONSE_BYTES,
+                "full GET response",
+            )
+            .map_err(|e| {
                 io::Error::new(ErrorKind::UnexpectedEof, format!("reading response: {}", e))
             })?;
 

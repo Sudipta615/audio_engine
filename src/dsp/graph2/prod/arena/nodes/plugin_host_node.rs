@@ -49,6 +49,17 @@ struct HostedSlot {
     enabled: bool,
     /// The descriptor-reported ring-down tail (samples).
     tail_samples: u32,
+    /// The channel count this slot's instance was actually prepared for, or
+    /// `None` when `prepare` failed and the slot is not runnable.
+    ///
+    /// `PluginInstance::process` is `unsafe` with a documented contract that the
+    /// plane count equals the prepared channel count. `attach` prepares with
+    /// `max_channels` at build time, but the block width is only known at
+    /// `process_block` time and can differ (a multichannel master with a stereo
+    /// plugin insert, a layout change that outlives a generation swap). The
+    /// contract is therefore enforced here, where it can be checked, rather than
+    /// asserted in a comment at the call site.
+    prepared_channels: Option<usize>,
 }
 
 /// The plugin host plan node.
@@ -96,7 +107,23 @@ impl PluginHostNode {
             )));
         }
         let mut instance = host.instantiate(self.sample_rate)?;
-        instance.prepare(self.max_channels, crate::buffer::MAX_AUDIO_BLOCK_FRAMES)?;
+        // A failed `prepare` leaves the instance unable to satisfy `process`'s
+        // contract. Record that rather than dropping the error: the slot is
+        // still attached (so the config is visible in reports) but is bypassed
+        // at render time instead of being handed a block it cannot accept.
+        let prepared_channels =
+            match instance.prepare(self.max_channels, crate::buffer::MAX_AUDIO_BLOCK_FRAMES) {
+                Ok(()) => Some(self.max_channels),
+                Err(e) => {
+                    log::warn!(
+                        "Plugin host: prepare failed for '{}' ({} channels): {}",
+                        source,
+                        self.max_channels,
+                        e
+                    );
+                    None
+                }
+            };
         for &(index, value) in params {
             instance.set_param(index, value)?;
         }
@@ -111,6 +138,7 @@ impl PluginHostNode {
             source: source.to_string(),
             enabled,
             tail_samples: tail,
+            prepared_channels,
         });
         self.recompute_active();
         Ok(())
@@ -267,9 +295,24 @@ impl DspNode for PluginHostNode {
         // Re-prepare attached instances (control path; may reallocate
         // plugin-side).
         for slot in &mut self.slots {
-            let _ = slot
+            slot.prepared_channels = match slot
                 .instance
-                .prepare(max_channels, crate::buffer::MAX_AUDIO_BLOCK_FRAMES);
+                .prepare(max_channels, crate::buffer::MAX_AUDIO_BLOCK_FRAMES)
+            {
+                Ok(()) => Some(max_channels),
+                Err(e) => {
+                    // Previously discarded with `let _ =`, which left a slot
+                    // that looked attached and enabled but was never actually
+                    // prepared. Log it and mark the slot unrunnable.
+                    log::warn!(
+                        "Plugin host '{}': prepare failed at {} channels: {}",
+                        slot.source,
+                        max_channels,
+                        e
+                    );
+                    None
+                }
+            };
         }
     }
 
@@ -281,9 +324,20 @@ impl DspNode for PluginHostNode {
             if !slot.enabled {
                 continue;
             }
-            // SAFETY: the plan runner guarantees plane lengths match the
-            // prepared shape (channels × block frames) — the same
-            // contract every arena node runs under.
+            // Enforce `process`'s contract here, where the actual block width
+            // is known. A width mismatch is a layout change the plugin was not
+            // prepared for; bypass rather than hand it a shape it cannot accept.
+            // (The facade also clamps to MAX_PLUGIN_CHANNELS internally, so the
+            // worst case there is a narrow block — but a plugin handed fewer
+            // channels than it prepared for would still mis-index its own
+            // buffers.)
+            match slot.prepared_channels {
+                Some(n) if n == planes.len() => {}
+                _ => continue,
+            }
+            // SAFETY: the width is the prepared width (checked immediately
+            // above) and the plan runner guarantees every plane holds at least
+            // `frames` samples — the contract every arena node runs under.
             let _ = unsafe { slot.instance.process(planes) };
         }
     }

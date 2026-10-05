@@ -129,7 +129,8 @@ ignore = false
 [advisories]
 # cargo-deny advisories config version 2. See the comment in
 # `.cargo/audit.toml` for the single policy that governs ignores — cargo-audit
-# and cargo-deny are run by the same `supply-chain` job and must agree.
+# and cargo-deny are run by the same CI run and must agree. The `deny` job
+# runs cargo-deny and the `audit` job runs cargo-audit; both read these files.
 version = 2
 # No advisory is ignored. The first entry added here needs the same four fields
 # documented in `.cargo/audit.toml`: id, date, reason, expiry.

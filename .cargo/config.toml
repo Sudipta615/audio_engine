@@ -1,6 +1,6 @@
 # Cargo configuration for this repository.
 #
-# ── Why this file is nearly empty ────────────────────────────────────────────
+# ── Why this file holds no machine-specific settings ────────────────────────
 #
 # It used to begin:
 #
@@ -27,19 +27,64 @@
 # `RUSTFLAGS: -D warnings` environment variable overrides `build.rustflags`
 # entirely — so the flag the repo mandated was the one flag CI never applied.
 #
-# If you want either behaviour locally, put it in `~/.cargo/config.toml`:
+# ── Tuning for a low-end machine ────────────────────────────────────────────
+#
+# Put these in `~/.cargo/config.toml` (yours, not this repo's). Together they
+# are what keeps a 2-core / 8-12 GB box from swapping itself into the ground:
 #
 #     [build]
-#     jobs = 4
+#     jobs = 2                 # the single most important line. 4 concurrent
+#                              # rustc processes on 2 physical cores is what
+#                              # drives the machine into swap.
+#     incremental = false      # incremental sessions are the second-largest
+#                              # steady-state RAM consumer, and grow target/
+#                              # without bound. Re-enable per-invocation with
+#                              # CARGO_INCREMENTAL=1 for fast edit loops.
 #
 #     [target.x86_64-unknown-linux-gnu]
-#     rustflags = ["-C", "link-arg=-fuse-ld=lld"]   # requires `ld.lld` on PATH
+#     rustflags = [
+#         "-C", "link-arg=-fuse-ld=gold",   # binutils' gold, NOT lld: gold
+#         "-C", "link-arg=-Wl,--no-keep-memory",  # ships inside binutils,
+#     ]                                        # so it cannot be missing
+#                                            # wherever cc works. lld is a
+#                                            # separate package — that is the
+#                                            # failure the block above cites.
 #
-# The aliases below are kept because they are machine-independent and encode
-# real intent (skip linking, limit test parallelism on small machines).
+# Then use the `c` / `check-fast` / `t` / `t-seq` aliases below. `cargo t-seq`
+# is the one to reach for when running the full 97-target test suite: the test
+# harness spawns one thread per target and the default parallelism will
+# oversubscribe a 2-core box.
+#
+# If link-time memory is still the bottleneck, `cargo clean` reclaims target/.
+# Everything there is reproducible from Cargo.lock.
 
 [term]
 progress.when = "auto"
+
+# ── Machine-independent build hardening ─────────────────────────────────────
+#
+# These apply to every contributor and to CI, and they are the settings that
+# help a constrained machine most, because the cost is paid by rustc and the
+# linker on *every* invocation regardless of core count.
+#
+# This workspace carries 425+ locked dependencies, several of which
+# (`criterion`, `rustls`/`ring`, `windows`, `syn`) are large and heavily
+# generic. Full DWARF for them is by a wide margin the largest single
+# contributor to both link-step RSS and `target/` size, and nothing in the
+# build or the test suite consumes it.
+#
+# `line-tables-only` keeps line numbers, so a panicking test still prints
+# `file.rs:1234` — the thing you actually read when a fidelity assertion
+# fails. What it drops is the type/ DWARF that produced multi-gigabyte `.o`
+# files and the multi-gigabyte resident linker.
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+# `cargo test` builds in the dev profile; restate it so the test binaries
+# inherit the same saving instead of falling back to the default `debug = 2`.
+debug = "line-tables-only"
 
 [alias]
 # Fast workspace type & syntax check (avoids linking and gigabytes of HDD writes)
@@ -53,3 +98,9 @@ t = "test -- --test-threads=2"
 
 # Sequential test execution for minimal memory usage
 t-seq = "test -- --test-threads=1"
+
+# Check every optional feature combination the project claims to support,
+# serially and without dev-dependencies. This is what CI's `features` job runs;
+# `check-fast` mirrors it locally on a machine that cannot afford the full
+# matrix in parallel.
+check-features = "check --workspace --lib --all-features"

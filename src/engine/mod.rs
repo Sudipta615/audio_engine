@@ -12,7 +12,7 @@ mod dsd_state;
 pub mod dsp_persistence;
 pub mod graph_plan;
 pub mod handle;
-pub mod helpers;
+mod helpers;
 mod lanes;
 mod loudness_state;
 pub mod offline;

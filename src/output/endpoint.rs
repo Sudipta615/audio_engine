@@ -401,15 +401,43 @@ impl EndpointWorker {
         let mut accepted = 0usize;
         if self.slip.is_some() {
             self.flush_slip_to_ring(&mut accepted);
-        } else if self.slip_in_len > 0 {
+        } else {
             // No drift correction: push the resampled block straight through.
-            let n = self.slip_in_len;
+            accepted += self.flush_staging_to_ring();
+        }
+        accepted
+    }
+
+    /// Interleave whatever is in the staging buffer straight into the ring,
+    /// without a drift slip.
+    ///
+    /// Chunking is a correctness requirement here, not an optimisation. This
+    /// path is reached only when `drift_correction` is off, and in that case
+    /// nothing consumes the staging buffer incrementally: `slip_in_len` holds
+    /// the resampler's *entire* output for one push, which the FFT chunking at
+    /// `AudioResampler::feed_f32` lets reach ~2.3k frames (the buffers themselves
+    /// are `staging_cap` = 4096). `ring_batch` is sized for the *slip* chunk
+    /// (520 frames), so a single-pass interleave indexed it past its end and
+    /// panicked on the decode loop.
+    ///
+    /// The staging buffers are compacted in place rather than reallocated, so
+    /// this stays allocation-free on the decode-loop push.
+    fn flush_staging_to_ring(&mut self) -> usize {
+        let chunk_frames = self.ring_batch.len() / 2;
+        let mut accepted = 0usize;
+        while self.slip_in_len > 0 {
+            let n = self.slip_in_len.min(chunk_frames);
             for j in 0..n {
                 self.ring_batch[j * 2] = self.slip_in_l[j];
                 self.ring_batch[j * 2 + 1] = self.slip_in_r[j];
             }
             accepted += self.ring.push_interleaved(&self.ring_batch[..n * 2], 2);
-            self.slip_in_len = 0;
+            let remaining = self.slip_in_len - n;
+            if remaining > 0 {
+                self.slip_in_l.copy_within(n..n + remaining, 0);
+                self.slip_in_r.copy_within(n..n + remaining, 0);
+            }
+            self.slip_in_len = remaining;
         }
         accepted
     }
@@ -505,8 +533,21 @@ impl EndpointWorker {
         config.backend = self.config.backend;
         config.device = self.config.device.clone();
         config.gain = config.gain.clamp(0.0, 4.0);
-        self.drift
-            .set_enabled(config.drift_correction && self.resampler.is_some());
+        // Whether a drift slip EXISTS is fixed when the worker is built: the
+        // slip is only constructed when drift correction was on at that moment
+        // and an FFT resampler is present. Toggling `drift_correction` here
+        // therefore cannot conjure or remove one, and driving the controller
+        // from the new config value would advertise correction that is not
+        // running (or suppress a slip that is). Follow what actually exists.
+        let requested = config.drift_correction && self.resampler.is_some();
+        if requested != self.slip.is_some() {
+            log::warn!(
+                "Endpoint '{}': drift_correction change requires a reopen; \
+                 keeping the current slip state",
+                config.id.as_str()
+            );
+        }
+        self.drift.set_enabled(self.slip.is_some());
         self.config = config;
     }
 
@@ -705,6 +746,51 @@ mod tests {
             ring_batch: vec![0.0; 520 * 2],
             scratch: Vec::new(),
         }
+    }
+
+    #[test]
+    fn no_slip_worker_does_not_overflow_ring_batch_on_large_blocks() {
+        // Regression guard. With `drift_correction = false` the no-slip branch
+        // pushes the ENTIRE resampler output for one decode block into
+        // `ring_batch`, which is sized for a *slip* chunk (520 frames). The
+        // staging buffers are 4096. A single 4096-frame push therefore indexed
+        // `ring_batch` ~8x past its end and panicked the decode loop.
+        //
+        // This branch had no coverage at all: `EndpointConfig::new` hardcodes
+        // `drift_correction: true`, and the helper above derives the slip from
+        // that flag, so every existing test either had a slip (bounding the
+        // interleave to one 512-frame chunk) or had no resampler at all
+        // (never reaching the interleave).
+        let mut config = EndpointConfig::new("ep-noslip", None);
+        config.drift_correction = false;
+        let mut worker = worker_without_output(config, 65_536, 44_100);
+        assert!(
+            worker.resampler.is_some(),
+            "rate mismatch → resampler present"
+        );
+        assert!(worker.slip.is_none(), "drift_correction off → no slip");
+
+        // One block far larger than `ring_batch`'s 520-frame capacity.
+        const BLOCK_FRAMES: usize = 4096;
+        let samples = vec![0.25f32; BLOCK_FRAMES * 2];
+        let accepted = worker.push_interleaved(&samples, 2);
+        assert!(
+            accepted > 520,
+            "expected the whole block to be pushed in chunks, got {accepted}"
+        );
+        assert!(
+            worker.slip_in_len == 0,
+            "staging buffer must drain completely"
+        );
+        let stats = worker.ring.stats();
+        assert!(stats.written_frames >= accepted as u64);
+        let mut out = vec![0.0f32; 4096 * 2];
+        let got = worker.ring.pop_interleaved(&mut out, 2);
+        assert!(got > 0);
+        assert!(
+            out[..got * 2].iter().all(|v| v.is_finite()),
+            "chunked interleave corrupted samples"
+        );
     }
 
     #[test]

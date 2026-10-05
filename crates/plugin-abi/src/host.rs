@@ -296,13 +296,24 @@ impl PluginInstance {
             .vtable
             .process
             .ok_or_else(|| PluginAbiError::SymbolMissing("process".into()))?;
-        let channels = planes.len();
+        // Fill exactly as many pointers as we will advertise. The advertised channel
+        // count is derived from the FILL, not from `planes.len()`: `ptrs` is a
+        // fixed `[MAX_PLUGIN_CHANNELS]` array pre-filled with null, so a wider
+        // block used to leave the tail null while `channels` still claimed those
+        // entries were valid — the plugin then dereferenced and wrote through
+        // NULL. That is reachable from the engine: `PluginHostNode` passes the
+        // full master plane set, so any master wider than MAX_PLUGIN_CHANNELS
+        // (an Atmos 20ch layout, say) plus a configured plugin insert hit it.
+        let channels = planes.len().min(MAX_PLUGIN_CHANNELS);
+        if channels == 0 {
+            return Ok(());
+        }
         let frames = planes.first().map(|p| p.len()).unwrap_or(0);
-        if channels == 0 || frames == 0 {
+        if frames == 0 {
             return Ok(());
         }
         let mut ptrs: [*mut f32; MAX_PLUGIN_CHANNELS] = [std::ptr::null_mut(); MAX_PLUGIN_CHANNELS];
-        for (i, p) in planes.iter_mut().enumerate().take(MAX_PLUGIN_CHANNELS) {
+        for (i, p) in planes.iter_mut().take(channels).enumerate() {
             ptrs[i] = p.as_mut_ptr();
         }
         let block = AudioBlockMut {

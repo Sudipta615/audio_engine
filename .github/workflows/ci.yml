@@ -12,6 +12,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Set per-job rather than at workflow level where it would be overridden by a
+  # target-specific `rustflags`, and never set alongside a `[target.*]`
+  # `rustflags` block: the two are mutually exclusive in Cargo and the target
+  # block silently wins, which is how a repo-mandated flag once went unenforced
+  # in CI while looking mandatory in the config file.
   RUSTFLAGS: -D warnings
 
 jobs:
@@ -24,21 +29,32 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
+      - name: Install ALSA (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy Linter
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.profile }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        profile: [release]
+        include:
+          # Debug only on Linux: `debug_assert!` is the whole point of this leg,
+          # and `overflow-checks`/`debug-assertions` are already on in the
+          # release profile (see `[profile.release]` in Cargo.toml). Running the
+          # full matrix twice for no extra coverage would be wasted CI time.
+          - os: ubuntu-latest
+            profile: debug
     steps:
       - uses: actions/checkout@v4
 
@@ -47,18 +63,137 @@ jobs:
 
       - name: Install ALSA (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run Tests
-        run: cargo test --workspace --release
+      - name: Run Tests (${{ matrix.profile }})
+        # `--locked`: without it a semver-compatible dependency release resolves
+        # fresh and CI verifies a graph that is not the committed Cargo.lock.
+        # The declared MSRV is only meaningful if the lock is authoritative.
+        run: cargo test --workspace --locked ${{ matrix.profile == 'debug' && '' || '--release' }}
+
+  features:
+    name: Feature Matrix (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `audio-output` is REQUIRED (src/lib.rs carries a compile_error! without
+          # it) but it is NOT implied by every other combination, which is exactly
+          # why this job exists: a required feature cannot be exercised by the
+          # `default` or `all-features` matrix alone.
+          - name: default
+            flags: ''
+          - name: required-only
+            flags: '--no-default-features --features audio-output'
+          - name: c-ffi
+            flags: '--features c-ffi'
+          - name: plugin-dylib
+            flags: '--features plugin-dylib'
+          - name: network-streaming
+            flags: '--features network-streaming'
+          - name: all-codecs
+            flags: '--features all-codecs'
+          - name: fingerprint
+            flags: '--features fingerprint'
+          - name: tag-write
+            flags: '--features tag-write'
+          - name: sofa-import
+            flags: '--features sofa-import'
+          - name: pipewire
+            flags: '--features pipewire'
+          - name: jack
+            flags: '--features jack'
+          # Backend- and platform-specific features are checked on the platform
+          # that can actually compile them; `check` on the wrong target proves
+          # nothing because the modules are `cfg`-gated out entirely.
+          - name: asio
+            os: windows-latest
+            flags: '--features asio-native'
+          - name: wasapi
+            os: windows-latest
+            flags: '--features wasapi-native'
+          - name: jack-and-pipewire
+            os: ubuntu-latest
+            flags: '--features jack,pipewire'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-targets` so test targets gated behind `required-features` (e.g.
+      # `network_streaming`) are actually compiled. `cargo check` without it
+      # skips them silently, which is how a whole test suite went unbuilt.
+      - name: Check (${{ matrix.name }})
+        run: cargo check --workspace --all-targets --locked ${{ matrix.flags }}
+
+  msrv:
+    name: MSRV (1.98)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.98
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Install ALSA (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `rust-toolchain.toml` pins `stable`, a MOVING target, so the declared
+      # `rust-version` in the manifests is otherwise never tested against
+      # anything. This leg is the only thing that makes the MSRV real.
+      - name: Check against the declared MSRV
+        run: cargo +1.98 check --workspace --locked --all-targets
 
   deny:
-    name: Dependency Policy & Security
+    name: Dependency Policy (cargo-deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Cargo Deny Check
         uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          args: --locked
+
+  audit:
+    name: Advisories (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-check:
+    name: Packaging (plugin-abi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install ALSA (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `plugin-abi` is the one publishable crate. This verifies it actually
+      # packages — the previous claim that CI did this was false, so the step
+      # exists now rather than only the sentence in the manifest.
+      - name: Dry-run package
+        run: cargo publish -p plugin-abi --dry-run --locked --allow-dirty

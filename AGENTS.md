@@ -22,8 +22,22 @@ non-Rust hosts.
 Two qualifications on "pure Rust", because the unqualified claim is false: `alsa`
 binds the C `libasound` on Linux, and the WASAPI/ASIO (COM) and CoreAudio (ObjC)
 backends are FFI. Those are OS audio APIs, not codec SDKs. The DSP hot path itself has
-no unsafe FFI — its `unsafe` is confined to `src/dsp/simd/` (`std::arch` intrinsics
-behind runtime feature detection) and ring-buffer slice reconstruction.
+no unsafe FFI.
+
+Its `unsafe` is **not** confined to `src/dsp/simd/` and ring-buffer reconstruction —
+that claim was wrong until 0.9.3 and understated the surface roughly tenfold. The real
+distribution: `src/dsp/simd/` (intrinsics behind runtime detection); `src/dsp_utils.rs`
+(intrinsics **plus inline `core::arch::asm!`** for `stmxcsr`/`ldmxcsr` denormal control —
+easy to miss in an audit); `src/buffer/pcm_ring.rs`; the lock-free generation swap in
+`src/dsp/graph2/prod/arena/controls.rs` and `rt/ops.rs`; `UnsafeCell` telemetry in
+`dsp/analyzer.rs`, `dsp/meters.rs`, `diagnostics/events.rs` and `nodes/aux_node.rs`;
+`src/ffi.rs` (the C ABI); and every OS backend under `src/output/`. `src/decode/` has
+**no `unsafe` at all** — it delegates to `#![forbid(unsafe_code)]` crates.
+
+The claim worth defending is the narrower one: **no unsafe FFI on the DSP hot path**.
+`SECURITY.md` §5 carries the full table, including the two `unsafe impl Sync`
+contracts that nothing in the type system enforces (`AuxSendBus`, `PcmRingBuffer`) —
+review those when touching either.
 
 ```
 ├── Cargo.toml                  # workspace + `engine` crate (the library/bins)

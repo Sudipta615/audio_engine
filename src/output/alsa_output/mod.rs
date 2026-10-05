@@ -380,7 +380,21 @@ impl AlsaOutput {
         // -> Prepared` across a drop. So reusing the handle after a stop is
         // correct, and the `Arc` is load-bearing for the render thread's
         // borrow of it, not a workaround for a use-after-free.
-        let pcm = self.pcm.clone().expect("ALSA PCM present");
+        // NOT `expect`. `self.pcm` is set to `None` before every reopen
+        // (`reopen_pcm`, the format switch, the DSD probe) and repopulated only
+        // on success, so a failed reopen — device unplugged, busy, bad format —
+        // left it `None`. The `?` in those open paths then returned the error to
+        // the caller while leaving the handle absent, and the NEXT `start()`
+        // (reached from `EndpointWorker::open` on every device change, rate
+        // change and stream recovery) hit this line and panicked. That turned
+        // the exact failure recovery exists to handle — "stream error, reopen,
+        // try again" — into a process-killing panic. A typed error here is
+        // retryable, which is what the recovery path wants.
+        let pcm = self.pcm.clone().ok_or_else(|| {
+            OutputError::StreamOpen(
+                "alsa: no open PCM handle (the last device reopen failed)".to_string(),
+            )
+        })?;
         // Previously `let _ = pcm.prepare();`. A failed prepare means the
         // stream cannot start, and discarding it produced a render thread that
         // spawned, wrote nothing, and failed every period — with the failure
@@ -475,8 +489,17 @@ impl AlsaOutput {
         let paused = Arc::clone(&self.paused);
         let underruns = Arc::clone(&self.underruns);
         let frame_width = format.bytes_per_word() * self.channels as usize;
-        let pcm = self.pcm.clone().expect("ALSA PCM present");
-        let _ = pcm.prepare();
+        // Same reasoning as the PCM path above: `pcm` is `None` whenever the last
+        // reopen failed, and that is a recoverable condition, not a panic.
+        let pcm = self.pcm.clone().ok_or_else(|| {
+            OutputError::StreamOpen(
+                "alsa: no open PCM handle for DSD (the last device reopen failed)".to_string(),
+            )
+        })?;
+        // Refused rather than discarded, for the same reason as the PCM path:
+        // a failed prepare means the render loop would fail every period.
+        pcm.prepare()
+            .map_err(|e| OutputError::StreamOpen(format!("alsa dsd prepare: {e}")))?;
 
         // Allocated on the control thread and moved in, for the same reason as
         // the PCM path's scratch above.

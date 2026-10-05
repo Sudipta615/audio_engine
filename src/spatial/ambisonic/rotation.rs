@@ -1,6 +1,5 @@
 //! Bus frame rotation for ambisonics up to order 9 using Wigner-d matrices.
 
-use super::basis::channel_count;
 use crate::spatial::math::{Quat, Vec3};
 
 /// Rotate an order-1 FOA bus frame by `q` (order-1 rotation: `W` invariant,
@@ -14,11 +13,39 @@ pub fn rotate_bus_frame(q: Quat, frame: &mut [f32; 4]) {
     frame[3] = r.x;
 }
 
+/// Highest bus order for which an exact Wigner rotation is implemented.
+///
+/// Exact blocks exist for orders 1, 2 and 3 only (`wigner_block_2` /
+/// `wigner_block_3`); the real-SH basis blocks for orders 4-8 are not
+/// implemented. See [`rotate_bus_frame_n`] for why that is a hard stop rather
+/// than a partial rotation.
+pub const MAX_ROTATABLE_ORDER: u8 = 3;
+
+/// Whether [`rotate_bus_frame_n`] performs an exact rotation for `order`.
+pub fn rotation_supported(order: u8) -> bool {
+    order <= MAX_ROTATABLE_ORDER
+}
+
 /// Rotate a bus frame of any supported order by `q`. Order 1 matches
 /// [`rotate_bus_frame`]; order 2 additionally rotates the second-order
 /// block (ACN 4–8) by its exact 5×5 Wigner matrix; order 3 rotates the
 /// third-order block (ACN 9–15) by its exact 7×7 Wigner matrix. `frame` must
 /// hold at least `channel_count(order)` values.
+///
+/// # Orders above 3 are refused, not partially rotated
+///
+/// This used to run for every order up to 9, and for order ≥ 4 it rotated
+/// ACN 1–15 and then wrote back only `frame[..ch.min(16)]` — leaving ACN 16
+/// through `channel_count(order)-1` (up to ACN 99) passed through
+/// UNROTATED. That is worse than not rotating at all: the field ends up with
+/// tilted low orders and static high orders, so the image distorts and
+/// elevation localisation degrades precisely where high-order content dominates.
+/// A half-rotated frame is not a smaller error than an unrotated one, it is a
+/// different and less predictable one.
+///
+/// So orders 4–9 are left untouched, which is at least self-consistent. Wiring
+/// them up means implementing the order-4..8 basis blocks; until then callers
+/// that care should gate on [`rotation_supported`].
 pub fn rotate_bus_frame_n(q: Quat, order: u8, frame: &mut [f32]) {
     match order {
         0 => {}
@@ -94,46 +121,10 @@ pub fn rotate_bus_frame_n(q: Quat, order: u8, frame: &mut [f32]) {
             frame[14] = out7[5];
             frame[15] = out7[6];
         }
-        _ => {
-            let ch = channel_count(order);
-            assert!(frame.len() >= ch);
-            let mut fr = [0.0f32; 100];
-            fr[..ch].copy_from_slice(&frame[..ch]);
-
-            let v = Vec3::new(fr[3], fr[1], fr[2]);
-            let rv = q.rotate_vec3(v);
-            fr[1] = rv.y;
-            fr[2] = rv.z;
-            fr[3] = rv.x;
-
-            if ch >= 9 {
-                let w2 = wigner_block_2(q);
-                let c2 = [fr[4], fr[5], fr[6], fr[7], fr[8]];
-                let mut o5 = [0.0f32; 5];
-                for (i, &ci) in c2.iter().enumerate() {
-                    for j in 0..5 {
-                        o5[j] += w2[i][j] * ci;
-                    }
-                }
-                fr[4..9].copy_from_slice(&o5);
-            }
-
-            if ch >= 16 {
-                let w3 = wigner_block_3(q);
-                let c3 = [fr[9], fr[10], fr[11], fr[12], fr[13], fr[14], fr[15]];
-                let mut o7 = [0.0f32; 7];
-                for i in 0..7 {
-                    let mut acc = 0.0f32;
-                    for j in 0..7 {
-                        acc += w3[i][j] * c3[j];
-                    }
-                    o7[i] = acc;
-                }
-                fr[9..16].copy_from_slice(&o7);
-            }
-
-            frame[..ch.min(16)].copy_from_slice(&fr[..ch.min(16)]);
-        }
+        // Order 4 and above: see the doc comment. Deliberately a no-op — an
+        // exact rotation needs the order-4..8 basis blocks, and a partial one
+        // would leave the frame physically incoherent.
+        _ => {}
     }
 }
 

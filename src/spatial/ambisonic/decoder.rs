@@ -4,7 +4,7 @@
 use super::basis::{
     channel_count, sh_n, AMBISONIC_CHANNELS_MAX, AMBISONIC_ORDER, MAX_AMBISONIC_ORDER,
 };
-use super::rotation::rotate_bus_frame_n;
+use super::rotation::{rotate_bus_frame_n, rotation_supported};
 use crate::buffer::MAX_AUDIO_BLOCK_FRAMES;
 use crate::spatial::math::Vec3;
 use crate::spatial::render::{RenderError, SpatialRenderer};
@@ -418,6 +418,11 @@ impl SpatialRenderer for AmbisonicRenderer {
         let ch = self.decoder.bus_width();
         let order = self.decoder.order();
         let xf = ListenerTransform::from_listener(&scene.listener);
+        // Exact Wigner rotation exists for orders 1-3 only. Above that,
+        // `rotate_bus_frame_n` is a deliberate no-op (a partial rotation would
+        // leave the frame incoherent), so skip the call rather than implying a
+        // re-orientation the engine cannot actually perform.
+        let rotate = rotation_supported(order);
         for f in 0..frames {
             let mut frame = [0.0f32; AMBISONIC_CHANNELS_MAX];
             for (c, slot) in frame.iter_mut().enumerate().take(ch) {
@@ -427,7 +432,9 @@ impl SpatialRenderer for AmbisonicRenderer {
                     .copied()
                     .unwrap_or(0.0);
             }
-            rotate_bus_frame_n(xf.orientation, order, &mut frame);
+            if rotate {
+                rotate_bus_frame_n(xf.orientation, order, &mut frame);
+            }
             for (c, &fc) in frame.iter().enumerate().take(ch) {
                 self.bus[f * ch + c] = fc;
             }

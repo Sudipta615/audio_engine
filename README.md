@@ -4,13 +4,13 @@
 
 ### Independent, Headless, Bit-Perfect Audiophile Audio & DSP Engine built with pure Rust
 
-[![Version](https://img.shields.io/badge/version-0.9.2-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.9.3-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg?style=flat-square&logo=rust)](Cargo.toml)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-hardware-output-backends--os-integration)
 [![Realtime Safety](https://img.shields.io/badge/realtime-0%20allocations%20hot%20path-brightgreen.svg?style=flat-square)](#-real-time-safety--concurrency)
 [![Qualification Gate](https://img.shields.io/badge/qualification-100%25%20PASS-brightgreen.svg?style=flat-square)](#-formal-release-qualification)
-[![Test Matrix](https://img.shields.io/badge/tests-98%20suites-blueviolet.svg?style=flat-square)](#-testing--quality-gates)
+[![Test Matrix](https://img.shields.io/badge/tests-97%20suites-blueviolet.svg?style=flat-square)](#-testing--quality-gates)
 
 <p align="center">
   <b>A zero-allocation, lock-free, node-based audio playback and DSP engine engineered for bit-perfect audiophile listening, pro-audio mastering, and low-latency studio monitoring — with zero C/C++ codec SDKs.</b>
@@ -93,7 +93,7 @@ For detailed guides and reference documentation, consult the canonical manuals:
 | **Comprehensive Audiophile Formats** | Native support for FLAC, ALAC, WAV, AIFF, APE, WavPack, TTA, Opus, Vorbis, AAC, MP3, and native **1-bit DSD (DSF/DFF)** up to DSD512 over Native wire and DoP (DSD-over-PCM). |
 | **Spatial 3D Audio & Binaural HRTF** | World-space objects, diffuse beds, room acoustics, 3D VBAP, Ambisonics (HOA Orders 1–3), and Binaural HRTF rendering with Woodworth ITD, Duda-Martens head shadowing, and spectral SOFA dataset support. |
 | **Professional Loudness & Tagging** | ITU-R BS.1770-5 / EBU R128 and ReplayGain 2.0 analysis, volume normalization, and metadata tag write-back (`tag-write` via `lofty`) across standard containers. |
-| **Plugin Architecture & Sandbox** | C-ABI plugin spec (`crates/plugin-abi`) supporting in-process effects and an out-of-process crash-isolated sandbox over planar binary IPC with automatic zero-allocation dry-audio failover. |
+| **Plugin Architecture** | C-ABI plugin spec (`crates/plugin-abi`) supporting in-process effects via `dlopen` or a static registry. Fault containment (panic boundary, watchdog, NaN scan, dry-audio failover) exists for trusted plugins but is **not** an isolation boundary — see `SECURITY.md` §2 before loading anything you do not trust. |
 
 ---
 
@@ -161,7 +161,12 @@ The audio hot path conforms to strict realtime safety standards:
 
 The repository includes an in-process, hardware-calibrated release qualification pipeline (`release-qualification`) that evaluates the engine against production standards.
 
-### Live Qualification Benchmark (Engine v0.9.2)
+### Live Qualification Benchmark
+
+The block below is a **captured run of `release-qualification`, taken on 0.9.2**. It is
+reproduced verbatim rather than re-labelled: the engine version in the output is the one
+that actually produced these numbers. Re-run `release-qualification` after 0.9.3 to
+refresh it.
 
 ```text
 =================================================================
@@ -250,6 +255,9 @@ We state limitations clearly so no architectural contract is misunderstood:
 > - **No Musepack or TAK decoding, and no plan to add it in a release**: **no pure-Rust decoder exists for either format**, in this tree or in any dependency — Symphonia 0.6.1 supports neither in any feature combination, and the alternatives are an FFI binding to `libmpcdec` (which this project deliberately does without) or writing a decoder from scratch. A from-scratch Musepack SV7/SV8 decoder is a multi-week project with a modified Rice/ANS decoder and range coding, and it cannot be validated without reference streams and conformance vectors — an unvalidated bit-exact claim is worse than an honest refusal. `.mpc`/`.mp+`/`.mpp` and `.tak` therefore fail with descriptive, typed errors rather than being mis-parsed. `Codec::Musepack`/`Codec::Tak` exist so the formats are *named* and reported rather than silently unknown, and the vestigial `codec-musepack` feature is deliberately excluded from `all-codecs` so `--all-features` cannot imply a decoder that does not exist. WavPack supports mono/stereo integer and f32 only — that boundary is upstream (`wavicle` hard-scopes to mono/stereo), not an engine choice.
 > - **Talkback and duplex mode do not exist**: input capture and input enumeration work everywhere (see below), but routing a live input back into the output path as a monitor mix is a separate DSP feature with its own gain, feedback and ducking questions. It is not implemented.
 > - **No test opens a physical DAC**: CI now exercises the engine's entire output path — master ring, output matrix, per-endpoint worker thread, clock-drift resampler, format converter, underrun declick — through `AudioBackend::Null`, a hardware-free sink that runs the same paced drain loop a device callback runs. Real driver negotiation, real hardware clocks, and real DACs remain unverifiable from a CI agent. That is an environment fact rather than a defect in the engine.
+> - **Ambisonic bus rotation is exact only for orders 1–3.** `rotate_bus_frame_n` implements exact Wigner blocks for those orders; the order-4..8 basis blocks are not implemented, so a bus above order 3 is left **unrotated** rather than partially rotated. This is deliberate: the previous behaviour tilted ACN 1–15 and passed ACN 16+ through unchanged, which is physically incoherent and a worse error than no rotation at all. Check `spatial::ambisonic::rotation_supported(order)` before relying on a rotation transform; the renderer still encodes and decodes all orders up to 9 exactly.
+> - **The N-input mix bus has no automatic summation headroom.** Slots sum at their per-input user gain, which defaults to `1.0`; eight unity-gain slots reach +18 dB coherent / +9 dB incoherent before the limiter. Two slots — the primary and its crossfade partner, the default configuration and the one the bit-exact equivalence suite pins — are unaffected, because a crossfade cross-fades rather than sums. Use per-input `gain` or `SlotSend::master_gain` when running many lanes. The law is deliberately not applied automatically because changing it alters the sound of every existing configuration and would have to be mirrored in the frozen `dsp::pipeline` oracle.
+> - **`plugin-dylib` is not sandboxed.** Plugins run **in-process** with only a `catch_unwind` boundary. There is no out-of-process isolation: `PluginSandboxConfig::validate()` rejects every isolated mode as unimplemented, and the fault-containment types in `plugin_sandbox.rs` are not wired into the production graph. Do not load a plugin you do not trust — see `SECURITY.md` §2.
 
 
 ---
@@ -474,13 +482,13 @@ let config = EngineConfig::from_preset(EnginePreset::Fidelity);
 
 ## 🧪 Testing & Quality Gates
 
-The engine enforces correctness across **98 test files (95 registered `[[test]]` suites + 3 integration suites)**:
+The engine enforces correctness across **100 test files (97 registered `[[test]]` suites + 3 integration suites)**:
 
 ```bash
 # 1. Run full unit and integration test matrix
 cargo test --workspace
 
-# 2. Assert zero heap allocations on the audio hot path (41 tests)
+# 2. Assert zero heap allocations on the audio hot path (42 tests)
 cargo test --test realtime_allocation
 
 # 3. Verify bit-exact equivalence between Graph 2.0 and Reference Pipeline
@@ -512,7 +520,9 @@ cargo deny check
 
 ### Toolchain and MSRV
 
-`rust-toolchain.toml` pins **`stable`**, and **`rust-version = "1.98"`** is declared in all manifests. The MSRV is formally verified in CI under `--locked` with warnings denied (`-D warnings`).
+`rust-toolchain.toml` pins **`stable`**, and **`rust-version = "1.98"`** is declared in all manifests. CI's `msrv` job installs an explicit 1.98 toolchain and checks the workspace
+under `--locked` with warnings denied (`-D warnings`) — pinning `stable` alone
+would only ever test a moving target.
 
 ---
 
@@ -547,7 +557,7 @@ cargo deny check
 │   └── bin/                         # audio-engine-cli, replaygain-scanner, release-qualification
 ├── benches/                         # Criterion benchmarks (DSP, pipeline, graph, spatial, budget)
 ├── docs/                            # Deep engineering specifications and developer guides
-└── tests/                           # 98 test suites (fidelity, robustness fuzzing, realtime allocation)
+└── tests/                           # 100 test files (fidelity, robustness fuzzing, realtime allocation)
 ```
 
 ---

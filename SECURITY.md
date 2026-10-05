@@ -25,7 +25,7 @@ There is **no published SLA**. Handle it as best-effort.
 
 ## Supported versions
 
-The project is at **0.9.1** and pre-1.0. Under SemVer, stability promises begin at
+The project is at **0.9.3** and pre-1.0. Under SemVer, stability promises begin at
 1.0.0; before that, a minor bump may carry a breaking change. Only the current release
 line is supported. There is no LTS branch and no backport policy.
 
@@ -54,16 +54,29 @@ the largest attack surface and the one the project invests in most:
 
 The `plugin-dylib` feature adds a `libloading`-based `dlopen` / `LoadLibrary` loader for
 plugins that are **arbitrary native code in your address space**. Enabling it means any
-plugin you load can read your process memory, escape the sandbox, and run with your
-privileges.
+plugin you load can read your process memory and run with your privileges. There is no
+sandbox around it.
 
-- `crates/plugin-abi` also provides a true **out-of-process sandbox** over planar binary
-  IPC with automatic zero-allocation dry-audio failover on worker fault. That is the
-  path to use when you do not trust the plugin.
+- **There is no out-of-process isolation in this project.** `crates/plugin-abi` models
+  one (`PluginProcessSandbox`) and `PluginSandboxConfig::validate()` *rejects* every
+  isolated mode as unimplemented — that validator is the authoritative statement, and
+  nothing in the engine calls it. The production plugin host
+  (`PluginHostNode`) calls the plugin **in-process**; its only containment is a
+  `catch_unwind` around the plugin call. A plugin that calls `abort()`, segfaults, or
+  corrupts its own heap still kills the host process.
+- Consequently: **do not load a plugin you do not trust.** There is no supported
+  configuration that makes an untrusted plugin safe. `dsp/graph2/prod/arena/nodes/plugin_sandbox.rs`
+  exists and is named "sandbox", but it provides *fault* containment (watchdog, NaN
+  scan, dry-passthrough failover) for trusted plugins — not isolation — and it is not
+  wired into the production graph.
 - The static-registry path (`static:<uid>` sources) works **without** `plugin-dylib`. If
   you do not need dynamic loading, leave the feature off.
 - The plugin host relies on `catch_unwind`, which is why `[profile.release]` does **not**
-  set `panic = "abort"`.
+  set `panic = "abort"`. Note this only helps against Rust panics, not against aborts or
+  segfaults.
+- The ABI handshake checks both `abi_version` and the struct `size`, and every vtable
+  entry is null-checked before use — that is a compatibility check, not a security one.
+  There is no signature or hash verification, and no allowlist of loadable paths.
 
 Treat `plugin-dylib` as an opt-in trust decision, not a convenience.
 
@@ -75,12 +88,21 @@ Two optional features reach the network. Neither is in `default`.
   `webpki-roots`) and **opens and decodes remote `http(s)://` URIs**. The engine makes
   outbound requests to whatever host the URL names; there is no allow-list, no redirect
   restriction, and no scheme narrowing beyond `http`/`https` (a `file://` URI is never
-  resolved from a remote one). Fetching is windowed, so a large file is not buffered whole,
-  but a server that refuses `Range` forces a single full GET — the response is still not
-  stored beyond the sliding buffer. The byte source is worth reviewing on the classic
-  axes: TLS verification behaviour, redirect handling, and redirect-to-`file://` confusion.
-  Not in `default`; enabling it is an explicit decision to let a URL in a playlist cause an
-  outbound connection.
+  resolved from a remote one, and there is no TLS verification bypass — `ureq` keeps its
+  default `rustls` + `webpki-roots` configuration). Responses are **hard-capped**:
+  64 MiB per Range GET and 512 MiB for a whole-resource GET, refused as an error rather
+  than silently truncated. Fetching is windowed, so a large file is not buffered whole;
+  note that a server which refuses `Range` forces a single full GET, and on that path the
+  body is held in memory up to the cap. The byte source is worth reviewing on the classic
+  axes: TLS verification behaviour, redirect handling, and redirect-to-`file://`
+  confusion.
+  - **SSRF by playlist, and it fires on LOAD, not on play.** Any playlist entry
+    containing `://` becomes a remote source at parse time, and `load_playlist_file`
+    immediately preloads the next entry — so opening an untrusted `.m3u`/`.xspf` issues
+    outbound requests before the user presses play. A list containing
+    `http://169.254.169.254/latest/meta-data/...` reaches the cloud metadata service.
+    Not in `default`; enabling the feature is an explicit decision to let a URL in a
+    playlist cause an outbound connection.
 - **`fingerprint`** — pulls `chromaprint-next`. The engine computes a fingerprint and
   **stops there**; it performs no network lookup. Note that completing the feature the
   way most hosts want — resolving that fingerprint against the AcoustID service — means
@@ -111,14 +133,39 @@ implementation:
 
 ### 5. `unsafe` in the crate
 
-`unsafe` is confined to two places, and a reviewer should confirm that is still true:
+`unsafe` is **not** confined to the DSP SIMD layer and the ring buffers. The earlier
+version of this section claimed it was, and the claim was wrong by roughly an order of
+magnitude — a reviewer following it would never have opened `src/dsp_utils.rs`. The
+actual distribution across non-test files:
 
-- `src/dsp/simd/` — roughly 68 `unsafe` blocks of `std::arch` intrinsics behind runtime
-  CPU feature detection, each tier with a bit-exact scalar fallback.
-- Ring-buffer slice reconstruction.
+| Area | What | Why it is there |
+|---|---|---|
+| `src/dsp/simd/` | `std::arch` intrinsics behind runtime feature detection | SIMD tiers, each with a scalar fallback |
+| `src/dsp_utils.rs` | intrinsics **and inline `core::arch::asm!`** (`stmxcsr` / `ldmxcsr`, FP control register) | denormal flush / FTZ / DAZ. Inline asm is easy to miss in an audit — note it explicitly. |
+| `src/buffer/pcm_ring.rs` | SPSC ring slice reconstruction | the hot-path ring |
+| `src/dsp/graph2/prod/arena/controls.rs` | `AtomicPtr` generation swap/reclaim, and the all-atomic `PluginParamsSlot` | lock-free generation publish |
+| `src/dsp/graph2/rt/ops.rs` | `Box::from_raw` / `ptr::read` on swapped-out plans | plan swap |
+| `src/dsp/analyzer.rs`, `src/dsp/meters.rs`, `src/diagnostics/events.rs`, `.../nodes/aux_node.rs` | `UnsafeCell` + `unsafe impl Send/Sync` | lock-free telemetry / intra-thread bus sharing |
+| `src/ffi.rs` | the `extern "C"` surface | unavoidable for a C ABI |
+| `src/output/*_output/`, `wasapi_loopback.rs` | COM, CoreAudio, ASIO, ALSA, cpal volume | required OS FFI |
+| `src/decode/` | **none** | decoders delegate to `#![forbid(unsafe_code)]` crates |
 
-No unsafe FFI is on the DSP path. `tests/fidelity/simd_qualification.rs` covers the
-dispatch tiers.
+What still holds, and is the claim worth defending: **no unsafe FFI is on the DSP hot
+path** — the arithmetic in `src/dsp/` is intrinsics plus slice indexing. The `unsafe`
+that reaches OS APIs lives entirely in `src/output/`, and the C ABI boundary is in
+`src/ffi.rs`.
+
+Two `unsafe impl Sync` contracts deserve a reviewer's attention because nothing in the
+type system enforces them:
+
+- `AuxSendBus` (`.../nodes/aux_node.rs`) — sound **only** because the DSP runs on the
+  engine's tick thread and `DspGraph` owns its active generation directly (no `Arc`, no
+  `Mutex`). It would become unsound the moment a `&AuxSendBus` reached another thread.
+- `PcmRingBuffer` (`src/buffer/pcm_ring.rs`) — the single-producer/single-consumer
+  contract is on **callers**. `Graph2ControlHandle` is `Clone`, so two clones driving the
+  same queue is UB reachable from safe code.
+
+`tests/fidelity/simd_qualification.rs` covers the dispatch tiers.
 
 ## Supply chain
 

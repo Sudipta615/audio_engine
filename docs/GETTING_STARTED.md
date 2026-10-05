@@ -14,7 +14,7 @@ worth your time before you rely on anything here.
 | Requirement | Why |
 |---|---|
 | `rustup` + `rustup toolchain install stable` | `rust-toolchain.toml` pins `stable` and resolves automatically |
-| **Rust ≥ 1.85** | `crates/opus-decoder` is edition 2024, which forces `resolver = "2"` |
+| **Rust ≥ 1.98** | The declared MSRV (`rust-version` in every manifest). 1.85 is only the edition-2024 floor that `crates/opus-decoder` imposes, not the project requirement. |
 | Linux: `pkg-config` + `libasound2-dev` | The `alsa` crate binds the C `libasound`, and `audio-output` is **required** |
 | Linux: membership in the `audio` group | Only if you want to open a real device (see §7) |
 | Windows / macOS | nothing extra to install |
@@ -26,7 +26,9 @@ sudo usermod -aG audio "$USER"   # log out and back in
 ```
 
 **MSRV is Rust 1.98.** `rust-toolchain.toml` pins `stable` and `rust-version = "1.98"`
-is declared across all manifests, verified in CI under `--locked`.
+is declared across all manifests. The CI `msrv` job checks the workspace against an
+explicitly installed 1.98 toolchain under `--locked`, which is what makes the
+number mean something: pinning `stable` alone would only ever test a moving target.
 
 ### Install-time dependency
 

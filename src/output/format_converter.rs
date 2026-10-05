@@ -7,8 +7,9 @@
 //!
 //! 1. **Dither is applied exactly once**, at the quantization boundary.
 //! 2. **All format-specific clamping math is in one place** — no more copy-paste.
-//! 3. **The `Dither` field in `DspPipeline` is no longer needed** — the DSP
-//!    pipeline operates entirely in `f32`/`f64` and does not quantize.
+//! 3. **`DspPipeline` has no `dither` field, and does not need one** — the DSP
+//!    pipeline operates entirely in `f32`/`f64` and does not quantize. This
+//!    type is applied here, at the boundary that actually quantizes.
 //!
 //! # Usage (audio callback)
 //!

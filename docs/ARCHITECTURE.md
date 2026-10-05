@@ -92,6 +92,12 @@ src/
 │   ├── helpers.rs            # Shared helpers (event emission, playback info writes)
 │   ├── telemetry.rs          # EngineTelemetry — PlaybackInfo publication cadence
 │   ├── buffers.rs            # EngineScratch — preallocated hot-path buffers
+│   ├── settings.rs           # EngineSettings — the read-back snapshot for a host
+│   ├── graph_plan.rs         # Graph preparation / governor / activate (crate-internal)
+│   ├── preload.rs            # Background next-track preloading
+│   ├── wake.rs               # Power/standby wake handling
+│   ├── dsp_persistence.rs     # Persisted DSP state (EQ presets / limiter / output)
+│   ├── cue_split.rs           # CUE sheet → per-track queue segments
 │   ├── offline.rs             # OfflineRenderer — deterministic render of the real
 │   │                         #   production chain into a buffer, no device/realtime thread
 │   ├── decode_loop/          # Decode-and-process hot loop (common.rs +
@@ -272,11 +278,13 @@ src/
 │   │                         #   timeline regions). Drives a compiled Graph
 │   │                         #   2.0 graph: the transport owns rendering
 │
-│   ├── fx/                   # ── Creative sound-design DSP layer ──
-│   │   ├── delay.rs          # CombFilter (feedback/feedforward) & PingPongDelay
-│   │   ├── modulation.rs     # Chorus, Flanger, Phaser, RingModulator
-│   │   ├── distortion.rs     # Saturator (Tape, Tube, Soft/Hard Clip, Wavefolder)
-│   │   └── mod.rs            # Facade and public re-exports
+├── fx/                       # ── Creative sound-design DSP layer ──
+│   │                         #   CRATE ROOT, a sibling of `dsp/` — not `dsp/fx/`.
+│   │                         #   Declared at `src/lib.rs:43`, re-exported from the prelude.
+│   ├── delay.rs              # CombFilter (feedback/feedforward) & PingPongDelay
+│   ├── modulation.rs         # Chorus, Flanger, Phaser, RingModulator
+│   ├── distortion.rs         # Saturator (Tape, Tube, Soft/Hard Clip, Wavefolder)
+│   └── mod.rs                # Facade and public re-exports
 │
 ├── spatial/                  # ── Spatial audio (opt-in) ──
 │   ├── acoustic/             # Acoustic world simulation + baking: material.rs
@@ -450,8 +458,10 @@ src/
 │                             #   averaging, regularized FIR synthesis & OutputCalibration export
 │
 ├── network_audio/            # ── Professional Network Audio (AES67 / RTP / PTP) (§10.4, Item 33) ──
-│   │                         #   LIBRARY ONLY — no engine caller anywhere in src/.
-│   │                         #   Not a playback feature; see README Known limitations.
+│   │                         #   WIRED INTO PLAYBACK. `AudioSource::NetworkStream`
+│   │                         #   (src/source.rs) carries an `Aes67StreamConfig`, and
+│   │                         #   `decode/aes67_source.rs` builds a `Decoder` from it on
+│   │                         #   the normal track-open path (engine/track_loading.rs).
 │   ├── rtp.rs                # RFC 3550 RTP packet builder/parser, L16 & L24 codecs
 │   ├── aes67.rs              # AES67 profiles, RFC 4566 SDP generation & parsing
 │   ├── clock.rs              # IEEE 1588-2008 PTP clock, delay/offset/PPM drift estimation

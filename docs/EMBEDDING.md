@@ -314,8 +314,7 @@ For a graphic-EQ host UI:
 handle.set_graphic_eq_layout(config::GraphicEqLayout::ThirtyOneBand); // one-time
 handle.set_graphic_eq_slider(12, -4.0);   // band 12, -4 dB
 handle.set_graphic_eq_enabled(true);
-// The graphic-EQ preamp has no dedicated handle setter yet — use the raw command:
-let _ = handle.send_command(EngineCommand::SetGraphicEqPreamp(-1.0));
+handle.set_graphic_eq_preamp(-1.0);   // dedicated setter; exists
 ```
 
 ---

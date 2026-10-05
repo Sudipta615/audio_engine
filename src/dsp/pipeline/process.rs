@@ -597,7 +597,8 @@ impl DspPipeline {
         // `audio_callback_i16` / `audio_callback_u16`). Applying dither inside
         // the DSP pipeline followed by another f32 → integer conversion in
         // the callback would double-quantize and lose the dither's effect.
-        // The `self.dither` field is retained for backward API compatibility
+        // (There is no `self.dither` field. It was removed: the pipeline never
+        // quantizes. Dither lives at `output::format_converter`.)
         (l_f, r_f)
     }
 

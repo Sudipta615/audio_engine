@@ -27,7 +27,7 @@ impl AudioEngine {
     }
 
     /// Update playback state and publish an event if the state changed.
-    pub fn update_playback_state(&self, state: PlaybackState) {
+    pub(crate) fn update_playback_state(&self, state: PlaybackState) {
         let prev_state = self.current_state();
         if prev_state != state {
             match state {

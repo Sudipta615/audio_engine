@@ -13,11 +13,11 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on.
-version = "0.9.2"
+version = "0.9.3"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/Sudipta615/ultimate-engine"
+repository = "https://github.com/Sudipta615/audio_engine"
 description = "Shadow Desktop: a bit-perfect, headless audiophile audio playback and DSP engine written in pure Rust, with a node-graph realtime core, multi-endpoint output, spatial audio, room correction and a stable C ABI"
 readme = "README.md"
 keywords = ["audio", "dsp", "realtime", "audiophile", "bit-perfect"]
@@ -251,10 +251,10 @@ realfft = "3.5"
 # cepstral minimum-phase, hybrid-phase rendering. Same crate realfft builds
 # on, so this adds no new compiled code.
 rustfft = "6.2"
-config = { path = "crates/config", version = "0.9.2" }
+config = { path = "crates/config", version = "0.9.3" }
 # The Rust-native plugin ABI + host. Default features off —
 # the `plugin-dylib` engine feature pulls in the loader.
-plugin-abi = { path = "crates/plugin-abi", version = "0.9.2", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.3", default-features = false }
 thread-priority = { version = "3.1", optional = true }
 # Pure-Rust Monkey's Audio (APE) decoder, enabled by the `codec-ape` feature.
 ape-decoder = { version = "0.3.2", optional = true }
@@ -370,8 +370,8 @@ rusty-opus = "0.9.1"
 # `.wv` fixtures at test time (no committed binary assets).
 wavicle = { version = "0.1", features = ["encode"] }
 # The reference plugin (in-process, via the static registry).
-plugin-abi = { path = "crates/plugin-abi", version = "0.9.2", default-features = false }
-plugin-test-echo = { path = "crates/plugin-test-echo", version = "0.9.2", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "0.9.3", default-features = false }
+plugin-test-echo = { path = "crates/plugin-test-echo", version = "0.9.3", default-features = false }
 # Parses `testdata/fixtures.toml` for the decode fixture smoke test. Test-only:
 # the library itself has no TOML dependency.
 toml = "0.8"
@@ -761,7 +761,7 @@ name = "decode_fixture_measure"
 path = "tests/decode_fixture_measure.rs"
 
 # Wall-clock budget for the production chain. MUST be run with `--release`
-# (the `perf` CI job does); it asserts its own profile rather than trusting
+# (the benchmark harness does); it asserts its own profile rather than trusting
 # the caller to pass the right flag.
 [[test]]
 name = "realtime_budget"

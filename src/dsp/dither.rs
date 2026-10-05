@@ -102,8 +102,10 @@ const NOISE_SHAPING_24: [f32; 2] = [1.0, -0.25];
 /// Owned by [`crate::output::format_converter::AudioFormatConverter`] which
 /// applies it exactly once, immediately before the integer-quantization step.
 ///
-/// The `Dither` struct inside `DspPipeline` is deprecated and will be removed
-/// in a future release.
+/// This is a standalone type, not a `DspPipeline` stage. `DspPipeline` once
+/// carried a `dither` field; it was removed because the pipeline operates
+/// entirely in `f32`/`f64` and does not quantize, and dithering belongs at the
+/// integer-quantization boundary (`output::format_converter`).
 #[derive(Debug, Clone)]
 pub struct Dither {
     dither_type: DitherType,

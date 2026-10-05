@@ -5,6 +5,262 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] — 2026-10-05
+
+A static audit of the whole tree — realtime safety, memory safety, DSP
+correctness, error handling, architecture, docs-vs-code, CI, and supply
+chain — found four defects that could panic or produce undefined behaviour
+in normal use, plus a set of documentation claims that were false against
+the code. All are fixed here.
+
+The theme running through the critical findings is the same in every case:
+**a rule that was documented everywhere and enforced nowhere.**
+
+**A note on the version number.** Three fixes change audible or observable
+behaviour for existing configurations — `PanLaw::Center`, ambisonic rotation
+above order 3, and the Condon-Shortley sign of odd-`m` HOA channels of order
+≥ 4 — and one narrows public API visibility. Under strict SemVer those are
+not patch-level changes. They ship as 0.9.3 because each is a *correction to
+incorrect behaviour* rather than a redesign, but per the project's Versioning
+rule they are called out here explicitly rather than left for a consumer to
+discover.
+
+### Fixed
+
+- **Out-of-bounds panic in the endpoint fan-out** (`output/endpoint.rs`).
+  `EndpointWorker::push_interleaved`'s no-drift-slip branch interleaved the
+  resampler's *entire* output for one push into `ring_batch`, which is sized
+  for a slip chunk (520 frames) and is never resized — while the staging
+  buffers hold 4096. A rate-mismatched endpoint with `drift_correction = false`
+  and any push over 520 frames indexed `ring_batch` roughly eight times past
+  its end and panicked the decode loop. Reachable from config
+  (`endpoints[].drift_correction = false`) and from `engine_set_endpoints`.
+  The branch had **zero test coverage**, because `EndpointConfig::new`
+  hardcodes `drift_correction: true`. Now chunked through a new
+  `flush_staging_to_ring`, with a regression test.
+- **Heap allocation on the audio thread, per block, in the spatial
+  multichannel render** (`spatial_node.rs`). Both the f32 and f64 paths built
+  `let bed_inputs: Vec<&[f32]> = …collect()` once per block, under a doc
+  comment asserting the function was "Allocation-free". Replaced with a
+  fixed-size stack array. The f64 path also grew its 256 KiB scratch lazily on
+  first use — that moved to the control path in `set_multichannel_layout`.
+- **`PluginParamsSlot` was a seqlock over non-atomic data — undefined
+  behaviour, not a torn read** (`graph2/prod/arena/controls.rs`). The payload
+  lived in an `UnsafeCell<PluginParams>` and both sides copied it
+  non-atomically; a non-atomic read racing a non-atomic write *is* the data
+  race, and the subsequent version check does not undo it. The retry fallback
+  was worse: it copied with no validation at all, precisely when the writer was
+  preempted mid-publish. Replaced with a **word-level atomic double buffer**
+  (`[[AtomicU32; …]; 2]`), which is sound regardless of interleaving and still
+  allocation-free. The `unsafe impl Sync` is gone.
+- **Plugin host could hand a plugin NULL channel pointers**
+  (`crates/plugin-abi/src/host.rs`). The pointer array was filled with
+  `.take(MAX_PLUGIN_CHANNELS)` (18) but `AudioBlockMut.channels` was set from
+  the *unclamped* `planes.len()`, so a master wider than 18 channels (Atmos
+  20ch) plus a configured plugin insert told the plugin that null entries were
+  valid — the plugin then wrote through NULL. The advertised count is now
+  derived from the fill. `PluginHostNode` additionally records the channel
+  count each slot was actually prepared for and bypasses on a width mismatch
+  instead of discarding `prepare()`'s error.
+- **Retire-overflow cursor published before the slot it counted**
+  (`controls.rs`). The producer `fetch_add`-ed the cursor and *then* stored
+  its slot, so a consumer could observe a non-zero cursor with a still-null
+  slot, take nothing, and reset the cursor — permanently orphaning that
+  generation. The cursor is now published last, and the drain resets with a
+  CAS so a concurrent producer's entries are not clobbered.
+- **ALSA panicked during the recovery it existed to perform**
+  (`output/alsa_output/mod.rs`). `self.pcm` is set to `None` before every
+  reopen and repopulated only on success, so a failed reopen (unplug, busy,
+  bad format) left it absent; the next `start()` then hit
+  `.expect("ALSA PCM present")`. Both the PCM and DSD paths now return a typed,
+  retryable `OutputError`. The DSD path's discarded `prepare()` error is
+  refused too.
+- **`PcmRingBuffer` over-reported frames** (`buffer/pcm_ring.rs`).
+  `write_interleaved` / `read_interleaved` discarded `push_block`/`pop_block`'s
+  return values and reported a precomputed count. `free_slots()` is
+  reset-aware while `push_block` uses the raw `tail`, so the two disagree while
+  a reset is outstanding. Both now report the actual movement. The stale
+  `reset()` contract in the `Sync` comment (which contradicted the
+  implementation) is corrected.
+- **Ambisonic bus rotation above order 3 was physically incoherent**
+  (`spatial/ambisonic/rotation.rs`). `rotate_bus_frame_n` rotated ACN 1–15
+  and then wrote back only `frame[..ch.min(16)]`, passing ACN 16…99 through
+  *unrotated* — a half-rotated frame, which is a worse and less predictable
+  error than no rotation. Orders 4–9 are now refused outright and left
+  untouched, with `rotation_supported(order)` / `MAX_ROTATABLE_ORDER` exported
+  so callers can check. The renderer still encodes and decodes all orders
+  exactly; only the rotation transform is limited.
+- **Condon-Shortley phase split the HOA basis sign convention**
+  (`spatial/ambisonic/basis.rs`). Orders 1–3 are hardcoded to the canonical
+  ACN/SN3D table, which omits the `(−1)^m` Condon-Shortley factor, while the
+  Legendre recurrence used for order ≥ 4 includes it. Every odd-`m` channel of
+  order ≥ 4 therefore came out sign-flipped relative to the same basis
+  function's lower-order siblings — harmless for a self-consistent pair, but a
+  mirrored image for any standard ACN stream and a discontinuity at the
+  order-3/4 seam in a band-limited rotation. Verified against the published
+  ACN order-4 value (`16.5917·xz³ − 7.1105·xz`).
+- **The limiter's unlinked path could not limit** (`dsp/limiter.rs`).
+  `per_channel_gain` was declared *inside* `process_sample_multichannel`, so it
+  was re-seeded to unity every sample and the one-pole smoothing was memoryless:
+  at the documented defaults it applied about **4 %** of the required reduction
+  during attack and **0.02 %** during release. With `stereo_link < 1.0` the
+  "limiter" fell through to the hard clip — it was a clipper. The state is now
+  a struct field (`channel_gains`), reset alongside `current_gain`. Reaching it
+  required `set_stereo_link(< 1.0)`, which the graph never calls, so the
+  production chain is unaffected.
+- **`PanLaw::Center` was not a pan law** (`nodes/mix/mod.rs`). It computed
+  `(1 − |pan|, 1 − |pan|)` — identical on both sides at every position (no
+  stereo image, only an identical level cut) and **total silence** at
+  `|pan| = 1`. Now a correct balance that holds the far side at unity. The
+  production default is `PanLaw::Linear`, so this only affected hosts that
+  selected `Center` explicitly.
+- **Unbounded network response bodies** (`audio_io.rs`). Both `read_to_end`
+  call sites were uncapped, so a server answering a `Range` request with `200
+  OK` and a multi-gigabyte body was read entirely into RAM — a remote OOM. The
+  16 MiB sliding window did not help, being gated on `accepts_ranges` which
+  both paths set to `false`. Now hard-capped at 64 MiB per Range GET and
+  512 MiB per full GET, refused as an error rather than silently truncated.
+
+### Changed
+
+- **CI now verifies what the project claims it verifies.** The `features` job
+  described in `AGENTS.md` did not exist, so on every pull request only default
+  features compiled: the entire 2,775-line `c-ffi` surface was never built, and
+  `tests/fidelity/network_streaming.rs` — a suite credited with catching a real
+  Vorbis/OGG regression — was never compiled by *any* workflow. Added a
+  `features` matrix covering each optional combination individually (with
+  platform-specific legs on the platform that can compile them) and
+  `--all-targets` so `required-features` test targets are actually built;
+  added a `msrv` job that installs an explicit 1.98 toolchain, since pinning
+  `stable` alone only ever tests a moving target; added a debug-profile test
+  leg so `debug_assert!` invariants actually execute; added `--locked`
+  everywhere, without which the committed `Cargo.lock` is not authoritative and
+  the declared MSRV is untested; and added the `cargo-audit` job that
+  `.cargo/audit.toml` claimed existed.
+- **Release builds are reproducible and least-privilege.** `--locked` added to
+  the release build; the workflow-wide `contents: write` token (in scope of a
+  `cargo build --all-features` step that runs every dependency's `build.rs`) is
+  now granted only to a separate publish job that consumes a downloaded
+  artifact; artifacts are published with a SHA256 manifest; `release-qualification`
+  is no longer omitted from packaging.
+- **`.cargo/config.toml`**: dev and test profiles build with
+  `debug = "line-tables-only"`. Full DWARF for this dependency graph was the
+  largest single contributor to link-step memory and `target/` size and nothing
+  in the build or the test suite consumed it; line numbers survive, so
+  panicking fidelity assertions still report `file.rs:1234`. Machine-specific
+  tuning stays out of the repo (see the file for the low-end recipe to put in
+  `~/.cargo/config.toml`).
+- **Narrowed public visibility** so a host cannot bypass `EngineCommand`.
+  `AudioEngine::update_playback_state` is now `pub(crate)` — as an inherent
+  method on a public type it was reachable regardless of module visibility, and
+  calling it paused the real device and overwrote `PlaybackInfo.state` while the
+  decode loop kept streaming. The twelve low-level methods in
+  `engine/graph_plan.rs` are likewise crate-internal.
+- **Removed `PluginSandboxNode`** (~125 lines). It carried
+  `#[allow(dead_code)]`, was absent from the `GraphNode` enum, and could never
+  be constructed: the arena's plugin slot is `PluginHostNode`. The
+  `#[allow]` was suppressing the compiler's own report of this.
+- **Dependency policy files reverted.** The working tree carried an uncommitted
+  edit to `deny.toml`/`.cargo/audit.toml` that loosened two things (an advisory
+  ignore lacking the `date`/`expiry` fields the policy mandates, and
+  `multiple-versions` from `"warn"` to `"allow"`) and broke two others (removed
+  `Unicode-DFS-2016`, a *mandatory* AND component, and `WTFPL`, the sole
+  allowance for `terminfo`) while deleting the comments that made the policy
+  reviewable. Reverted to `HEAD`.
+- **`repository` metadata corrected** in all five manifests: it declared
+  `.../ultimate-engine` while `git remote get-url origin` is
+  `.../audio_engine`.
+- **Realtime-allocation tests actually cover the multichannel path.** Both
+  `realtime_graph_plan_multichannel_does_not_allocate` and
+  `realtime_graph2_prod_multichannel_does_not_allocate` used `full_chain_config`
+  without enabling spatial, so `SpatialNode` returned at `!enabled` and the
+  function under test never ran. This is precisely why the per-block allocation
+  above survived; enabling it is what covers the path now.
+
+### Fixed (documentation)
+
+Claims that were false against the code, corrected at the source rather than
+left to be rediscovered:
+
+- `SECURITY.md` §5 claimed `unsafe` was "confined to two places". It is not —
+  the real distribution spans ~43 non-test files including inline
+  `core::arch::asm!` in `dsp_utils.rs`, every OS backend, and the C ABI. The
+  section now carries the actual table. The narrower claim that still holds,
+  **no unsafe FFI on the DSP hot path**, is stated as the defensible one. The
+  same false claim was corrected in `AGENTS.md`.
+- `SECURITY.md` §2 and `README.md` advertised an "out-of-process
+  crash-isolated sandbox" as *the path to use when you do not trust the
+  plugin*. There is none: `PluginSandboxConfig::validate()` rejects every
+  isolated mode as unimplemented, and the production host runs plugins
+  in-process behind only `catch_unwind`. Both documents now say that plainly.
+- `ARCHITECTURE.md` described `network_audio/` as "LIBRARY ONLY — no engine
+  caller anywhere in `src/`". It is a live playback path
+  (`AudioSource::NetworkStream` → `decode/aes67_source.rs` →
+  `engine/track_loading.rs`). Also corrected: `fx/` was mapped under `dsp/`
+  when it is at the crate root, and four real `engine/` modules
+  (`settings.rs`, `graph_plan.rs`, `preload.rs`, `wake.rs`) were missing from
+  the module map.
+- Eight source paths cited in `OWNERS_GUIDE.md` do not exist; four pointed at
+  `src/dsp/graph/`, the module `AGENTS.md` itself declares removed. All fixed.
+- `EMBEDDING.md` taught a workaround for a missing `set_graphic_eq_preamp`
+  handle setter that has existed for some time.
+- `GETTING_STARTED.md` listed "Rust ≥ 1.85" as the requirement three lines
+  above stating the MSRV is 1.98; 1.85 is only the edition-2024 floor imposed
+  by `crates/opus-decoder`.
+- `crates/plugin-abi/Cargo.toml` claimed CI dry-runs `cargo publish`. It did not;
+  a `publish-check` job now does.
+- Three comments described a `dither` field on `DspPipeline` as existing or
+  pending removal. It was deleted; the standalone `Dither` type is live and
+  applied at the quantization boundary in `output::format_converter`.
+- `README.md` test counts were wrong (97 registered suites, 100 test files, 42
+  realtime-allocation tests) and are corrected.
+- `SECURITY.md` named 0.9.1 as the supported version.
+
+### Known limitations (newly documented, not new)
+
+Added to `README.md` § Known Limitations, because each is now characterised
+rather than accidental: ambisonic rotation is exact to order 3 only; the
+N-input mix bus applies no automatic summation headroom (two slots — the
+default and the bit-exact equivalence suite's subject — are unaffected, since
+a crossfade cross-fades rather than sums); and `plugin-dylib` is not sandboxed.
+
+The headroom law was **documented, not changed**. Applying a normalisation
+would alter the sound of every existing configuration and would have to be
+mirrored in the frozen `dsp::pipeline` oracle to keep
+`tests/fidelity/graph_pipeline_equivalence` meaningful. That is a product
+decision, and it is now written down at the code that would implement it
+(`nodes/mix/mod.rs`) with the arithmetic.
+
+### Not changed, deliberately
+
+- **God-file splits.** `graph2/prod/arena/controls.rs` (2,631 lines) and
+  `nodes/spatial_node.rs` (2,333) trip the `AGENTS.md` "no god files" rule —
+  the first is the file that rule names as *canonical precedent for the split*
+  and has never itself been split. Both were fixed in place where the audit
+  found defects. Splitting them is mechanical code motion across ~4,000 lines
+  of untested-in-this-session structure, and it is deferred rather than
+  attempted blind. `controls.rs` in particular has ~120 hand-written
+  one-line forwarding methods in its final 560 lines that duplicate a
+  `forward!` macro pattern the sibling `graph2/prod/controls.rs` already
+  solves — that is the cheapest first cut when it is done.
+- **`EngineSettings` read-back.** `AGENTS.md` requires every `EngineCommand`
+  variant to have both a handle setter and a settings field. All 124 variants
+  have setters; 34 lack read-back (all lane controls, all seven channel-mix
+  configs, all plugin controls, ten spatial controls, `SetSlotTrim`,
+  `SetSlotAutomation`, `SetCompressorBandFeatures`,
+  `SetCrossfeedCustomParams`, and the endpoint list). Closing that is a
+  user-facing API addition, not a patch fix.
+- **CUE `FILE` traversal and `file://` percent-decoded relative paths.** An
+  untrusted `.cue` can reference an absolute path or escape with `..`, and a
+  percent-encoded `file://` entry resolves relative to the process CWD rather
+  than the playlist's directory. Both are pre-existing input-handling
+  decisions in `SECURITY.md`'s out-of-scope region, and changing path
+  resolution breaks existing playlists.
+- **Ambisonic max-rE window for orders 5–9.** Orders 1–4 match the published
+  Zotter–Frank/Kronlachner table to 4–7 digits; orders 5–9 do not, with the top
+  order of order 5 running about +2.6 dB hot. This needs a check against the
+  source table, not more reading.
+
 ## [0.9.2] — 2026-10-04
 
 Closes four of the six entries the README listed under Known Limitations. One

@@ -72,10 +72,9 @@ pub use arena::nodes::{
     run_plugin_worker_stdio, AutomationPoint, AutomationTarget, AuxBusNode, BalanceNode,
     ConvolutionNode, CorrectionNode, CorrectionNodeInfo, CrossfeedNode, DitherNode, DuckState,
     DynamicsNode, EqNode, GainNode, LimiterNode, LoudnessNode, MixBusNode, MixInput, MixInputCmd,
-    MixTransitionCmd, PanLaw, PluginHostNode, PluginProcessSandbox, PluginSandboxNode,
-    ResamplerNode, RoutingNode, SandboxedPluginInstance, SeekFadeNode, SpatialNode, StereoNode,
-    TimeStretchNode, MAX_AUTOMATION_POINTS, MAX_DUCK_TARGETS, MAX_MIX_SLOTS, MAX_PLUGIN_SLOTS,
-    MAX_SANDBOX_CHANNELS,
+    MixTransitionCmd, PanLaw, PluginHostNode, PluginProcessSandbox, ResamplerNode, RoutingNode,
+    SandboxedPluginInstance, SeekFadeNode, SpatialNode, StereoNode, TimeStretchNode,
+    MAX_AUTOMATION_POINTS, MAX_DUCK_TARGETS, MAX_MIX_SLOTS, MAX_PLUGIN_SLOTS, MAX_SANDBOX_CHANNELS,
 };
 pub use arena::{DspGraph, DspNode, GraphControlHandle, GraphGeneration, GraphScratch};
 pub use control::Graph2ControlHandle;
