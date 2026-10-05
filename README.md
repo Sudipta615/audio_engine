@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🌌 Shadow Desktop
+# Audio Engine
 
-### Independent, Headless, Bit-Perfect Audiophile Audio & DSP Engine in Pure Rust
+### Independent, Headless, Bit-Perfect Audiophile Audio & DSP Engine built with pure Rust
 
 [![Version](https://img.shields.io/badge/version-0.9.2-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
@@ -251,14 +251,6 @@ We state limitations clearly so no architectural contract is misunderstood:
 > - **Talkback and duplex mode do not exist**: input capture and input enumeration work everywhere (see below), but routing a live input back into the output path as a monitor mix is a separate DSP feature with its own gain, feedback and ducking questions. It is not implemented.
 > - **No test opens a physical DAC**: CI now exercises the engine's entire output path — master ring, output matrix, per-endpoint worker thread, clock-drift resampler, format converter, underrun declick — through `AudioBackend::Null`, a hardware-free sink that runs the same paced drain loop a device callback runs. Real driver negotiation, real hardware clocks, and real DACs remain unverifiable from a CI agent. That is an environment fact rather than a defect in the engine.
 
-### What 0.9.2 closed
-
-These were documented limitations until this release:
-
-- ~~**No audio input devices exist**~~ — **fixed.** Microphone/line-in/interface capture and input enumeration now work on Linux, macOS and Windows via `cpal`, which was already a required dependency and simply never used. Host surface: `EngineHandle::start_capture_input()` and `EngineHandle::enumerate_input_devices()`, with the device list returned as an `EngineEvent::InputDeviceList`. A host with no input device gets a typed error, never a zero-byte file.
-- ~~**Room measurement capture is Windows-only**~~ — **fixed.** `MeasureRoom` now runs wherever there is a capture backend. It prefers the **system mix** (the right signal for a correction curve: it hears the sweep plus the room, with no microphone in the chain) and falls back to a real input device, so a Linux or macOS user with a measurement mic gets a working integrated measurement.
-- ~~**Spatial rendering is stereo-only in the production graph**~~ — **fixed.** The node now selects a layout-driven `VbapRenderer` from the graph's configured `ChannelLayout` and routes a multichannel master's channels by semantic role, instead of declining the whole block. The master is handed over as a *bed* — the transparent round trip an already-spatial signal wants; a second round of panning would scramble it. The scene's program objects, cues and voice budget keep their stereo meaning. A block whose width disagrees with the configured layout, or that arrives with no layout known, still passes through **bit-exact**, because guessing would be worse than declining.
-- ~~**`src/network_audio/` has zero engine callers**~~ — **fixed.** There was no socket anywhere in the module and nothing in the engine called any of it. There is now a real receiver (`Aes67Receiver`) that binds a UDP socket, joins the multicast group, and runs the existing jitter buffer on a receive thread; it is reachable through `AudioSource::NetworkStream`. The underrun policy the old text called the blocker is explicit and enforced: parsing, jitter buffering and packet-loss concealment all live on the receive thread, the engine thread does one lock-free read and pads a short read with **silence**, and a live stream never reports end-of-stream. A dead multicast group therefore costs the engine tick nothing and can never be mistaken for "track finished".
 
 ---
 

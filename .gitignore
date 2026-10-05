@@ -24,7 +24,7 @@ Cargo.lock.bak
 .project
 .settings/
 .kilo/
-.cargo/
+
 
 # OS generated files
 .DS_Store
