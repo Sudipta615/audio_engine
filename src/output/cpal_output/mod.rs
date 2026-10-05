@@ -1000,12 +1000,15 @@ impl CpalOutput {
             return result.map_err(OutputError::StreamError);
         }
 
-        // No hardware-volume backend on this platform (e.g. ASIO).
-        Err(OutputError::StreamError(format!(
-            "Hardware volume is not implemented for backend {:?} on this platform. \
-             Use VolumeMode::SoftwareOnly for software gain control.",
-            self.backend
-        )))
+        #[cfg(not(target_os = "macos"))]
+        {
+            // No hardware-volume backend on this platform (e.g. ASIO).
+            Err(OutputError::StreamError(format!(
+                "Hardware volume is not implemented for backend {:?} on this platform. \
+                 Use VolumeMode::SoftwareOnly for software gain control.",
+                self.backend
+            )))
+        }
     }
 }
 

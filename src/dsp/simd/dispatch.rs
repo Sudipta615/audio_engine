@@ -17,6 +17,7 @@
 //! only true *within* a tier. Each tier's own kernel is bit-exact against the
 //! scalar reference for its own instruction set; the cross-tier claim did not
 //! hold. See `crate::dsp_utils` for the full note.
+#![allow(unreachable_code)]
 
 use super::levels::SimdLevel;
 
