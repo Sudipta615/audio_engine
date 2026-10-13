@@ -22,7 +22,7 @@ mod reconfigure;
 mod stream_owner;
 #[cfg(test)]
 mod tests;
-mod volume;
+pub(crate) mod volume;
 
 use crate::output::device_match::{classify_device_name_match, DeviceNameMatch};
 use reconfigure::{renegotiate_reconfigure_config, select_reconfigure_config, SupportedConfig};

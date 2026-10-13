@@ -452,6 +452,7 @@ impl Output for PipeWireOutput {
         let thread = std::thread::Builder::new()
             .name("pipewire-audio".to_string())
             .spawn(move || {
+                let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
                 let mut block = vec![0.0f32; quantum * channels];
                 let frame_duration = std::time::Duration::from_nanos(
                     ((quantum as u64 * 1_000_000_000) / sample_rate as u64).max(100_000),

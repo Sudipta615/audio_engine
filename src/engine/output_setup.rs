@@ -36,7 +36,7 @@ impl AudioEngine {
             self.endpoints.push(
                 crate::output::EndpointWorker::open(
                     endpoint_config,
-                    crate::buffer::OUTPUT_BUFFER_FRAMES,
+                    self.config.effective_output_buffer_frames(),
                     self.output_sample_rate,
                     self.config.resampler_quality,
                     self.config.precision_mode,

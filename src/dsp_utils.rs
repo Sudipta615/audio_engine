@@ -51,9 +51,38 @@ pub fn accumulate_scaled(dst: &mut [f32], src: &[f32], g: f32, n: usize) {
             i += 4;
         }
     }
+    #[cfg(all(target_arch = "x86", target_feature = "sse2"))]
+    {
+        use core::arch::x86::{_mm_add_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_storeu_ps};
+        let gv = unsafe { _mm_set1_ps(g) };
+        while i + 4 <= n {
+            unsafe {
+                let a = _mm_loadu_ps(src.as_ptr().add(i));
+                let b = _mm_loadu_ps(dst.as_ptr().add(i));
+                let m = _mm_mul_ps(a, gv);
+                let s = _mm_add_ps(b, m);
+                _mm_storeu_ps(dst.as_mut_ptr().add(i), s);
+            }
+            i += 4;
+        }
+    }
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use core::arch::aarch64::{vaddq_f32, vld1q_f32, vmulq_n_f32, vst1q_f32};
+        while i + 4 <= n {
+            unsafe {
+                let a = vld1q_f32(src.as_ptr().add(i));
+                let b = vld1q_f32(dst.as_ptr().add(i));
+                let m = vmulq_n_f32(a, g);
+                let s = vaddq_f32(b, m);
+                vst1q_f32(dst.as_mut_ptr().add(i), s);
+            }
+            i += 4;
+        }
+    }
+    #[cfg(all(target_arch = "arm", target_feature = "neon"))]
+    {
+        use core::arch::arm::{vaddq_f32, vld1q_f32, vmulq_n_f32, vst1q_f32};
         while i + 4 <= n {
             unsafe {
                 let a = vld1q_f32(src.as_ptr().add(i));
@@ -188,10 +217,37 @@ pub fn enable_flush_zero_denormals_on_current_thread() -> bool {
             }
             true
         }
+        #[cfg(all(
+            target_arch = "arm",
+            any(
+                target_feature = "vfp2",
+                target_feature = "vfp3",
+                target_feature = "vfp4",
+                target_feature = "neon"
+            )
+        ))]
+        {
+            unsafe {
+                let mut fpscr: u32;
+                core::arch::asm!("vmrs {0}, fpscr", out(reg) fpscr);
+                fpscr |= 1u32 << 24;
+                core::arch::asm!("vmsr fpscr, {0}", in(reg) fpscr);
+            }
+            true
+        }
         #[cfg(not(any(
             all(target_arch = "x86_64", target_feature = "sse"),
             all(target_arch = "x86", target_feature = "sse"),
-            target_arch = "aarch64"
+            target_arch = "aarch64",
+            all(
+                target_arch = "arm",
+                any(
+                    target_feature = "vfp2",
+                    target_feature = "vfp3",
+                    target_feature = "vfp4",
+                    target_feature = "neon"
+                )
+            )
         )))]
         {
             false

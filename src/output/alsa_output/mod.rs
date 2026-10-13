@@ -418,6 +418,7 @@ impl AlsaOutput {
         let handle = std::thread::Builder::new()
             .name("alsa-render".to_string())
             .spawn(move || {
+                let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
                 let io_faults = Arc::clone(&shared_io_faults);
                 let mut converter = AudioFormatConverter::new_at_rate(
                     match container {
@@ -600,15 +601,28 @@ impl Drop for AlsaOutput {
 
 impl OutputVolume for AlsaOutput {
     fn supports_hardware_volume(&self) -> bool {
-        // ALSA hw: devices expose volume through the mixer; this backend
-        // leaves hardware-volume routing to the existing cpal mixer path.
-        false
+        #[cfg(target_os = "linux")]
+        {
+            crate::output::cpal_output::volume::alsa_hardware_volume_supported(&self.device_name)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 
-    fn set_hardware_volume_db(&self, _db: f32) -> Result<(), OutputError> {
-        Err(OutputError::StreamError(
-            "hardware volume not exposed by the native ALSA backend".to_string(),
-        ))
+    fn set_hardware_volume_db(&self, db: f32) -> Result<(), OutputError> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::output::cpal_output::volume::set_alsa_volume_db(db, &self.device_name)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = db;
+            Err(OutputError::StreamError(
+                "hardware volume not supported on non-Linux ALSA backend".to_string(),
+            ))
+        }
     }
 
     fn take_external_volume_change(&self) -> Option<f32> {

@@ -48,7 +48,10 @@ impl SymphoniaDecoder {
         hint: Hint,
         container_hint: Option<&str>,
     ) -> Result<Self, DecodeError> {
-        let mss = MediaSourceStream::new(media_source, Default::default());
+        let mss_opts = symphonia::core::io::MediaSourceStreamOptions {
+            buffer_len: crate::decode::DECODER_FILE_BUFFER_CAPACITY,
+        };
+        let mss = MediaSourceStream::new(media_source, mss_opts);
 
         let format_opts = FormatOptions::default();
         let metadata_opts = MetadataOptions::default();

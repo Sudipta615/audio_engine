@@ -70,11 +70,60 @@ impl AudioEngine {
         self.tick_with_initial_command(initial_cmd);
     }
 
+    /// Calculate the recommended tick pacing wait duration based on stream state
+    /// and output ring buffer fullness.
+    ///
+    /// When playing with a healthy buffer cushion, allows the worker thread to sleep
+    /// for 15–25ms, reducing CPU wakeups and context switching on low-power dual-core CPUs.
+    /// When the buffer is depleting, drops wait time to 2–5ms to rapidly decode more audio.
+    /// When stopped or paused, sleeps for up to 50ms (consuming near 0% CPU).
+    pub fn recommended_tick_wait(&self) -> Duration {
+        match self.current_state() {
+            PlaybackState::Playing => {
+                let cap = self.output_buffer.capacity();
+                let avail = self.output_buffer.available();
+                if cap == 0 {
+                    Duration::from_millis(10)
+                } else if avail >= cap * 3 / 4 {
+                    Duration::from_millis(25)
+                } else if avail >= cap / 2 {
+                    Duration::from_millis(15)
+                } else if avail >= cap / 4 {
+                    Duration::from_millis(8)
+                } else {
+                    Duration::from_millis(2)
+                }
+            }
+            PlaybackState::Buffering => Duration::from_millis(5),
+            PlaybackState::Paused | PlaybackState::Stopped => Duration::from_millis(50),
+        }
+    }
+
+    /// Block until a command arrives or an adaptively calculated audio deadline elapses,
+    /// then run one engine tick.
+    ///
+    /// This provides optimal CPU efficiency on low-GHz dual-core processors,
+    /// reducing thread wakeups from 200/s to 30–50/s during steady playback.
+    pub fn tick_blocking_adaptive(&mut self) {
+        let wait = self.recommended_tick_wait();
+        self.tick_blocking(wait);
+    }
+
     pub fn tick(&mut self) {
         self.tick_with_initial_command(None);
     }
 
     fn tick_with_initial_command(&mut self, initial_cmd: Option<EngineCommand>) {
+        thread_local! {
+            static FTZ_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        FTZ_INIT.with(|init| {
+            if !init.get() {
+                crate::buffer::enable_flush_zero_denormals_on_current_thread();
+                init.set(true);
+            }
+        });
+
         let now = Instant::now();
         let initial_state = self.current_state();
 

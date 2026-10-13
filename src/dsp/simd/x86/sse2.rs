@@ -1,6 +1,8 @@
 //! 128-bit SSE2 vector kernels for x86_64 architectures (4 x f32, 2 x f64).
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(target_arch = "x86")]
+use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
@@ -8,7 +10,7 @@ use core::arch::x86_64::*;
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn scale_slice_sse2(dst: &mut [f32], g: f32, n: usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let n = n.min(dst.len());
         let gv = _mm_set1_ps(g);
@@ -26,7 +28,7 @@ pub unsafe fn scale_slice_sse2(dst: &mut [f32], g: f32, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         crate::dsp::simd::scalar::scale_slice(dst, g, n);
     }
@@ -36,7 +38,7 @@ pub unsafe fn scale_slice_sse2(dst: &mut [f32], g: f32, n: usize) {
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn scale_slice_f64_sse2(dst: &mut [f64], g: f64, n: usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let n = n.min(dst.len());
         let gv = _mm_set1_pd(g);
@@ -54,7 +56,7 @@ pub unsafe fn scale_slice_f64_sse2(dst: &mut [f64], g: f64, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         crate::dsp::simd::scalar::scale_slice_f64(dst, g, n);
     }
@@ -64,7 +66,7 @@ pub unsafe fn scale_slice_f64_sse2(dst: &mut [f64], g: f64, n: usize) {
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn mix_slices_sse2(dst: &mut [f32], src: &[f32], n: usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let n = n.min(dst.len()).min(src.len());
         let mut i = 0usize;
@@ -82,7 +84,7 @@ pub unsafe fn mix_slices_sse2(dst: &mut [f32], src: &[f32], n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         crate::dsp::simd::scalar::mix_slices(dst, src, n);
     }
@@ -92,7 +94,7 @@ pub unsafe fn mix_slices_sse2(dst: &mut [f32], src: &[f32], n: usize) {
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn accumulate_scaled_sse2(dst: &mut [f32], src: &[f32], gain: f32, n: usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let n = n.min(dst.len()).min(src.len());
         let gv = _mm_set1_ps(gain);
@@ -112,7 +114,7 @@ pub unsafe fn accumulate_scaled_sse2(dst: &mut [f32], src: &[f32], gain: f32, n:
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         crate::dsp::simd::scalar::accumulate_scaled(dst, src, gain, n);
     }
@@ -122,7 +124,7 @@ pub unsafe fn accumulate_scaled_sse2(dst: &mut [f32], src: &[f32], gain: f32, n:
 #[inline]
 #[target_feature(enable = "sse2")]
 pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32], n: usize) -> f32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         let n = n.min(a.len()).min(b.len());
         let mut acc = _mm_setzero_ps();
@@ -147,7 +149,7 @@ pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32], n: usize) -> f32 {
 
         sum
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
         crate::dsp::simd::scalar::dot_product(a, b, n)
     }

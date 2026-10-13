@@ -35,6 +35,9 @@ impl super::AudioEngine {
         if self.loudness_scan.loudness_scan_in_flight {
             return;
         }
+        if !self.config.loudness.background_scan_enabled {
+            return;
+        }
         let Some(path) = self.loudness_scan.current_track_path.clone() else {
             return;
         };
@@ -55,6 +58,9 @@ impl super::AudioEngine {
     /// (`incoming_track_path`).
     pub(super) fn start_incoming_loudness_scan(&mut self) {
         if self.loudness_scan.loudness_scan_in_flight {
+            return;
+        }
+        if !self.config.loudness.background_scan_enabled {
             return;
         }
         let Some(path) = self

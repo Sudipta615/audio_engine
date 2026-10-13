@@ -491,6 +491,241 @@ impl<T: AudioFloat> BiquadState<T> {
         self.z1 = 0.0;
         self.z2 = 0.0;
     }
+
+    /// Process a stereo sample pair through two biquad states with shared coefficients.
+    ///
+    /// Computes left and right channels concurrently.
+    #[inline]
+    pub fn process_stereo(
+        left_state: &mut Self,
+        right_state: &mut Self,
+        left_sample: T,
+        right_sample: T,
+        coeffs: &BiquadCoeffs<T>,
+    ) -> (T, T) {
+        let mut l_arr = [left_sample.to_f64()];
+        let mut r_arr = [right_sample.to_f64()];
+        Self::process_stereo_block(left_state, right_state, &mut l_arr, &mut r_arr, coeffs);
+        (T::from_f64(l_arr[0]), T::from_f64(r_arr[0]))
+    }
+
+    /// Process a block of stereo frames in place in native f64 precision.
+    ///
+    /// Computes Left and Right channels concurrently. On x86/x86_64, uses SSE2
+    /// dual-f64 vector instructions (`_mm_mul_pd` + `_mm_add_pd`/`_mm_sub_pd`)
+    /// preserving bit-exact IEEE equivalence with the scalar oracle.
+    #[inline]
+    pub fn process_stereo_block(
+        left_state: &mut Self,
+        right_state: &mut Self,
+        left: &mut [f64],
+        right: &mut [f64],
+        coeffs: &BiquadCoeffs<T>,
+    ) {
+        let n = left.len().min(right.len());
+        if n == 0 {
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            Self::process_stereo_block_sse2(
+                left_state,
+                right_state,
+                &mut left[..n],
+                &mut right[..n],
+                coeffs,
+            );
+        }
+
+        #[cfg(target_arch = "x86")]
+        {
+            if is_x86_feature_detected!("sse2") {
+                unsafe {
+                    Self::process_stereo_block_sse2(
+                        left_state,
+                        right_state,
+                        &mut left[..n],
+                        &mut right[..n],
+                        coeffs,
+                    );
+                }
+            } else {
+                Self::process_stereo_block_scalar(
+                    left_state,
+                    right_state,
+                    &mut left[..n],
+                    &mut right[..n],
+                    coeffs,
+                );
+            }
+        }
+
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        Self::process_stereo_block_scalar(
+            left_state,
+            right_state,
+            &mut left[..n],
+            &mut right[..n],
+            coeffs,
+        );
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn process_stereo_block_scalar(
+        left_state: &mut Self,
+        right_state: &mut Self,
+        left: &mut [f64],
+        right: &mut [f64],
+        coeffs: &BiquadCoeffs<T>,
+    ) {
+        let b0 = coeffs.b0.to_f64();
+        let b1 = coeffs.b1.to_f64();
+        let b2 = coeffs.b2.to_f64();
+        let a1 = coeffs.a1.to_f64();
+        let a2 = coeffs.a2.to_f64();
+        let n = left.len().min(right.len());
+        for i in 0..n {
+            let sl = left[i];
+            let sr = right[i];
+
+            if !sl.is_finite() {
+                left_state.z1 = 0.0;
+                left_state.z2 = 0.0;
+                left[i] = 0.0;
+            } else {
+                let out_l = b0 * sl + left_state.z1;
+                left_state.z1 =
+                    crate::buffer::flush_denormal_f64(b1 * sl - a1 * out_l + left_state.z2);
+                left_state.z2 = crate::buffer::flush_denormal_f64(b2 * sl - a2 * out_l);
+                if !out_l.is_finite() {
+                    left_state.z1 = 0.0;
+                    left_state.z2 = 0.0;
+                    left[i] = 0.0;
+                } else {
+                    left[i] = out_l;
+                }
+            }
+
+            if !sr.is_finite() {
+                right_state.z1 = 0.0;
+                right_state.z2 = 0.0;
+                right[i] = 0.0;
+            } else {
+                let out_r = b0 * sr + right_state.z1;
+                right_state.z1 =
+                    crate::buffer::flush_denormal_f64(b1 * sr - a1 * out_r + right_state.z2);
+                right_state.z2 = crate::buffer::flush_denormal_f64(b2 * sr - a2 * out_r);
+                if !out_r.is_finite() {
+                    right_state.z1 = 0.0;
+                    right_state.z2 = 0.0;
+                    right[i] = 0.0;
+                } else {
+                    right[i] = out_r;
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "sse2")]
+    unsafe fn process_stereo_block_sse2(
+        left_state: &mut Self,
+        right_state: &mut Self,
+        left: &mut [f64],
+        right: &mut [f64],
+        coeffs: &BiquadCoeffs<T>,
+    ) {
+        #[cfg(target_arch = "x86")]
+        use core::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use core::arch::x86_64::*;
+
+        let b0 = coeffs.b0.to_f64();
+        let b1 = coeffs.b1.to_f64();
+        let b2 = coeffs.b2.to_f64();
+        let a1 = coeffs.a1.to_f64();
+        let a2 = coeffs.a2.to_f64();
+
+        let n = left.len().min(right.len());
+        let vb0 = _mm_set1_pd(b0);
+        let vb1 = _mm_set1_pd(b1);
+        let vb2 = _mm_set1_pd(b2);
+        let va1 = _mm_set1_pd(a1);
+        let va2 = _mm_set1_pd(a2);
+
+        let mut vz1 = _mm_set_pd(right_state.z1, left_state.z1);
+        let mut vz2 = _mm_set_pd(right_state.z2, left_state.z2);
+
+        let mut out_arr = [0.0f64; 2];
+        let mut z1_arr = [0.0f64; 2];
+        let mut z2_arr = [0.0f64; 2];
+
+        for i in 0..n {
+            let sl = left[i];
+            let sr = right[i];
+
+            if !sl.is_finite() || !sr.is_finite() {
+                _mm_storeu_pd(z1_arr.as_mut_ptr(), vz1);
+                _mm_storeu_pd(z2_arr.as_mut_ptr(), vz2);
+                left_state.z1 = z1_arr[0];
+                right_state.z1 = z1_arr[1];
+                left_state.z2 = z2_arr[0];
+                right_state.z2 = z2_arr[1];
+
+                left[i] = left_state.process(T::from_f64(sl), coeffs).to_f64();
+                right[i] = right_state.process(T::from_f64(sr), coeffs).to_f64();
+
+                vz1 = _mm_set_pd(right_state.z1, left_state.z1);
+                vz2 = _mm_set_pd(right_state.z2, left_state.z2);
+                continue;
+            }
+
+            let s = _mm_set_pd(sr, sl);
+            let v_out = _mm_add_pd(_mm_mul_pd(vb0, s), vz1);
+            let vz1_new = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vb1, s), _mm_mul_pd(va1, v_out)), vz2);
+            let vz2_new = _mm_sub_pd(_mm_mul_pd(vb2, s), _mm_mul_pd(va2, v_out));
+
+            _mm_storeu_pd(out_arr.as_mut_ptr(), v_out);
+            _mm_storeu_pd(z1_arr.as_mut_ptr(), vz1_new);
+            _mm_storeu_pd(z2_arr.as_mut_ptr(), vz2_new);
+
+            let mut z1_0 = crate::buffer::flush_denormal_f64(z1_arr[0]);
+            let mut z1_1 = crate::buffer::flush_denormal_f64(z1_arr[1]);
+            let mut z2_0 = crate::buffer::flush_denormal_f64(z2_arr[0]);
+            let mut z2_1 = crate::buffer::flush_denormal_f64(z2_arr[1]);
+
+            let out_l = if out_arr[0].is_finite() {
+                out_arr[0]
+            } else {
+                z1_0 = 0.0;
+                z2_0 = 0.0;
+                0.0
+            };
+
+            let out_r = if out_arr[1].is_finite() {
+                out_arr[1]
+            } else {
+                z1_1 = 0.0;
+                z2_1 = 0.0;
+                0.0
+            };
+
+            left[i] = out_l;
+            right[i] = out_r;
+
+            vz1 = _mm_set_pd(z1_1, z1_0);
+            vz2 = _mm_set_pd(z2_1, z2_0);
+        }
+
+        _mm_storeu_pd(z1_arr.as_mut_ptr(), vz1);
+        _mm_storeu_pd(z2_arr.as_mut_ptr(), vz2);
+        left_state.z1 = z1_arr[0];
+        right_state.z1 = z1_arr[1];
+        left_state.z2 = z2_arr[0];
+        right_state.z2 = z2_arr[1];
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -678,6 +913,21 @@ impl<T: AudioFloat> SmoothedBiquad<T> {
         }
     }
 
+    /// Borrow a mutable reference to the state of a given channel.
+    #[inline]
+    pub(crate) fn state_mut(&mut self, ch: usize) -> &mut BiquadState<T> {
+        &mut self.states[ch]
+    }
+
+    /// Borrow the state for a given channel along with the current coefficients.
+    #[inline]
+    pub(crate) fn settled_parts_mut(
+        &mut self,
+        ch: usize,
+    ) -> (&mut BiquadState<T>, &BiquadCoeffs<T>) {
+        (&mut self.states[ch], &self.current_coeffs)
+    }
+
     /// Process an audio frame through the filter (both channels).
     #[inline]
     pub fn process_frame(&mut self, frame: &mut AudioFrame) {
@@ -685,6 +935,17 @@ impl<T: AudioFloat> SmoothedBiquad<T> {
             let out = self.states[0].process(T::from_f32(frame.channels[0]), &self.current_coeffs);
             frame.channels[0] = out.to_f32();
             frame.channels[1] = frame.channels[0];
+        } else if frame.num_channels == 2 && self.transition.is_none() {
+            let [ref mut state_l, ref mut state_r] = self.states;
+            let (ol, or_) = BiquadState::process_stereo(
+                state_l,
+                state_r,
+                T::from_f32(frame.channels[0]),
+                T::from_f32(frame.channels[1]),
+                &self.current_coeffs,
+            );
+            frame.channels[0] = ol.to_f32();
+            frame.channels[1] = or_.to_f32();
         } else {
             for (ch, state) in self
                 .states
@@ -1001,5 +1262,70 @@ mod tests {
         let mag = coeffs.evaluate_magnitude(40.0, 44100.0);
         let expected = 10.0_f64.powf(9.0 / 20.0);
         assert_relative_eq!(mag, expected, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn test_stereo_biquad_bit_exactness() {
+        let sample_rate = 48000.0f32;
+        let test_cases = [
+            (FilterType::Peaking, 1000.0, 6.0, 1.4),
+            (FilterType::Lowshelf, 120.0, -4.5, 0.707),
+            (FilterType::Highshelf, 8000.0, 3.0, 0.707),
+            (FilterType::Bandpass, 2500.0, 0.0, 2.0),
+        ];
+
+        for (ft, freq, gain, q) in test_cases {
+            let coeffs: BiquadCoeffs<f64> = ft.compute_coeffs(sample_rate, freq, gain, q);
+            let mut left_input = Vec::with_capacity(2048);
+            let mut right_input = Vec::with_capacity(2048);
+            for i in 0..2048 {
+                let t = i as f64 / sample_rate as f64;
+                left_input.push((2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.5);
+                right_input.push((2.0 * std::f64::consts::PI * 880.0 * t).sin() * 0.4);
+            }
+
+            // Reference scalar run
+            let mut scalar_state_l: BiquadState<f64> = BiquadState::default();
+            let mut scalar_state_r: BiquadState<f64> = BiquadState::default();
+            let mut ref_l = Vec::with_capacity(2048);
+            let mut ref_r = Vec::with_capacity(2048);
+            for i in 0..2048 {
+                ref_l.push(scalar_state_l.process(left_input[i], &coeffs));
+                ref_r.push(scalar_state_r.process(right_input[i], &coeffs));
+            }
+
+            // Vector stereo block run
+            let mut vec_state_l: BiquadState<f64> = BiquadState::default();
+            let mut vec_state_r: BiquadState<f64> = BiquadState::default();
+            let mut test_l = left_input.clone();
+            let mut test_r = right_input.clone();
+            BiquadState::process_stereo_block(
+                &mut vec_state_l,
+                &mut vec_state_r,
+                &mut test_l,
+                &mut test_r,
+                &coeffs,
+            );
+
+            // Verify bit-for-bit equivalence
+            for i in 0..2048 {
+                assert_eq!(
+                    test_l[i].to_bits(),
+                    ref_l[i].to_bits(),
+                    "Mismatch on Left channel at index {i} for {ft:?}"
+                );
+                assert_eq!(
+                    test_r[i].to_bits(),
+                    ref_r[i].to_bits(),
+                    "Mismatch on Right channel at index {i} for {ft:?}"
+                );
+            }
+
+            // Verify state equivalence
+            assert_eq!(vec_state_l.z1.to_bits(), scalar_state_l.z1.to_bits());
+            assert_eq!(vec_state_l.z2.to_bits(), scalar_state_l.z2.to_bits());
+            assert_eq!(vec_state_r.z1.to_bits(), scalar_state_r.z1.to_bits());
+            assert_eq!(vec_state_r.z2.to_bits(), scalar_state_r.z2.to_bits());
+        }
     }
 }

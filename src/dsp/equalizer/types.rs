@@ -1,6 +1,6 @@
 //! Parametric equaliser — configurable multi-band EQ with smooth parameter transitions
 
-use crate::dsp::biquad::{FilterType, SmoothedBiquad};
+use crate::dsp::biquad::{BiquadState, FilterType, SmoothedBiquad};
 
 /// Maximum number of EQ bands (supports up to 64 bands for full AutoEQ and 1/6 octave curves)
 pub const MAX_EQ_BANDS: usize = 64;
@@ -197,11 +197,17 @@ impl EqBand {
         if !self.params.enabled && self.filter_left.is_settled() && self.filter_right.is_settled() {
             return (left, right);
         }
-        let out_l = self.filter_left.process_sample(0, left);
-        let out_r = self.filter_right.process_sample(1, right);
-        self.filter_left.advance_smoothing();
-        self.filter_right.advance_smoothing();
-        (out_l, out_r)
+        if self.filter_left.is_settled() && self.filter_right.is_settled() {
+            let (state_l, coeffs) = self.filter_left.settled_parts_mut(0);
+            let state_r = self.filter_right.state_mut(1);
+            BiquadState::process_stereo(state_l, state_r, left, right, coeffs)
+        } else {
+            let out_l = self.filter_left.process_sample(0, left);
+            let out_r = self.filter_right.process_sample(1, right);
+            self.filter_left.advance_smoothing();
+            self.filter_right.advance_smoothing();
+            (out_l, out_r)
+        }
     }
 
     /// Process a block of stereo frames in place in native f64 precision.
@@ -211,10 +217,22 @@ impl EqBand {
             return;
         }
         let n = left.len().min(right.len());
-        for i in 0..n {
-            let (ol, or_) = self.process_f64(left[i], right[i]);
-            left[i] = ol;
-            right[i] = or_;
+        if self.filter_left.is_settled() && self.filter_right.is_settled() {
+            let (state_l, coeffs) = self.filter_left.settled_parts_mut(0);
+            let state_r = self.filter_right.state_mut(1);
+            BiquadState::process_stereo_block(
+                state_l,
+                state_r,
+                &mut left[..n],
+                &mut right[..n],
+                coeffs,
+            );
+        } else {
+            for i in 0..n {
+                let (ol, or_) = self.process_f64(left[i], right[i]);
+                left[i] = ol;
+                right[i] = or_;
+            }
         }
     }
 

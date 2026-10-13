@@ -311,7 +311,10 @@ impl OpusSource {
 
         // Reopen cleanly from the start to ensure all reader and stream state is fresh.
         let file = File::open(path).map_err(|e| DecodeError::FileOpen(e.to_string()))?;
-        let reader = PacketReader::new(BufReader::new(file));
+        let reader = PacketReader::new(BufReader::with_capacity(
+            crate::decode::DECODER_FILE_BUFFER_CAPACITY,
+            file,
+        ));
 
         let decoder = opus_decoder::OpusMultistreamDecoder::new(
             OPUS_DECODE_RATE,

@@ -167,6 +167,8 @@ pub enum QualityLatencyProfile {
     Balanced,
     /// Lowest latency: short buffers, low lookahead, low-latency filter parameters.
     LowLatency,
+    /// Deep buffering (1-2s cushion) optimized for spinning HDDs and low-power devices.
+    HddSafe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

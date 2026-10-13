@@ -22,9 +22,36 @@ pub fn scale_slice(dst: &mut [f32], g: f32, n: usize) {
         }
     }
 
+    #[cfg(all(target_arch = "x86", target_feature = "sse2"))]
+    {
+        use core::arch::x86::{_mm_loadu_ps, _mm_mul_ps, _mm_set1_ps, _mm_storeu_ps};
+        let gv = unsafe { _mm_set1_ps(g) };
+        while i + 4 <= n {
+            unsafe {
+                let a = _mm_loadu_ps(dst.as_ptr().add(i));
+                let m = _mm_mul_ps(a, gv);
+                _mm_storeu_ps(dst.as_mut_ptr().add(i), m);
+            }
+            i += 4;
+        }
+    }
+
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use core::arch::aarch64::{vld1q_f32, vmulq_n_f32, vst1q_f32};
+        while i + 4 <= n {
+            unsafe {
+                let a = vld1q_f32(dst.as_ptr().add(i));
+                let m = vmulq_n_f32(a, g);
+                vst1q_f32(dst.as_mut_ptr().add(i), m);
+            }
+            i += 4;
+        }
+    }
+
+    #[cfg(all(target_arch = "arm", target_feature = "neon"))]
+    {
+        use core::arch::arm::{vld1q_f32, vmulq_n_f32, vst1q_f32};
         while i + 4 <= n {
             unsafe {
                 let a = vld1q_f32(dst.as_ptr().add(i));

@@ -344,7 +344,8 @@ impl TtaDecoder {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)
             .map_err(|e| DecodeError::FileOpen(format!("Cannot open {}: {}", path.display(), e)))?;
-        let mut reader = BufReader::new(file);
+        let mut reader =
+            BufReader::with_capacity(crate::decode::DECODER_FILE_BUFFER_CAPACITY, file);
 
         let header = parse_header(&mut reader)?;
         let data_start = reader.stream_position().map_err(DecodeError::Io)?;

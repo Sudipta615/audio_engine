@@ -14,9 +14,7 @@ use config::EngineConfig;
 #[cfg(feature = "audio-output")]
 use crate::output::DeviceMonitor;
 use crate::{
-    buffer::{
-        EngineCommand, FixedFrameBuffer, PlaybackInfo, DEFAULT_SAMPLE_RATE, OUTPUT_BUFFER_FRAMES,
-    },
+    buffer::{EngineCommand, FixedFrameBuffer, PlaybackInfo, DEFAULT_SAMPLE_RATE},
     dsp::{graph2::prod::Graph2Engine, GraphicEq},
     playlist::Playlist,
     sink::SampleSink,
@@ -30,8 +28,9 @@ use super::{
 impl AudioEngine {
     /// Create a new audio engine with the default (DAC) sample sink.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        let buffer_frames = config.effective_output_buffer_frames();
         let output_buffer = Arc::new(
-            FixedFrameBuffer::new(OUTPUT_BUFFER_FRAMES)
+            FixedFrameBuffer::new(buffer_frames)
                 .map_err(|e| EngineError::Config(format!("Output buffer: {}", e)))?,
         );
         let sample_sink = Box::new(crate::sink::DacSink::new(Arc::clone(&output_buffer)));
@@ -49,8 +48,9 @@ impl AudioEngine {
     /// backend can be started — the engine runs decode-and-analyze without
     /// driving a DAC.
     pub fn with_sink(config: EngineConfig, sink: Box<dyn SampleSink>) -> Result<Self, EngineError> {
+        let buffer_frames = config.effective_output_buffer_frames();
         let output_buffer = Arc::new(
-            FixedFrameBuffer::new(OUTPUT_BUFFER_FRAMES)
+            FixedFrameBuffer::new(buffer_frames)
                 .map_err(|e| EngineError::Config(format!("Output buffer: {}", e)))?,
         );
         Self::new_inner(config, output_buffer, sink)
@@ -62,6 +62,7 @@ impl AudioEngine {
         output_buffer: Arc<FixedFrameBuffer>,
         sample_sink: Box<dyn SampleSink>,
     ) -> Result<Self, EngineError> {
+        let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
         // Validate before anything is built. A config error is a value the
         // engine cannot honour at all — `mix_slots < 2` has no valid graph,
         // a non-finite trim gain would be clamped into something the caller

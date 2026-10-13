@@ -3,12 +3,14 @@
 
 #[cfg(target_arch = "aarch64")]
 use core::arch::aarch64::*;
+#[cfg(target_arch = "arm")]
+use core::arch::arm::*;
 
 /// Element-wise scale: `dst[i] *= g` using 128-bit ARM NEON registers.
 #[inline]
 #[target_feature(enable = "neon")]
 pub unsafe fn scale_slice_neon(dst: &mut [f32], g: f32, n: usize) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     {
         let n = n.min(dst.len());
         let mut i = 0usize;
@@ -25,7 +27,7 @@ pub unsafe fn scale_slice_neon(dst: &mut [f32], g: f32, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
     {
         crate::dsp::simd::scalar::scale_slice(dst, g, n);
     }
@@ -62,7 +64,7 @@ pub unsafe fn scale_slice_f64_neon(dst: &mut [f64], g: f64, n: usize) {
 #[inline]
 #[target_feature(enable = "neon")]
 pub unsafe fn mix_slices_neon(dst: &mut [f32], src: &[f32], n: usize) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     {
         let n = n.min(dst.len()).min(src.len());
         let mut i = 0usize;
@@ -80,7 +82,7 @@ pub unsafe fn mix_slices_neon(dst: &mut [f32], src: &[f32], n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
     {
         crate::dsp::simd::scalar::mix_slices(dst, src, n);
     }
@@ -90,7 +92,7 @@ pub unsafe fn mix_slices_neon(dst: &mut [f32], src: &[f32], n: usize) {
 #[inline]
 #[target_feature(enable = "neon")]
 pub unsafe fn accumulate_scaled_neon(dst: &mut [f32], src: &[f32], gain: f32, n: usize) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
     {
         let n = n.min(dst.len()).min(src.len());
         let mut i = 0usize;
@@ -109,7 +111,7 @@ pub unsafe fn accumulate_scaled_neon(dst: &mut [f32], src: &[f32], gain: f32, n:
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
     {
         crate::dsp::simd::scalar::accumulate_scaled(dst, src, gain, n);
     }

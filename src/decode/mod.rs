@@ -55,6 +55,10 @@ pub use tta::TtaDecoder;
 #[cfg(feature = "codec-wavpack")]
 pub use wavpack::WavpackDecoder;
 
+/// Default I/O buffer capacity (128 KiB) for decoder file readers.
+/// Amortizes mechanical HDD seek latency by 16×–32× compared to std's 8 KiB default.
+pub const DECODER_FILE_BUFFER_CAPACITY: usize = 128 * 1024;
+
 // ── Format-routing metadata extractors ───────────────────────────────────────
 //
 pub mod channel_layout;

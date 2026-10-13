@@ -5,7 +5,7 @@
 //! All kernels are zero-allocation, lock-free, and real-time safe, with guaranteed
 //! bit-exact / numerical equivalent fallback across every execution level.
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub mod arm;
 pub mod dispatch;
 pub mod gain;

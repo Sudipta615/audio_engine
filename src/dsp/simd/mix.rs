@@ -20,9 +20,37 @@ pub fn mix_slices(dst: &mut [f32], src: &[f32], n: usize) {
         }
     }
 
+    #[cfg(all(target_arch = "x86", target_feature = "sse2"))]
+    {
+        use core::arch::x86::{_mm_add_ps, _mm_loadu_ps, _mm_storeu_ps};
+        while i + 4 <= n {
+            unsafe {
+                let a = _mm_loadu_ps(dst.as_ptr().add(i));
+                let b = _mm_loadu_ps(src.as_ptr().add(i));
+                let s = _mm_add_ps(a, b);
+                _mm_storeu_ps(dst.as_mut_ptr().add(i), s);
+            }
+            i += 4;
+        }
+    }
+
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use core::arch::aarch64::{vaddq_f32, vld1q_f32, vst1q_f32};
+        while i + 4 <= n {
+            unsafe {
+                let a = vld1q_f32(dst.as_ptr().add(i));
+                let b = vld1q_f32(src.as_ptr().add(i));
+                let s = vaddq_f32(a, b);
+                vst1q_f32(dst.as_mut_ptr().add(i), s);
+            }
+            i += 4;
+        }
+    }
+
+    #[cfg(all(target_arch = "arm", target_feature = "neon"))]
+    {
+        use core::arch::arm::{vaddq_f32, vld1q_f32, vst1q_f32};
         while i + 4 <= n {
             unsafe {
                 let a = vld1q_f32(dst.as_ptr().add(i));

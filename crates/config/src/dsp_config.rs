@@ -464,6 +464,15 @@ pub struct LoudnessConfig {
     /// (spec §21 "max attenuation").
     #[serde(default)]
     pub max_attenuation_db: Option<f32>,
+    /// Whether background scanning of full audio files is permitted when loudness
+    /// metadata is absent from track tags. Default is true. When false (or on low-resource/HDD
+    /// devices), avoids spinning background decode threads that thrash mechanical disks.
+    #[serde(default = "default_background_scan_enabled")]
+    pub background_scan_enabled: bool,
+}
+
+fn default_background_scan_enabled() -> bool {
+    true
 }
 
 impl Default for LoudnessConfig {
@@ -475,6 +484,7 @@ impl Default for LoudnessConfig {
             true_peak_dbtp: -1.0,
             max_boost_db: None,
             max_attenuation_db: None,
+            background_scan_enabled: true,
         }
     }
 }

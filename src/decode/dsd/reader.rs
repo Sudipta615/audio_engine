@@ -37,7 +37,8 @@ impl DsdReader {
     /// Open a DSF or DFF source via a byte source.
     pub fn open_source(mut source: Box<dyn AudioByteSource>) -> Result<Self, DsdError> {
         let _ = source.seek(SeekFrom::Start(0));
-        let mut reader = BufReader::new(source);
+        let mut reader =
+            BufReader::with_capacity(crate::decode::DECODER_FILE_BUFFER_CAPACITY, source);
 
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;

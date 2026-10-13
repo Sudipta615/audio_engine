@@ -80,8 +80,11 @@ impl ApeDecoder {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)
             .map_err(|e| DecodeError::FileOpen(format!("Cannot open {}: {}", path.display(), e)))?;
-        let inner =
-            ape_decoder::ApeDecoder::new(BufReader::new(file)).map_err(DecodeError::from)?;
+        let inner = ape_decoder::ApeDecoder::new(BufReader::with_capacity(
+            crate::decode::DECODER_FILE_BUFFER_CAPACITY,
+            file,
+        ))
+        .map_err(DecodeError::from)?;
 
         let sample_rate = inner.info().sample_rate;
         let channels = inner.info().channels as usize;

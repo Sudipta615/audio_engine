@@ -98,6 +98,10 @@ pub struct EngineConfig {
     /// Configurable quality and latency tuning profile.
     #[serde(default)]
     pub quality_profile: crate::QualityLatencyProfile,
+    /// Optional explicit capacity (in frames) for the output ring buffer.
+    /// When `None`, the capacity is derived from [`Self::quality_profile`].
+    #[serde(default)]
+    pub output_buffer_frames: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -551,6 +555,23 @@ impl Default for EngineConfig {
             endpoints: Vec::new(),
             plugins: PluginHostConfig::default(),
             quality_profile: crate::QualityLatencyProfile::default(),
+            output_buffer_frames: None,
+        }
+    }
+}
+
+impl EngineConfig {
+    /// Calculate the effective output ring buffer capacity in frames.
+    /// Uses `output_buffer_frames` if explicitly set; otherwise derives from `quality_profile`.
+    pub fn effective_output_buffer_frames(&self) -> usize {
+        if let Some(frames) = self.output_buffer_frames {
+            return frames.clamp(2048, 262_144);
+        }
+        match self.quality_profile {
+            crate::QualityLatencyProfile::LowLatency => 4096,
+            crate::QualityLatencyProfile::Balanced => 8192,
+            crate::QualityLatencyProfile::Quality => 16384,
+            crate::QualityLatencyProfile::HddSafe => 65536,
         }
     }
 }
@@ -951,6 +972,11 @@ impl EngineConfig {
                 },
                 crossfeed: CrossfeedConfig {
                     enabled: false,
+                    ..Default::default()
+                },
+                quality_profile: crate::QualityLatencyProfile::HddSafe,
+                loudness: LoudnessConfig {
+                    background_scan_enabled: false,
                     ..Default::default()
                 },
                 ..Default::default()

@@ -216,6 +216,7 @@ pub(crate) fn render_loop(mut ctx: RenderContext) {
         ));
         return;
     }
+    let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
 
     let frames_per_period = ctx.buffer_size_frames as usize;
     let samples_per_period = frames_per_period * ctx.channels;

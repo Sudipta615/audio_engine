@@ -37,7 +37,14 @@ impl SimdLevel {
             }
             Self::Scalar
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(target_arch = "x86")]
+        {
+            if is_x86_feature_detected!("sse2") {
+                return Self::Sse2;
+            }
+            Self::Scalar
+        }
+        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
         {
             #[cfg(target_feature = "neon")]
             {
@@ -48,7 +55,12 @@ impl SimdLevel {
                 Self::Scalar
             }
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "aarch64",
+            target_arch = "arm"
+        )))]
         {
             Self::Scalar
         }

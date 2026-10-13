@@ -117,7 +117,8 @@ impl WavpackDecoder {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = File::open(path)
             .map_err(|e| DecodeError::FileOpen(format!("Cannot open {}: {}", path.display(), e)))?;
-        let mut reader = BufReader::new(file);
+        let mut reader =
+            BufReader::with_capacity(crate::decode::DECODER_FILE_BUFFER_CAPACITY, file);
 
         let (blocks, facts) = scan_blocks(&mut reader)?;
         let facts = facts.ok_or_else(|| {

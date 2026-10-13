@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 ## Project snapshot
 
-**Shadow Desktop** is a headless, high-performance, bit-perfect audiophile audio
+**audio_engine** is a headless, high-performance, bit-perfect audiophile audio
 playback & DSP engine written in Rust with no C/C++ codec SDKs. It is a Cargo
 workspace with a graph-runtime architecture: a node-based DSP graph (compiled
 execution plans, live generation swaps) is the **production hot path**, an N-input mix
@@ -222,14 +222,12 @@ Adopt strict [Semantic Versioning](https://semver.org) with the form
 - Any new backward-compatible capability → a **minor**.
 - Any breaking change → a **major**.
 
-**Example.** Adding a new public `EngineHandle::set_gain` method = minor → `0.10.0`.
+**Example.** Adding a new public `EngineHandle::set_gain` method = minor → `0.9.0`.
 Fixing a limiter off-by-one bug = patch → `0.9.1`. Removing the `CpalOutput` type
 = major → `1.0.0`.
 
-> **Under 1.0 there is no compatibility floor.** Strict SemVer's stability promise
-> begins at 1.0.0. Before then, a `y` bump may still carry a breaking change when
-> there is no alternative — but it must be called out in the CHANGELOG entry, not
-> left for a user to discover. This project is at 0.9.1; treat the API as unstable.
+> **Under 1.0 there was no compatibility floor.** Strict SemVer's stability promise
+> begins at 1.0.0. This project is at 1.0.0; strict SemVer stability promises apply.
 
 ## Modularity — no god files
 
@@ -305,6 +303,56 @@ patterns are:
   next to the `unsafe impl Sync`.
 - **Per-endpoint realtime threads** must never touch shared mutable state — each
   reads only its own ring, its own resampler/slip, and the shared graph read-only.
+
+## General Rust implementation standards
+
+These standards supplement the repository-specific architecture and realtime rules above. When a general rule conflicts with an explicit project invariant, the project invariant takes precedence.
+
+### Correctness, design, and maintainability
+
+- Prefer the simplest implementation that fully satisfies the requirement. Avoid speculative abstractions, unnecessary dependencies, duplicated logic, and unrelated refactors.
+- Optimize algorithmic complexity and memory use where measurements or workload characteristics justify it; do not sacrifice correctness, DSP fidelity, realtime guarantees, or maintainability for speculative speed.
+- Follow idiomatic Rust and the Rust API Guidelines. Use meaningful `snake_case` names for functions, variables, and modules; `PascalCase` for types and traits; and `SCREAMING_SNAKE_CASE` for constants.
+- Keep functions, structs, enums, and modules focused on one responsibility. Prefer borrowing over ownership when practical, and return early to reduce unnecessary nesting.
+- Prefer explicit, exhaustive pattern matching. Avoid wildcard imports except where established Rust conventions make them appropriate.
+- Use the repository's `rustfmt` configuration rather than imposing a separate line-length or formatting policy.
+- Do not add emoji or decorative Unicode characters to source code, comments, or documentation.
+
+### Types and error handling
+
+- Use Rust's type system to make invalid states difficult to represent. Prefer meaningful newtypes for values with different meanings and `Option<T>` over sentinel values.
+- Avoid `.unwrap()` in library and production code. Use `?` to propagate errors and `.expect("reason")` only when a documented invariant makes failure impossible under valid operation.
+- Use the project's existing error types and conventions. Introduce `thiserror` or `anyhow` only when appropriate to the crate and its existing dependency policy; do not add them mechanically.
+- Avoid unnecessary cloning and allocation. Use `Vec::with_capacity` when a useful capacity is known, and choose `Arc`, `Rc`, or owned data only when their semantics are needed.
+- Add or update public API documentation, including behavior, parameters, return values, and errors where relevant. Follow the repository's established documentation style.
+
+### Dependencies and concurrency
+
+- Use Cargo for dependency and build management. Before adding a dependency, verify that it materially reduces complexity or improves correctness/performance enough to justify its compile-time, binary-size, maintenance, and security costs.
+- Do not introduce Tokio, Rayon, mutexes, channels, or other concurrency mechanisms by default. Select concurrency based on the actual workload and architecture.
+- The repository's realtime rules are stricter than general Rust guidance: never introduce heap allocation, blocking operations, or locks on the audio hot path. Do not parallelize or add synchronization to realtime processing without proving that it preserves these guarantees.
+- Keep unsafe code to the minimum necessary. Document the safety invariant next to each unsafe operation or unsafe trait implementation, and update the relevant safety documentation when its contract changes.
+- Never commit secrets, credentials, tokens, debug `println!`/`dbg!` statements, or commented-out code.
+
+## Performance investigation and benchmarking
+
+Performance work must be evidence-driven. A change is not a demonstrated optimization until its baseline and final result have been measured under comparable conditions.
+
+1. **Establish a baseline.** Identify the target workload and metric before changing code. Inspect the existing benchmark, fidelity, and regression tests; record the current result and the exact command/configuration used.
+2. **Choose representative measurements.** Use the project's existing Criterion benchmarks where available and run benchmarks in release mode. Do not run competing benchmarks in parallel. Keep CPU-affinity, compiler flags, features, input data, and machine conditions consistent between baseline and final measurements.
+3. **Change one meaningful thing at a time.** Prefer high-impact, low-risk changes. Do not modify benchmarks, weaken correctness checks, or change test inputs merely to make results look better.
+4. **Validate correctness alongside speed.** Run relevant unit, integration, DSP-fidelity, realtime-allocation, and regression tests. Performance gains are unacceptable if they change bit-perfect output, violate realtime constraints, or regress behavior beyond the project's stated tolerances.
+5. **Re-measure the final state.** Re-run every headline benchmark after the final code change, on the final working-tree state. Report all benchmarks tested in a Markdown table with baseline, final result, absolute/percentage change, and command or measurement notes. Clearly label measurements that are noisy, inconclusive, or not comparable.
+6. **Keep the worktree clean.** Do not create benchmark reports or other artifacts unless requested or required by the repository. Do not claim an improvement without supporting measurements.
+
+Never use `target-cpu=native` or ad hoc `RUSTFLAGS` to inflate benchmark results. Use the project's documented benchmark configuration and compare like with like. Continue only with additional optimizations that have a credible expected benefit and can be validated within the task's scope.
+
+## Additional implementation checks
+
+- Add tests for new behavior and bug fixes, including relevant edge cases. Use the existing test structure and conventions rather than creating redundant test scaffolding.
+- Run formatting, Clippy, and the relevant tests after changes. Use the repository's authoritative commands in the completeness checklist below; do not substitute narrower commands for required workspace checks without explaining why.
+- For changes that affect public APIs, crate features, manifests, audio processing, concurrency, or documented architecture, review the corresponding compatibility, fidelity, safety, and documentation requirements in this file.
+- Do not require Python, PyO3, WASM, web UI, or TUI-specific tooling for unrelated changes. Apply those workflows only when the affected component actually uses them.
 
 ## Completeness checklist
 

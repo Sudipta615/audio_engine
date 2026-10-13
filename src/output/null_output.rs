@@ -416,7 +416,10 @@ impl Output for NullOutput {
                         block_frames: block,
                         tail_capacity_frames: tail_frames,
                     };
-                    move || Self::drain_loop(ctx)
+                    move || {
+                        let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
+                        Self::drain_loop(ctx)
+                    }
                 })
                 .map_err(|e| {
                     self.running.store(false, Ordering::Release);

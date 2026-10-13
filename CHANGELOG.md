@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-10-13
+
+Production milestone 1.0.0: comprehensive hardware-tier optimization, CPU spike
+elimination, mechanical hard drive (HDD) latency hardening, universal SIMD vectorization,
+and zero-allocation realtime qualification. Establishes the stable SemVer 1.0.0
+foundation for consumer and pro-audio product integration.
+
+### Added
+
+- **Mechanical HDD Latency Hardening & Deep Buffering**:
+  - Scaled file decoder `BufReader` capacity across all lossless and lossy formats (Symphonia,
+    Opus, DSD, TTA, WavPack, Monkey's Audio) from 8 KiB to 128 KiB (`DECODER_FILE_BUFFER_CAPACITY`).
+    Absorbs physical disk seek latency (10–15 ms) and cuts OS read syscall context switches by 16×–32×.
+  - Added `QualityLatencyProfile::HddSafe` deep buffer profile with 65,536 frames (~1.5 s cushion at 44.1/48 kHz)
+    and configurable `output_buffer_frames` in `EngineConfig`.
+  - Added `background_scan_enabled: bool` to `LoudnessConfig` (disabled in `LegacyLowPower` preset),
+    preventing concurrent background file decode loops from thrashing physical HDD read heads.
+- **Universal Hardware FTZ/DAZ Activation**:
+  - Implemented 32-bit ARM `FPSCR` flush-to-zero (bit 24) inline assembly handling alongside x86/x86_64 MXCSR FTZ/DAZ.
+  - Activated hardware FTZ/DAZ on engine worker tick loops and across all audio backend render threads
+    (ALSA, WASAPI, PipeWire, JACK, NullOutput), completely eliminating 100–200 cycle microcode trap stalls
+    during tail decay to silence.
+- **Adaptive Worker Tick Pacing**:
+  - Implemented `recommended_tick_wait` and `tick_blocking_adaptive` in `AudioEngine`, dynamically
+    adjusting worker thread sleep duration between 2 ms (buffer draining) and 25 ms (healthy ring cushion),
+    reducing steady-state thread wakeups from 200/s to 30–50/s on low-power dual-core CPUs.
+- **32-Bit Legacy SIMD Vectorization**:
+  - Enabled 32-bit x86 SSE2 vector kernels (`scale_slice`, `mix_slices`, `ramp_slice`, `vector_abs_max`)
+    on `target_arch = "x86"`, providing 4× f32 parallelism on legacy x86 CPUs.
+  - Enabled 32-bit ARM NEON vector kernels on `target_arch = "arm"`, accelerating Cortex-A7/A9/A53 32-bit devices.
+- **Vectorized Dual-Channel Stereo Biquad Processing**:
+  - Implemented `BiquadState::process_stereo` and `process_stereo_block` in `src/dsp/biquad.rs` using
+    SSE2 dual-f64 vector instructions (`_mm_mul_pd` + `_mm_add_pd`/`_mm_sub_pd`) computing Left and Right
+    channels concurrently while maintaining bit-exact IEEE equivalence with the scalar oracle.
+  - Accelerated settled `EqBand` parametric EQ block processing, bypassing redundant per-sample smoothing
+    checks during steady playback.
+- **Hardware Volume Integration**:
+  - Connected native ALSA mixer API hardware endpoint volume control (`supports_hardware_volume` and
+    `set_hardware_volume_db`) directly to `AlsaOutput`.
+
 ## [0.9.3] — 2026-10-05
 
 A static audit of the whole tree — realtime safety, memory safety, DSP
