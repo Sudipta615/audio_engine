@@ -148,3 +148,55 @@ pub unsafe fn dot_product_neon(a: &[f32], b: &[f32], n: usize) -> f32 {
         crate::dsp::simd::scalar::dot_product(a, b, n)
     }
 }
+
+/// Complex multiply-accumulate using ARM NEON: `acc[k] += x[k] * h[k]`.
+/// Slices represent interleaved complex pairs `[re_0, im_0, re_1, im_1, ...]`.
+#[inline]
+#[target_feature(enable = "neon")]
+pub unsafe fn complex_mac_neon(acc: &mut [f32], x: &[f32], h: &[f32], n_complex: usize) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let n_floats = (n_complex * 2).min(acc.len()).min(x.len()).min(h.len());
+        let mut i = 0usize;
+
+        while i + 4 <= n_floats {
+            let va = vld1q_f32(acc.as_ptr().add(i));
+            let vx = vld1q_f32(x.as_ptr().add(i));
+            let vh = vld1q_f32(h.as_ptr().add(i));
+
+            let h_swap = vrev64q_f32(vh);
+            let xr = vtrn1q_f32(vx, vx);
+            let xi = vtrn2q_f32(vx, vx);
+
+            let p1 = vmulq_f32(xr, vh);
+            let p2 = vmulq_f32(xi, h_swap);
+            let sign_mask = vreinterpretq_f32_u32(vcombine_u32(
+                vcreate_u32(0x0000_0000_8000_0000),
+                vcreate_u32(0x0000_0000_8000_0000),
+            ));
+            let p2_signed = vreinterpretq_f32_u32(veorq_u32(
+                vreinterpretq_u32_f32(p2),
+                vreinterpretq_u32_f32(sign_mask),
+            ));
+            let prod = vaddq_f32(p1, p2_signed);
+            let res = vaddq_f32(va, prod);
+            vst1q_f32(acc.as_mut_ptr().add(i), res);
+            i += 4;
+        }
+
+        while i + 1 < n_floats {
+            let xr = *x.get_unchecked(i);
+            let xi = *x.get_unchecked(i + 1);
+            let hr = *h.get_unchecked(i);
+            let hi = *h.get_unchecked(i + 1);
+            *acc.get_unchecked_mut(i) += xr * hr - xi * hi;
+            *acc.get_unchecked_mut(i + 1) += xr * hi + xi * hr;
+            i += 2;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::dsp::simd::scalar::complex_mac(acc, x, h, n_complex);
+    }
+}
+

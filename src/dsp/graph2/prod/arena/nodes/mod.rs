@@ -9,6 +9,7 @@ pub mod gain_node;
 pub mod limiter_node;
 pub mod loudness_node;
 pub mod mix;
+pub mod plugin_clap_node;
 pub mod plugin_host_node;
 pub mod plugin_sandbox;
 pub mod resampler_node;
@@ -31,7 +32,11 @@ pub use mix::{
     AutomationPoint, AutomationTarget, DuckState, MixBusNode, MixInput, MixInputCmd,
     MixTransitionCmd, PanLaw, MAX_AUTOMATION_POINTS, MAX_DUCK_TARGETS, MAX_MIX_SLOTS,
 };
+#[allow(unused_imports)]
+pub use plugin_clap_node::ClapPluginHostNode;
 pub use plugin_host_node::{PluginHostNode, MAX_PLUGIN_SLOTS};
+
+
 #[allow(unused_imports)]
 pub use plugin_sandbox::{
     run_plugin_worker_stdio, PluginProcessSandbox, SandboxedPluginInstance, MAX_SANDBOX_CHANNELS,

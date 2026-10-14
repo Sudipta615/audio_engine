@@ -1,6 +1,6 @@
 [package]
 name = "plugin-abi"
-version = "1.0.0"
+version = "1.1.0"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"

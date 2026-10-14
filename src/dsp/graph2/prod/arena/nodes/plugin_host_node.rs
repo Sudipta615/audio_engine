@@ -73,6 +73,8 @@ pub struct PluginHostNode {
     /// Sticky enable mirror: a runtime toggle survives swaps.
     runtime_enabled: bool,
     latency_samples: u32,
+    #[cfg(feature = "clap-host")]
+    pub clap_node: Option<super::plugin_clap_node::ClapPluginHostNode>,
 }
 
 impl PluginHostNode {
@@ -86,6 +88,8 @@ impl PluginHostNode {
             active: false,
             runtime_enabled: true,
             latency_samples: 0,
+            #[cfg(feature = "clap-host")]
+            clap_node: None,
         }
     }
 
@@ -208,8 +212,59 @@ impl PluginHostNode {
         }
     }
 
+    #[cfg(feature = "clap-host")]
+    pub fn attach_clap(&mut self, clap: super::plugin_clap_node::ClapPluginHostNode) {
+        self.latency_samples = self.latency_samples.max(clap.latency_samples() as u32);
+        self.clap_node = Some(clap);
+        self.recompute_active();
+    }
+
+    #[cfg(feature = "clap-host")]
+    pub fn clap_node_mut(&mut self) -> Option<&mut super::plugin_clap_node::ClapPluginHostNode> {
+        self.clap_node.as_mut()
+    }
+
+    #[cfg(feature = "clap-host")]
+    pub fn clap_node(&self) -> Option<&super::plugin_clap_node::ClapPluginHostNode> {
+        self.clap_node.as_ref()
+    }
+
+    #[cfg(feature = "clap-host")]
+    pub fn apply_clap_params(&mut self, batch: &[(u32, f64)]) {
+        if let Some(ref mut clap) = self.clap_node {
+            clap.apply_params(batch);
+        }
+    }
+
+    #[cfg(feature = "clap-host")]
+    pub fn set_clap_enabled(&mut self, enabled: bool) {
+        if let Some(ref mut clap) = self.clap_node {
+            clap.set_enabled(enabled);
+        }
+        self.recompute_active();
+    }
+
+    #[cfg(not(feature = "clap-host"))]
+    pub fn set_clap_enabled(&mut self, _enabled: bool) {}
+
+    #[cfg(feature = "clap-host")]
+    pub fn set_clap_param(&mut self, id: u32, value: f64) {
+        if let Some(ref mut clap) = self.clap_node {
+            clap.set_param(id, value);
+        }
+    }
+
+    #[cfg(not(feature = "clap-host"))]
+    pub fn set_clap_param(&mut self, _id: u32, _value: f64) {}
+
+
     fn recompute_active(&mut self) {
-        self.active = self.runtime_enabled && self.slots.iter().any(|s| s.enabled);
+        let any_slot = self.slots.iter().any(|s| s.enabled);
+        #[cfg(feature = "clap-host")]
+        let clap_active = self.clap_node.as_ref().map_or(false, |c| c.is_active());
+        #[cfg(not(feature = "clap-host"))]
+        let clap_active = false;
+        self.active = self.runtime_enabled && (any_slot || clap_active);
     }
 
     /// Number of attached slots (diagnostics).
@@ -287,6 +342,10 @@ impl DspNode for PluginHostNode {
         for slot in &mut self.slots {
             slot.instance.reset();
         }
+        #[cfg(feature = "clap-host")]
+        if let Some(ref mut clap) = self.clap_node {
+            clap.reset();
+        }
     }
 
     fn prepare(&mut self, sample_rate: f32, max_channels: usize) {
@@ -314,6 +373,10 @@ impl DspNode for PluginHostNode {
                 }
             };
         }
+        #[cfg(feature = "clap-host")]
+        if let Some(ref mut clap) = self.clap_node {
+            clap.prepare(sample_rate, max_channels);
+        }
     }
 
     fn process_block_f32(&mut self, planes: &mut [&mut [f32]]) {
@@ -339,6 +402,12 @@ impl DspNode for PluginHostNode {
             // above) and the plan runner guarantees every plane holds at least
             // `frames` samples — the contract every arena node runs under.
             let _ = unsafe { slot.instance.process(planes) };
+        }
+        #[cfg(feature = "clap-host")]
+        if let Some(ref mut clap) = self.clap_node {
+            if clap.is_active() {
+                clap.process_block_f32(planes);
+            }
         }
     }
 

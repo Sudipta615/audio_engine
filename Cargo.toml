@@ -13,7 +13,7 @@ name = "audio-engine"
 # The practical contract this creates: an `audio-engine` release may change the
 # realtime DSP/IO surface in a way Ultimate Engine's 1.x does not, so the root
 # package is what an integrator should depend on.
-version = "1.0.0"
+version = "1.1.0"
 rust-version = "1.98"
 edition = "2021"
 license = "Apache-2.0"
@@ -72,6 +72,7 @@ members = [
     "crates/config",
     "crates/plugin-abi",
     "crates/plugin-test-echo",
+    "crates/plugin-test-clap-echo",
     "crates/tui",
     "crates/opus-decoder",
 ]
@@ -208,6 +209,14 @@ tag-write = ["dep:lofty"]
 # AcoustID/Chromaprint audio fingerprinting (`decode::extract_fingerprint`).
 fingerprint = ["dep:chromaprint-next"]
 
+# MPRIS2 D-Bus interface (Linux only): exposes transport controls and metadata
+# over the standard `org.mpris.MediaPlayer2` interface.
+mpris = ["dep:zbus"]
+
+# CLAP audio plugin hosting (C ABI): load and process standard CLAP plugins in the graph.
+clap-host = ["dep:clap-sys", "dep:libloading"]
+
+
 # Stable C FFI boundary behind `c-ffi`. Adds no dependencies — only `std::ffi`.
 # Hosts written in C/C++ (or any language with C interop) call through the
 # opaque-pointer API in `src/ffi.rs` instead of linking the Rust crate directly.
@@ -251,10 +260,10 @@ realfft = "3.5"
 # cepstral minimum-phase, hybrid-phase rendering. Same crate realfft builds
 # on, so this adds no new compiled code.
 rustfft = "6.2"
-config = { path = "crates/config", version = "1.0.0" }
+config = { path = "crates/config", version = "1.1.0" }
 # The Rust-native plugin ABI + host. Default features off —
 # the `plugin-dylib` engine feature pulls in the loader.
-plugin-abi = { path = "crates/plugin-abi", version = "1.0.0", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "1.1.0", default-features = false }
 thread-priority = { version = "3.1", optional = true }
 # Pure-Rust Monkey's Audio (APE) decoder, enabled by the `codec-ape` feature.
 ape-decoder = { version = "0.3.2", optional = true }
@@ -295,6 +304,12 @@ chromaprint-next = { version = "0.1", optional = true }
 # "100% pure Rust, no FFI" property of the workspace is preserved.
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+# D-Bus client library for the MPRIS2 desktop interface (`mpris` feature).
+zbus = { version = "4", optional = true }
+# CLAP audio plugin host C-ABI bindings and dynamic library loader (`clap-host` feature).
+clap-sys = { version = "0.5", optional = true }
+libloading = { version = "0.8", optional = true }
+
 # (WavPack previously used a runtime-loaded `libwavpack` via `libloading`;
 # removed — see `codec-wavpack` above. No native codec backend now needs
 # `libloading`.)
@@ -370,8 +385,8 @@ rusty-opus = "0.9.1"
 # `.wv` fixtures at test time (no committed binary assets).
 wavicle = { version = "0.1", features = ["encode"] }
 # The reference plugin (in-process, via the static registry).
-plugin-abi = { path = "crates/plugin-abi", version = "1.0.0", default-features = false }
-plugin-test-echo = { path = "crates/plugin-test-echo", version = "1.0.0", default-features = false }
+plugin-abi = { path = "crates/plugin-abi", version = "1.1.0", default-features = false }
+plugin-test-echo = { path = "crates/plugin-test-echo", version = "1.1.0", default-features = false }
 # Parses `testdata/fixtures.toml` for the decode fixture smoke test. Test-only:
 # the library itself has no TOML dependency.
 toml = "0.8"
@@ -660,6 +675,11 @@ path = "tests/fidelity/convolver_taps.rs"
 [[test]]
 name = "plugin_host"
 path = "tests/fidelity/plugin_host.rs"
+
+[[test]]
+name = "plugin_clap"
+path = "tests/fidelity/plugin_clap.rs"
+required-features = ["clap-host"]
 
 [[test]]
 name = "gapless_queue"

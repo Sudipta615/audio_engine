@@ -8,8 +8,9 @@
 //! 5. Numerical stability under subnormal, negative, and zero floating-point inputs.
 
 use engine::dsp::simd::{
-    execute_accumulate_scaled_at_level, execute_dot_product_at_level, execute_mix_at_level,
-    execute_scale_at_level, execute_scale_f64_at_level, SimdLevel,
+    execute_accumulate_scaled_at_level, execute_complex_mac_at_level,
+    execute_dot_product_at_level, execute_mix_at_level, execute_scale_at_level,
+    execute_scale_f64_at_level, SimdLevel,
 };
 
 #[test]
@@ -246,3 +247,46 @@ fn test_simd_fallback_preserves_compatibility_on_all_cpus() {
         );
     }
 }
+
+#[test]
+fn test_simd_complex_mac_numerical_equivalence_across_tiers() {
+    let tiers = [
+        SimdLevel::Scalar,
+        SimdLevel::Sse2,
+        SimdLevel::Avx2,
+        SimdLevel::Avx512,
+        SimdLevel::Neon,
+    ];
+
+    let test_sizes = [0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 23, 32, 64, 128, 256];
+
+    for &n_complex in &test_sizes {
+        let n_floats = n_complex * 2;
+        let baseline_acc = (0..n_floats).map(|i| (i as f32 * 0.05).sin()).collect::<Vec<_>>();
+        let x = (0..n_floats).map(|i| (i as f32 * 0.07 + 0.1).cos()).collect::<Vec<_>>();
+        let h = (0..n_floats).map(|i| (i as f32 * 0.03 + 0.2).sin()).collect::<Vec<_>>();
+
+        let mut expected = baseline_acc.clone();
+        execute_complex_mac_at_level(SimdLevel::Scalar, &mut expected, &x, &h, n_complex);
+
+        for &tier in &tiers {
+            let mut actual = baseline_acc.clone();
+            execute_complex_mac_at_level(tier, &mut actual, &x, &h, n_complex);
+
+            for i in 0..n_floats {
+                let diff = (actual[i] - expected[i]).abs();
+                assert!(
+                    diff < 1e-5,
+                    "Complex MAC mismatch at tier {:?}, size {}, element {} (actual={}, expected={}, diff={})",
+                    tier,
+                    n_complex,
+                    i,
+                    actual[i],
+                    expected[i],
+                    diff
+                );
+            }
+        }
+    }
+}
+

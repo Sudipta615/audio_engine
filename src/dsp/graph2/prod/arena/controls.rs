@@ -219,6 +219,10 @@ pub(crate) enum NodeCmd {
     /// Live plugin parameter batch (plain data — allocation-free over
     /// the SPSC queue).
     SetPluginParams(plugin_abi::PluginParams),
+    /// Live CLAP plugin enable toggle.
+    SetClapPluginEnabled(bool),
+    /// Live CLAP plugin parameter change (id, value).
+    SetClapPluginParam { id: u32, value: f64 },
 }
 
 impl Default for NodeCmd {
@@ -1404,6 +1408,17 @@ impl GraphControlHandle {
         self.enqueue(node_id::PLUGIN, NodeCmd::SetPluginParams(batch));
     }
 
+    /// Live toggle of the CLAP plugin host.
+    pub fn set_clap_plugin_enabled(&self, enabled: bool) {
+        self.enqueue(node_id::PLUGIN, NodeCmd::SetClapPluginEnabled(enabled));
+    }
+
+    /// Live CLAP plugin parameter change: plain data over the SPSC
+    /// queue, applied at the next block boundary.
+    pub fn set_clap_plugin_param(&self, id: u32, value: f64) {
+        self.enqueue(node_id::PLUGIN, NodeCmd::SetClapPluginParam { id, value });
+    }
+
     /// Set the virtual screen: `center_azimuth_deg` (screen center),
     /// `half_width_deg` (L/R spread, clamped to 90°), `elevation_deg`
     /// (clamped to ±90°), `gain` (linear, clamped to 4).
@@ -1958,6 +1973,12 @@ fn apply_node_cmd(node: &mut GraphNode, cmd: &NodeCmd) {
             n.set_runtime_enabled(*enabled)
         }
         (GraphNode::PluginHost(n), NodeCmd::SetPluginParams(batch)) => n.apply_params(batch),
+        (GraphNode::PluginHost(n), NodeCmd::SetClapPluginEnabled(enabled)) => {
+            n.set_clap_enabled(*enabled)
+        }
+        (GraphNode::PluginHost(n), NodeCmd::SetClapPluginParam { id, value }) => {
+            n.set_clap_param(*id, *value)
+        }
         (
             GraphNode::Spatial(n),
             NodeCmd::SetSpatialScreen {
@@ -2600,6 +2621,17 @@ impl DspGraph {
     /// The plugin host's enable flag (mirrored at drain).
     pub fn plugin_enabled(&self) -> bool {
         self.control_handle().plugin_enabled()
+    }
+
+    /// Live toggle of the CLAP plugin host.
+    pub fn set_clap_plugin_enabled(&self, enabled: bool) {
+        self.control_handle().set_clap_plugin_enabled(enabled);
+    }
+
+    /// Live CLAP plugin parameter change: plain data over the per-node SPSC
+    /// queue, applied at the next block boundary.
+    pub fn set_clap_plugin_param(&self, id: u32, value: f64) {
+        self.control_handle().set_clap_plugin_param(id, value);
     }
 
     /// Load a rendered correction IR set into the ACTIVE node and mirror it

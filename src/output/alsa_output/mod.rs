@@ -418,6 +418,7 @@ impl AlsaOutput {
         let handle = std::thread::Builder::new()
             .name("alsa-render".to_string())
             .spawn(move || {
+                crate::output::rt_thread::promote_current_thread_to_realtime("alsa-render");
                 let _ = crate::buffer::enable_flush_zero_denormals_on_current_thread();
                 let io_faults = Arc::clone(&shared_io_faults);
                 let mut converter = AudioFormatConverter::new_at_rate(
@@ -510,6 +511,7 @@ impl AlsaOutput {
         let handle = std::thread::Builder::new()
             .name("alsa-dsd-render".to_string())
             .spawn(move || {
+                crate::output::rt_thread::promote_current_thread_to_realtime("alsa-dsd-render");
                 let io = pcm.io_bytes();
                 let mut scratch = dsd_scratch;
                 while running.load(Ordering::Acquire) {

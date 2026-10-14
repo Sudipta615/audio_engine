@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-10-14
+
+Release 1.1.0 addresses the four identified engine gaps across realtime OS scheduling,
+hardware SIMD vectorization, Linux desktop integration, and audio plugin hosting.
+
+### Added
+
+- **Realtime Thread Priority Promotion for Native Audio Backends**:
+  - Implemented `promote_current_thread_to_realtime` in `src/output/rt_thread.rs` wrapping
+    `thread_priority` with graceful fallback to standard thread priority if permissions are not granted.
+  - Integrated realtime priority promotion into ALSA native worker threads (`AlsaOutput::worker_pcm`,
+    `AlsaOutput::worker_dsd`), WASAPI native audio threads (`WasapiOutput::render_loop`), and unified
+    CPAL device callback threads.
+  - Documented realtime priority requirements and capabilities in `SECURITY.md`.
+- **Hardware SIMD Vectorization for DSP Filters and Decimation**:
+  - Accelerated FIR decimation filter dot product (`decimator.rs`) via `simd::dispatch_dot_product_f64`.
+  - Added vectorized complex multiply-accumulate (`complex_mac`) across scalar, SSE2, AVX2, and ARM NEON
+    tiers in `src/dsp/simd/`, accelerating FFT convolver partitioned frequency-domain overlap-add (`src/dsp/convolution.rs`).
+  - Added `dispatch_stereo_biquad_cascade_f32` and `dispatch_biquad_cascade_f32` in `src/dsp/simd/dispatch.rs`.
+  - Vectorized `ParametricEq::process_block` in `src/dsp/equalizer/core.rs` using preallocated f64 scratch
+    buffers and dual-channel SSE2 biquad filtering for settled multi-band EQ cascades.
+  - Added comprehensive numerical equivalence fidelity suite in `tests/fidelity/simd_qualification.rs`.
+- **MPRIS2 D-Bus Interface for Linux Desktop Integration**:
+  - Added optional `mpris` feature flag backed by pure-Rust asynchronous `zbus`.
+  - Implemented standard `org.mpris.MediaPlayer2` and `org.mpris.MediaPlayer2.Player` interfaces in `src/mpris/interface.rs`,
+    supporting Play, Pause, PlayPause, Stop, Next, Previous, Seek, SetPosition, Volume, OpenUri, and Quit.
+  - Implemented background change-detection task polling playback telemetry every 100 ms and broadcasting
+    D-Bus `org.freedesktop.DBus.Properties.PropertiesChanged` signals for `PlaybackStatus`, `Metadata`, and `Volume`.
+  - Added `--mpris` CLI flag in `audio_engine_cli` and `engine-tui`.
+- **CLAP Audio Plugin Host Integration**:
+  - Added optional `clap-host` feature flag wrapping the standard CLAP C-ABI.
+  - Implemented `ClapPluginHostNode` in `src/dsp/graph2/prod/arena/nodes/plugin_clap_node.rs` supporting
+    dynamic library loading, entry point discovery, factory queries, block processing, parameter automation
+    via `clap_input_events`, state persistence via `clap_ostream`/`clap_istream`, and bypass toggling.
+  - Connected CLAP hosting directly into the production graph's master plugin insert seam (`PluginHostNode`).
+  - Added `SetClapPluginEnabled` and `SetClapPluginParam` variants to `NodeCmd` and `EngineCommand`, with
+    methods on `GraphControlHandle`, `Graph2ControlHandle`, `DspGraph`, and `EngineHandle`.
+  - Created reference test plugin crate `crates/plugin-test-clap-echo` and full end-to-end fidelity test suite
+    in `tests/fidelity/plugin_clap.rs`.
+
 ## [1.0.0] — 2026-10-13
 
 Production milestone 1.0.0: comprehensive hardware-tier optimization, CPU spike

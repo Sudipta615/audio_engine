@@ -226,6 +226,18 @@ impl Graph2ControlHandle {
     pub fn load_correction_ir(&self, set: Arc<CorrectionIrSet>) {
         self.inner.load_correction_ir(set.clone());
     }
+    pub fn set_plugin_enabled(&self, enabled: bool) {
+        self.inner.set_plugin_enabled(enabled);
+    }
+    pub fn set_plugin_params(&self, batch: plugin_abi::PluginParams) {
+        self.inner.set_plugin_params(batch);
+    }
+    pub fn set_clap_plugin_enabled(&self, enabled: bool) {
+        self.inner.set_clap_plugin_enabled(enabled);
+    }
+    pub fn set_clap_plugin_param(&self, id: u32, value: f64) {
+        self.inner.set_clap_plugin_param(id, value);
+    }
     pub fn set_spatial_enabled(&self, enabled: bool) {
         self.inner.set_spatial_enabled(enabled);
     }

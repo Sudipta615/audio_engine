@@ -68,6 +68,9 @@ pub struct ParametricEq {
     /// The last manually configured headroom, restored when auto headroom is
     /// disabled. Kept separate so automatic updates never overwrite it.
     manual_headroom_db: f32,
+    /// Preallocated f64 scratch for whole-block vectorized processing on the f32 path.
+    scratch_l: Vec<f64>,
+    scratch_r: Vec<f64>,
 }
 
 impl ParametricEq {
@@ -130,6 +133,8 @@ impl ParametricEq {
             headroom: GainProcessor::unbounded(),
             auto_headroom: false,
             manual_headroom_db: 0.0,
+            scratch_l: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
+            scratch_r: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
         }
     }
 
@@ -190,6 +195,8 @@ impl ParametricEq {
             headroom: GainProcessor::unbounded(),
             auto_headroom: false,
             manual_headroom_db: 0.0,
+            scratch_l: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
+            scratch_r: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
         }
     }
 
@@ -261,6 +268,8 @@ impl ParametricEq {
             headroom: GainProcessor::unbounded(),
             auto_headroom: false,
             manual_headroom_db: 0.0,
+            scratch_l: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
+            scratch_r: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
         }
     }
 
@@ -324,6 +333,8 @@ impl ParametricEq {
             headroom: GainProcessor::unbounded(),
             auto_headroom: false,
             manual_headroom_db: 0.0,
+            scratch_l: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
+            scratch_r: vec![0.0; crate::buffer::MAX_AUDIO_BLOCK_FRAMES],
         }
     }
 
@@ -529,19 +540,30 @@ impl ParametricEq {
     }
 
     /// Process a block of stereo frames through the full EQ chain in place.
-    /// Hoists the whole-EQ enabled check; each frame is promoted to f64 once,
-    /// cascaded in f64, and demoted once (see the struct-level precision note).
+    /// Promotes the block to f64 scratch once, runs the SSE2/vectorized multi-band
+    /// block cascade, and demotes once back to f32.
     #[inline]
     pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
         if !self.enabled {
             return;
         }
-        let n = left.len().min(right.len());
-        for i in 0..n {
-            let (ol, or_) = self.process_f64(left[i] as f64, right[i] as f64);
-            left[i] = ol as f32;
-            right[i] = or_ as f32;
+        let n = left.len().min(right.len()).min(self.scratch_l.len());
+        if n == 0 {
+            return;
         }
+        let mut sl = std::mem::take(&mut self.scratch_l);
+        let mut sr = std::mem::take(&mut self.scratch_r);
+        for i in 0..n {
+            sl[i] = f64::from(left[i]);
+            sr[i] = f64::from(right[i]);
+        }
+        self.process_block_f64(&mut sl[..n], &mut sr[..n]);
+        for i in 0..n {
+            left[i] = sl[i] as f32;
+            right[i] = sr[i] as f32;
+        }
+        self.scratch_l = sl;
+        self.scratch_r = sr;
     }
 
     /// Process a block of stereo frames through the full EQ chain in native

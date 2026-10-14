@@ -35,6 +35,7 @@ pub mod output_profile;
 pub mod pipewire;
 pub mod rate_policy;
 pub mod recovery;
+pub mod rt_thread;
 pub mod wav_writer;
 // Native WASAPI exclusive-mode backend (no cpal). Windows-only, opt-in via
 // the `wasapi-native` feature.
@@ -73,3 +74,6 @@ pub use output_profile::{OutputProfile, OutputProfileLibrary};
 pub use pipewire::{PipeWireConfig, PipeWireOutput, PipeWireQuantumInfo, PipeWireStreamState};
 pub use rate_policy::SampleRatePolicy;
 pub use recovery::rescale_clock_frames;
+pub use rt_thread::{
+    promote_current_thread_to_realtime, promote_current_thread_to_realtime_silent,
+};

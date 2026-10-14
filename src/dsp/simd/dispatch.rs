@@ -176,6 +176,41 @@ pub fn dispatch_dot_product(a: &[f32], b: &[f32], n: usize) -> f32 {
     super::scalar::dot_product(a, b, n)
 }
 
+/// Dispatch complex multiply-accumulate: `acc[k] += x[k] * h[k]`
+/// where slices are packed complex numbers `[re_0, im_0, re_1, im_1, ...]`.
+#[inline]
+pub fn dispatch_complex_mac(acc: &mut [f32], x: &[f32], h: &[f32], n_complex: usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                return super::x86::avx2::complex_mac_avx2(acc, x, h, n_complex);
+            }
+        }
+        if is_x86_feature_detected!("sse2") {
+            unsafe {
+                return super::x86::sse2::complex_mac_sse2(acc, x, h, n_complex);
+            }
+        }
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        if is_x86_feature_detected!("sse2") {
+            unsafe {
+                return super::x86::sse2::complex_mac_sse2(acc, x, h, n_complex);
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[cfg(target_feature = "neon")]
+        unsafe {
+            return super::arm::neon::complex_mac_neon(acc, x, h, n_complex);
+        }
+    }
+    super::scalar::complex_mac(acc, x, h, n_complex);
+}
+
 /// Explicit level-directed execution for scale: `dst[i] *= g`.
 pub fn execute_scale_at_level(level: SimdLevel, dst: &mut [f32], g: f32, n: usize) {
     match level {
@@ -432,8 +467,89 @@ pub fn execute_dot_product_at_level(level: SimdLevel, a: &[f32], b: &[f32], n: u
     }
 }
 
+/// Explicit level-directed execution for complex MAC: `acc[k] += x[k] * h[k]`.
+pub fn execute_complex_mac_at_level(
+    level: SimdLevel,
+    acc: &mut [f32],
+    x: &[f32],
+    h: &[f32],
+    n_complex: usize,
+) {
+    match level {
+        SimdLevel::Scalar => super::scalar::complex_mac(acc, x, h, n_complex),
+        SimdLevel::Sse2 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("sse2") {
+                    unsafe {
+                        return super::x86::sse2::complex_mac_sse2(acc, x, h, n_complex);
+                    }
+                }
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                if is_x86_feature_detected!("sse2") {
+                    unsafe {
+                        return super::x86::sse2::complex_mac_sse2(acc, x, h, n_complex);
+                    }
+                }
+            }
+            super::scalar::complex_mac(acc, x, h, n_complex);
+        }
+        SimdLevel::Neon => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                #[cfg(target_feature = "neon")]
+                unsafe {
+                    return super::arm::neon::complex_mac_neon(acc, x, h, n_complex);
+                }
+            }
+            super::scalar::complex_mac(acc, x, h, n_complex);
+        }
+        SimdLevel::Avx2 | SimdLevel::Avx512 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        return super::x86::avx2::complex_mac_avx2(acc, x, h, n_complex);
+                    }
+                }
+                if is_x86_feature_detected!("sse2") {
+                    unsafe {
+                        return super::x86::sse2::complex_mac_sse2(acc, x, h, n_complex);
+                    }
+                }
+            }
+            super::scalar::complex_mac(acc, x, h, n_complex);
+        }
+    }
+}
+
 /// Backward compatibility alias for [`execute_scale_at_level`].
 #[inline(always)]
 pub fn execute_at_level(level: SimdLevel, dst: &mut [f32], g: f32, n: usize) {
     execute_scale_at_level(level, dst, g, n);
 }
+
+/// Dispatch f32 biquad cascade over a stereo pair of blocks using SIMD/SSE2 acceleration.
+#[inline]
+pub fn dispatch_stereo_biquad_cascade_f32(
+    states_l: &mut [crate::dsp::biquad::BiquadState<f32>],
+    states_r: &mut [crate::dsp::biquad::BiquadState<f32>],
+    coeffs: &[crate::dsp::biquad::BiquadCoeffs<f32>],
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    crate::dsp::biquad::process_stereo_cascade_block_f32(states_l, states_r, coeffs, left, right);
+}
+
+/// Dispatch f32 biquad cascade over a mono block of samples.
+#[inline]
+pub fn dispatch_biquad_cascade_f32(
+    states: &mut [crate::dsp::biquad::BiquadState<f32>],
+    coeffs: &[crate::dsp::biquad::BiquadCoeffs<f32>],
+    samples: &mut [f32],
+) {
+    crate::dsp::biquad::process_cascade_block_f32(states, coeffs, samples);
+}
+

@@ -97,6 +97,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = handle.send_command(EngineCommand::Play);
     }
 
+    #[cfg(feature = "mpris")]
+    let _mpris = if args.iter().any(|a| a == "--mpris") {
+        match engine::mpris::MprisServer::spawn(std::sync::Arc::new(engine.handle())) {
+            Ok(server) => Some(server),
+            Err(e) => {
+                eprintln!("Warning: failed to start MPRIS2 service: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // A positional path also decides where the file browser starts, so
     // `engine-tui ~/Music` lands the user in the folder they named rather than
     // at `$HOME`.
@@ -122,6 +135,10 @@ fn positional(args: &[String], value_flags: &[&str]) -> Option<PathBuf> {
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
+        if a == "--mpris" {
+            i += 1;
+            continue;
+        }
         if value_flags.iter().any(|f| a == f) || a.starts_with("--") {
             i += 2;
             continue;

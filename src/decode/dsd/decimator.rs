@@ -8,6 +8,7 @@
 pub(crate) struct FirStage {
     pub(crate) coeffs: Vec<f32>,
     history: Vec<f32>,
+    flat_buf: Vec<f32>,
 }
 
 impl FirStage {
@@ -38,11 +39,13 @@ impl FirStage {
         Self {
             coeffs,
             history: vec![0.0; Self::TAPS - 1],
+            flat_buf: vec![0.0; Self::TAPS],
         }
     }
 
     pub(crate) fn reset(&mut self) {
         self.history.fill(0.0);
+        self.flat_buf.fill(0.0);
     }
 
     pub(crate) fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
@@ -64,16 +67,24 @@ impl FirStage {
 
         for output_index in 0..output_count {
             let start = output_index * 2;
-            let mut sum = 0.0f32;
-            for tap in 0..taps {
-                let position = start + tap;
-                let sample = if position < history_len {
-                    self.history[position]
-                } else {
-                    input[position - history_len]
-                };
-                sum += sample * self.coeffs[tap];
-            }
+            let sum = if start >= history_len {
+                let in_start = start - history_len;
+                crate::dsp::simd::dispatch::dispatch_dot_product(
+                    &input[in_start..in_start + taps],
+                    &self.coeffs,
+                    taps,
+                )
+            } else {
+                let hist_part_len = history_len - start;
+                self.flat_buf[..hist_part_len].copy_from_slice(&self.history[start..]);
+                let in_part_len = taps - hist_part_len;
+                self.flat_buf[hist_part_len..taps].copy_from_slice(&input[..in_part_len]);
+                crate::dsp::simd::dispatch::dispatch_dot_product(
+                    &self.flat_buf,
+                    &self.coeffs,
+                    taps,
+                )
+            };
             output.push(sum);
         }
 

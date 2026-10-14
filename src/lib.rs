@@ -42,6 +42,8 @@ pub mod events;
 pub mod ffi;
 pub mod fx;
 pub mod governance;
+#[cfg(feature = "mpris")]
+pub mod mpris;
 pub mod network_audio;
 pub mod output;
 pub mod paths;

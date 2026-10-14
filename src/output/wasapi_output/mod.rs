@@ -288,7 +288,10 @@ impl WasapiOutput {
 
         let handle = std::thread::Builder::new()
             .name("wasapi-render".to_string())
-            .spawn(move || render_loop(ctx))
+            .spawn(move || {
+                crate::output::rt_thread::promote_current_thread_to_realtime("wasapi-render");
+                render_loop(ctx)
+            })
             .map_err(|e| OutputError::StreamOpen(format!("spawn wasapi-render thread: {e}")))?;
         self.render_thread = Some(handle);
 

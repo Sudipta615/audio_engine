@@ -164,6 +164,13 @@ type system enforces them:
   contract is on **callers**. `Graph2ControlHandle` is `Clone`, so two clones driving the
   same queue is UB reachable from safe code.
 
+Audio output render threads (ALSA, WASAPI, CPAL) request real-time priority on startup
+(`src/output/rt_thread.rs`, using the `thread-priority` crate: `SCHED_FIFO` on Linux,
+`THREAD_PRIORITY_TIME_CRITICAL` on Windows). On Linux, acquiring `SCHED_FIFO` requires
+either the `CAP_SYS_NICE` capability or an active `rtkit` service. If the OS refuses
+real-time scheduling, threads proceed at standard priority with a startup warning;
+the engine never aborts or panics on priority denial.
+
 `tests/fidelity/simd_qualification.rs` covers the dispatch tiers.
 
 ## Supply chain

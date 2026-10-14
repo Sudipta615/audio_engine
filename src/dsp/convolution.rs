@@ -665,20 +665,73 @@ impl ConvolutionEngine {
             let x_r = &self.input_spectra_right[hist_idx];
             let h_l = &self.ir_partitions_left[p];
 
-            for k in 0..spec_len {
-                self.acc_spectrum_left[k] += x_l[k] * h_l[k];
+            // SAFETY: Complex<f32> is #[repr(C)] with fields (re: f32, im: f32), exactly
+            // matching 2 consecutive f32 elements in memory. Slices have length >= spec_len.
+            unsafe {
+                let acc_l_floats = core::slice::from_raw_parts_mut(
+                    self.acc_spectrum_left.as_mut_ptr() as *mut f32,
+                    spec_len * 2,
+                );
+                let x_l_floats = core::slice::from_raw_parts(
+                    x_l.as_ptr() as *const f32,
+                    spec_len * 2,
+                );
+                let h_l_floats = core::slice::from_raw_parts(
+                    h_l.as_ptr() as *const f32,
+                    spec_len * 2,
+                );
+                crate::dsp::simd::dispatch::dispatch_complex_mac(
+                    acc_l_floats,
+                    x_l_floats,
+                    h_l_floats,
+                    spec_len,
+                );
             }
 
             if is_stereo {
                 if let Some(ref parts_r) = self.ir_partitions_right {
                     let h_r = &parts_r[p];
-                    for k in 0..spec_len {
-                        self.acc_spectrum_right[k] += x_r[k] * h_r[k];
+                    unsafe {
+                        let acc_r_floats = core::slice::from_raw_parts_mut(
+                            self.acc_spectrum_right.as_mut_ptr() as *mut f32,
+                            spec_len * 2,
+                        );
+                        let x_r_floats = core::slice::from_raw_parts(
+                            x_r.as_ptr() as *const f32,
+                            spec_len * 2,
+                        );
+                        let h_r_floats = core::slice::from_raw_parts(
+                            h_r.as_ptr() as *const f32,
+                            spec_len * 2,
+                        );
+                        crate::dsp::simd::dispatch::dispatch_complex_mac(
+                            acc_r_floats,
+                            x_r_floats,
+                            h_r_floats,
+                            spec_len,
+                        );
                     }
                 }
             } else {
-                for k in 0..spec_len {
-                    self.acc_spectrum_right[k] += x_r[k] * h_l[k];
+                unsafe {
+                    let acc_r_floats = core::slice::from_raw_parts_mut(
+                        self.acc_spectrum_right.as_mut_ptr() as *mut f32,
+                        spec_len * 2,
+                    );
+                    let x_r_floats = core::slice::from_raw_parts(
+                        x_r.as_ptr() as *const f32,
+                        spec_len * 2,
+                    );
+                    let h_l_floats = core::slice::from_raw_parts(
+                        h_l.as_ptr() as *const f32,
+                        spec_len * 2,
+                    );
+                    crate::dsp::simd::dispatch::dispatch_complex_mac(
+                        acc_r_floats,
+                        x_r_floats,
+                        h_l_floats,
+                        spec_len,
+                    );
                 }
             }
         }

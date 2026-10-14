@@ -466,6 +466,12 @@ impl AudioEngine {
                 }
                 self.graph.set_plugin_params(batch);
             }
+            EngineCommand::SetClapPluginEnabled(enabled) => {
+                self.graph.set_clap_plugin_enabled(enabled);
+            }
+            EngineCommand::SetClapPluginParam { id, value } => {
+                self.graph.set_clap_plugin_param(id, value);
+            }
 
             // ── Spatial master ──
             EngineCommand::SetSpatialQuality(q) => {

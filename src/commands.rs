@@ -185,6 +185,10 @@ pub enum EngineCommand {
     /// plugin's declared parameter indices; the batch is plain data and
     /// is applied atomically at the next block boundary.
     SetPluginParams(Vec<(u32, f32)>),
+    /// CLAP audio plugin host: live enable toggle.
+    SetClapPluginEnabled(bool),
+    /// CLAP audio plugin host: live parameter change (id, value).
+    SetClapPluginParam { id: u32, value: f64 },
     /// Spatial master: renderer quality tier (spec §86).
     SetSpatialQuality(config::SpatialQuality),
     /// Spatial master: voice budget (spec §76). `enabled == false`

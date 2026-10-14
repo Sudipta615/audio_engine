@@ -154,3 +154,50 @@ pub unsafe fn dot_product_sse2(a: &[f32], b: &[f32], n: usize) -> f32 {
         crate::dsp::simd::scalar::dot_product(a, b, n)
     }
 }
+
+/// Complex multiply-accumulate using SSE2: `acc[k] += x[k] * h[k]`.
+/// Slices represent interleaved complex pairs `[re_0, im_0, re_1, im_1, ...]`.
+#[inline]
+#[target_feature(enable = "sse2")]
+pub unsafe fn complex_mac_sse2(acc: &mut [f32], x: &[f32], h: &[f32], n_complex: usize) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        let n_floats = (n_complex * 2).min(acc.len()).min(x.len()).min(h.len());
+        let sign_mask = _mm_set_ps(0.0, -0.0, 0.0, -0.0);
+        let mut i = 0usize;
+
+        while i + 4 <= n_floats {
+            let va = _mm_loadu_ps(acc.as_ptr().add(i));
+            let vx = _mm_loadu_ps(x.as_ptr().add(i));
+            let vh = _mm_loadu_ps(h.as_ptr().add(i));
+
+            let x_re = _mm_shuffle_ps(vx, vx, 0xA0);
+            let x_im = _mm_shuffle_ps(vx, vx, 0xF5);
+            let h_swap = _mm_shuffle_ps(vh, vh, 0xB1);
+
+            let p1 = _mm_mul_ps(x_re, vh);
+            let p2 = _mm_mul_ps(x_im, h_swap);
+            let p2_signed = _mm_xor_ps(p2, sign_mask);
+            let prod = _mm_add_ps(p1, p2_signed);
+
+            let res = _mm_add_ps(va, prod);
+            _mm_storeu_ps(acc.as_mut_ptr().add(i), res);
+            i += 4;
+        }
+
+        while i + 1 < n_floats {
+            let xr = *x.get_unchecked(i);
+            let xi = *x.get_unchecked(i + 1);
+            let hr = *h.get_unchecked(i);
+            let hi = *h.get_unchecked(i + 1);
+            *acc.get_unchecked_mut(i) += xr * hr - xi * hi;
+            *acc.get_unchecked_mut(i + 1) += xr * hi + xi * hr;
+            i += 2;
+        }
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        crate::dsp::simd::scalar::complex_mac(acc, x, h, n_complex);
+    }
+}
+

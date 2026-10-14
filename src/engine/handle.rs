@@ -814,6 +814,18 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::SetPluginParams(pairs.to_vec()));
     }
 
+    /// Runtime toggle of the CLAP plugin host. Disabled = the
+    /// plan step is skipped, bit-exact.
+    pub fn set_clap_plugin_enabled(&self, enabled: bool) {
+        let _ = self.send_command(EngineCommand::SetClapPluginEnabled(enabled));
+    }
+
+    /// Runtime parameter change for the active CLAP plugin: `(id, value)`
+    /// applied at the next block boundary.
+    pub fn set_clap_plugin_param(&self, id: u32, value: f64) {
+        let _ = self.send_command(EngineCommand::SetClapPluginParam { id, value });
+    }
+
     // ── Room & headphone correction ─────────────────────────
 
     /// Live toggle of the correction stage (enabled only; the loaded IR

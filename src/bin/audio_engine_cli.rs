@@ -301,6 +301,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is a patch, not a replacement.
     let mut config = EngineConfig::default();
     let mut log_level = "info".to_string();
+    #[allow(unused_mut, unused_variables)]
+    let mut enable_mpris = false;
 
     // Pass 1: locate --config and load it into `config`. This happens before
     // pass 2 so that --backend/--device always win, whatever order the user
@@ -357,6 +359,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log_level = args[i].clone();
                 }
             }
+            #[cfg(feature = "mpris")]
+            "--mpris" => {
+                enable_mpris = true;
+            }
             "--help" | "-h" => {
                 println!("Usage: audio-engine-cli [OPTIONS] [file_path]");
                 println!();
@@ -367,6 +373,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  --backend, -b <backend>   Output backend (auto, wasapi, alsa, coreaudio, asio)");
                 println!("  --device, -d <name>       Output device name (or 'default')");
                 println!("  --log-level <level>       Log level (error, warn, info, debug, trace)");
+                #[cfg(feature = "mpris")]
+                println!("  --mpris                   Expose MPRIS2 D-Bus interface for desktop integration");
                 println!("  --help, -h                Show this help");
                 println!();
                 println!("Precedence: --backend/--device override the config file; the config");
@@ -398,6 +406,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: Failed to start audio output device: {}", e);
     }
     let handle = engine.handle();
+
+    #[cfg(feature = "mpris")]
+    let _mpris_server = if enable_mpris {
+        match engine::mpris::MprisServer::spawn(Arc::new(handle.clone())) {
+            Ok(server) => {
+                println!("MPRIS2 D-Bus service active (org.mpris.MediaPlayer2.audio_engine)");
+                Some(server)
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to start MPRIS2 service: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let engine_running = running.clone();

@@ -1,0 +1,15 @@
+[package]
+name = "plugin-test-clap-echo"
+version = "1.1.0"
+rust-version = "1.98"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Sudipta615/audio_engine"
+description = "Reference CLAP effect plugin fixture for audio_engine CLAP host testing"
+publish = false
+
+[dependencies]
+clap-sys = { version = "0.5" }
+
+[lib]
+crate-type = ["rlib", "cdylib"]

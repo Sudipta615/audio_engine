@@ -166,3 +166,22 @@ pub fn dot_product_f64(a: &[f64], b: &[f64], n: usize) -> f64 {
     }
     sum
 }
+
+/// Complex multiply-accumulate: `acc[k] += x[k] * h[k]`.
+/// Slices represent interleaved complex pairs `[re_0, im_0, re_1, im_1, ...]`.
+/// `n_complex` is the number of complex numbers to process.
+#[inline]
+pub fn complex_mac(acc: &mut [f32], x: &[f32], h: &[f32], n_complex: usize) {
+    let n_floats = (n_complex * 2).min(acc.len()).min(x.len()).min(h.len());
+    let mut i = 0usize;
+    while i + 1 < n_floats {
+        let xr = x[i];
+        let xi = x[i + 1];
+        let hr = h[i];
+        let hi = h[i + 1];
+        acc[i] += xr * hr - xi * hi;
+        acc[i + 1] += xr * hi + xi * hr;
+        i += 2;
+    }
+}
+

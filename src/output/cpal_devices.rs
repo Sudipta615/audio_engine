@@ -47,16 +47,16 @@ pub fn escalate_callback_thread_priority(initialized: &AtomicBool) {
 
     #[cfg(feature = "thread-priority")]
     {
-        use thread_priority::{set_current_thread_priority, ThreadPriority};
         // No logging here, successful or not. This runs *on* the audio
         // callback thread — the first callback, which is the one whose
         // latency matters most — and `thread-priority` is a default feature,
         // so both a success and a failure would format, allocate and take a
         // logger lock exactly where the contract forbids it. The outcome is
         // published atomically; the control thread reads it and logs.
-        let outcome = match set_current_thread_priority(ThreadPriority::Max) {
-            Ok(()) => 1,
-            Err(_) => 2,
+        let outcome = if crate::output::rt_thread::promote_current_thread_to_realtime_silent() {
+            1
+        } else {
+            2
         };
         PRIORITY_ESCALATION.store(outcome, Ordering::Release);
     }
