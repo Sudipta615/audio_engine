@@ -18,7 +18,6 @@ use crate::buffer::MAX_AUDIO_BLOCK_FRAMES;
 use crate::dsp::graph2::prod::arena::node::DspNode;
 use crate::dsp::pipeline::{DspStageCapability, StageChannelSupport, StagePrecision};
 
-
 #[cfg(feature = "clap-host")]
 use std::ffi::{c_char, c_void, CStr, CString};
 #[cfg(feature = "clap-host")]
@@ -51,7 +50,6 @@ use clap_sys::process::clap_process;
 use clap_sys::stream::{clap_istream, clap_ostream};
 #[cfg(feature = "clap-host")]
 use clap_sys::version::CLAP_VERSION;
-
 
 /// A thread-safe handle keeping the dynamically loaded plugin library in memory.
 #[cfg(feature = "clap-host")]
@@ -166,7 +164,11 @@ unsafe extern "C" fn stream_read_fn(
     let available = reader.data.len().saturating_sub(reader.pos);
     let to_read = (size as usize).min(available);
     if to_read > 0 {
-        std::ptr::copy_nonoverlapping(reader.data[reader.pos..].as_ptr(), buffer as *mut u8, to_read);
+        std::ptr::copy_nonoverlapping(
+            reader.data[reader.pos..].as_ptr(),
+            buffer as *mut u8,
+            to_read,
+        );
         reader.pos += to_read;
     }
     to_read as i64
@@ -217,10 +219,10 @@ impl ClapPluginHostNode {
             let host_descriptor = Box::new(clap_host {
                 clap_version: CLAP_VERSION,
                 host_data: std::ptr::null_mut(),
-                name: b"audio-engine\0".as_ptr() as *const c_char,
-                vendor: b"Sudipta615\0".as_ptr() as *const c_char,
-                url: b"https://github.com/Sudipta615/audio_engine\0".as_ptr() as *const c_char,
-                version: b"1.0.0\0".as_ptr() as *const c_char,
+                name: c"audio-engine".as_ptr(),
+                vendor: c"Sudipta615".as_ptr(),
+                url: c"https://github.com/Sudipta615/audio_engine".as_ptr(),
+                version: c"1.0.0".as_ptr(),
                 get_extension: Some(clap_host_get_extension),
                 request_restart: Some(clap_host_request_restart),
                 request_process: Some(clap_host_request_process),
@@ -414,7 +416,10 @@ impl ClapPluginHostNode {
             pending_param_events: Vec::with_capacity(32),
         });
 
-        log::info!("Successfully loaded and activated CLAP plugin: {:?}", target_id);
+        log::info!(
+            "Successfully loaded and activated CLAP plugin: {:?}",
+            target_id
+        );
         Ok(())
     }
 
@@ -625,80 +630,90 @@ impl DspNode for ClapPluginHostNode {
     }
 
     fn process_block_f32(&mut self, planes: &mut [&mut [f32]]) {
-        if !self.is_active() || planes.len() < 2 {
-            return;
-        }
-
         #[cfg(feature = "clap-host")]
-        if let Some(ref mut inst) = self.instance {
-            let frames = planes[0].len().min(planes[1].len());
-            if frames == 0 {
+        {
+            if !self.is_active() || planes.len() < 2 {
                 return;
             }
 
-            // Split borrow to obtain pointers to L and R channels
-            let (first, rest) = planes.split_at_mut(1);
-            let in_l = first[0].as_mut_ptr();
-            let in_r = rest[0].as_mut_ptr();
-
-            inst.in_channel_data[0] = in_l;
-            inst.in_channel_data[1] = in_r;
-            inst.out_channel_data[0] = in_l;
-            inst.out_channel_data[1] = in_r;
-
-            let in_audio = clap_audio_buffer {
-                data32: inst.in_channel_data.as_mut_ptr(),
-                data64: std::ptr::null_mut(),
-                channel_count: 2,
-                latency: 0,
-                constant_mask: 0,
-            };
-
-            let mut out_audio = clap_audio_buffer {
-                data32: inst.out_channel_data.as_mut_ptr(),
-                data64: std::ptr::null_mut(),
-                channel_count: 2,
-                latency: 0,
-                constant_mask: 0,
-            };
-
-            let has_events = !inst.pending_param_events.is_empty();
-            let in_events = if has_events {
-                clap_input_events {
-                    ctx: &inst.pending_param_events as *const _ as *mut c_void,
-                    size: Some(in_events_size),
-                    get: Some(in_events_get),
+            if let Some(ref mut inst) = self.instance {
+                let frames = planes[0].len().min(planes[1].len());
+                if frames == 0 {
+                    return;
                 }
-            } else {
-                clap_input_events {
-                    ctx: std::ptr::null_mut(),
-                    size: None,
-                    get: None,
+
+                // Split borrow to obtain pointers to L and R channels
+                let (first, rest) = planes.split_at_mut(1);
+                let in_l = first[0].as_mut_ptr();
+                let in_r = rest[0].as_mut_ptr();
+
+                inst.in_channel_data[0] = in_l;
+                inst.in_channel_data[1] = in_r;
+                inst.out_channel_data[0] = in_l;
+                inst.out_channel_data[1] = in_r;
+
+                let in_audio = clap_audio_buffer {
+                    data32: inst.in_channel_data.as_mut_ptr(),
+                    data64: std::ptr::null_mut(),
+                    channel_count: 2,
+                    latency: 0,
+                    constant_mask: 0,
+                };
+
+                let mut out_audio = clap_audio_buffer {
+                    data32: inst.out_channel_data.as_mut_ptr(),
+                    data64: std::ptr::null_mut(),
+                    channel_count: 2,
+                    latency: 0,
+                    constant_mask: 0,
+                };
+
+                let has_events = !inst.pending_param_events.is_empty();
+                let in_events = if has_events {
+                    clap_input_events {
+                        ctx: &inst.pending_param_events as *const _ as *mut c_void,
+                        size: Some(in_events_size),
+                        get: Some(in_events_get),
+                    }
+                } else {
+                    clap_input_events {
+                        ctx: std::ptr::null_mut(),
+                        size: None,
+                        get: None,
+                    }
+                };
+
+                let process_data = clap_process {
+                    steady_time: -1,
+                    frames_count: frames as u32,
+                    transport: std::ptr::null(),
+                    audio_inputs: &in_audio as *const _,
+                    audio_outputs: &mut out_audio as *mut _,
+                    audio_inputs_count: 1,
+                    audio_outputs_count: 1,
+                    in_events: if has_events {
+                        &in_events as *const _
+                    } else {
+                        std::ptr::null()
+                    },
+                    out_events: std::ptr::null(),
+                };
+
+                unsafe {
+                    let p = &*inst.plugin;
+                    if let Some(process_fn) = p.process {
+                        let _status = process_fn(inst.plugin, &process_data);
+                    }
                 }
-            };
 
-            let process_data = clap_process {
-                steady_time: -1,
-                frames_count: frames as u32,
-                transport: std::ptr::null(),
-                audio_inputs: &in_audio as *const _,
-                audio_outputs: &mut out_audio as *mut _,
-                audio_inputs_count: 1,
-                audio_outputs_count: 1,
-                in_events: if has_events { &in_events as *const _ } else { std::ptr::null() },
-                out_events: std::ptr::null(),
-            };
-
-            unsafe {
-                let p = &*inst.plugin;
-                if let Some(process_fn) = p.process {
-                    let _status = process_fn(inst.plugin, &process_data);
+                if has_events {
+                    inst.pending_param_events.clear();
                 }
             }
-
-            if has_events {
-                inst.pending_param_events.clear();
-            }
+        }
+        #[cfg(not(feature = "clap-host"))]
+        {
+            let _ = planes;
         }
     }
 

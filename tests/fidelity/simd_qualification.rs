@@ -8,9 +8,8 @@
 //! 5. Numerical stability under subnormal, negative, and zero floating-point inputs.
 
 use engine::dsp::simd::{
-    execute_accumulate_scaled_at_level, execute_complex_mac_at_level,
-    execute_dot_product_at_level, execute_mix_at_level, execute_scale_at_level,
-    execute_scale_f64_at_level, SimdLevel,
+    execute_accumulate_scaled_at_level, execute_complex_mac_at_level, execute_dot_product_at_level,
+    execute_mix_at_level, execute_scale_at_level, execute_scale_f64_at_level, SimdLevel,
 };
 
 #[test]
@@ -262,9 +261,15 @@ fn test_simd_complex_mac_numerical_equivalence_across_tiers() {
 
     for &n_complex in &test_sizes {
         let n_floats = n_complex * 2;
-        let baseline_acc = (0..n_floats).map(|i| (i as f32 * 0.05).sin()).collect::<Vec<_>>();
-        let x = (0..n_floats).map(|i| (i as f32 * 0.07 + 0.1).cos()).collect::<Vec<_>>();
-        let h = (0..n_floats).map(|i| (i as f32 * 0.03 + 0.2).sin()).collect::<Vec<_>>();
+        let baseline_acc = (0..n_floats)
+            .map(|i| (i as f32 * 0.05).sin())
+            .collect::<Vec<_>>();
+        let x = (0..n_floats)
+            .map(|i| (i as f32 * 0.07 + 0.1).cos())
+            .collect::<Vec<_>>();
+        let h = (0..n_floats)
+            .map(|i| (i as f32 * 0.03 + 0.2).sin())
+            .collect::<Vec<_>>();
 
         let mut expected = baseline_acc.clone();
         execute_complex_mac_at_level(SimdLevel::Scalar, &mut expected, &x, &h, n_complex);
@@ -289,4 +294,3 @@ fn test_simd_complex_mac_numerical_equivalence_across_tiers() {
         }
     }
 }
-

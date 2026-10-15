@@ -222,7 +222,10 @@ pub(crate) enum NodeCmd {
     /// Live CLAP plugin enable toggle.
     SetClapPluginEnabled(bool),
     /// Live CLAP plugin parameter change (id, value).
-    SetClapPluginParam { id: u32, value: f64 },
+    SetClapPluginParam {
+        id: u32,
+        value: f64,
+    },
 }
 
 impl Default for NodeCmd {

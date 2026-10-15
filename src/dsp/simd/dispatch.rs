@@ -552,4 +552,3 @@ pub fn dispatch_biquad_cascade_f32(
 ) {
     crate::dsp::biquad::process_cascade_block_f32(states, coeffs, samples);
 }
-

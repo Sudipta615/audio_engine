@@ -37,10 +37,7 @@ const PLUGIN_DESC: &[u8] = b"Reference CLAP echo and gain effect\0";
 struct Features([*const c_char; 2]);
 unsafe impl Sync for Features {}
 
-static FEATURES: Features = Features([
-    CLAP_PLUGIN_FEATURE_AUDIO_EFFECT.as_ptr(),
-    std::ptr::null(),
-]);
+static FEATURES: Features = Features([CLAP_PLUGIN_FEATURE_AUDIO_EFFECT.as_ptr(), std::ptr::null()]);
 
 static DESCRIPTOR: clap_plugin_descriptor = clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
@@ -126,12 +123,13 @@ unsafe extern "C" fn plugin_process(
             let count = size_fn(proc.in_events);
             for i in 0..count {
                 let header = get_fn(proc.in_events, i);
-                if !header.is_null() && (*header).space_id == CLAP_CORE_EVENT_SPACE_ID {
-                    if (*header).type_ == CLAP_EVENT_PARAM_VALUE {
-                        let param_ev = &*(header as *const clap_event_param_value);
-                        if param_ev.param_id == 0 {
-                            data.gain = param_ev.value;
-                        }
+                if !header.is_null()
+                    && (*header).space_id == CLAP_CORE_EVENT_SPACE_ID
+                    && (*header).type_ == CLAP_EVENT_PARAM_VALUE
+                {
+                    let param_ev = &*(header as *const clap_event_param_value);
+                    if param_ev.param_id == 0 {
+                        data.gain = param_ev.value;
                     }
                 }
             }
@@ -264,10 +262,7 @@ unsafe extern "C" fn params_flush(
 }
 
 // State extension implementations
-unsafe extern "C" fn state_save(
-    plugin: *const clap_plugin,
-    stream: *const clap_ostream,
-) -> bool {
+unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_ostream) -> bool {
     if plugin.is_null() || (*plugin).plugin_data.is_null() || stream.is_null() {
         return false;
     }
@@ -282,10 +277,7 @@ unsafe extern "C" fn state_save(
     }
 }
 
-unsafe extern "C" fn state_load(
-    plugin: *const clap_plugin,
-    stream: *const clap_istream,
-) -> bool {
+unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_istream) -> bool {
     if plugin.is_null() || (*plugin).plugin_data.is_null() || stream.is_null() {
         return false;
     }

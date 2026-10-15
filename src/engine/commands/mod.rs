@@ -468,9 +468,84 @@ impl AudioEngine {
             }
             EngineCommand::SetClapPluginEnabled(enabled) => {
                 self.graph.set_clap_plugin_enabled(enabled);
+                if let Some(slot) = self
+                    .config
+                    .plugins
+                    .slots
+                    .iter_mut()
+                    .find(|s| s.source.starts_with("clap:"))
+                {
+                    slot.enabled = enabled;
+                }
             }
             EngineCommand::SetClapPluginParam { id, value } => {
                 self.graph.set_clap_plugin_param(id, value);
+                if let Some(slot) = self
+                    .config
+                    .plugins
+                    .slots
+                    .iter_mut()
+                    .find(|s| s.source.starts_with("clap:"))
+                {
+                    if let Some(p) = slot.params.iter_mut().find(|(pid, _)| *pid == id) {
+                        p.1 = value as f32;
+                    } else {
+                        slot.params.push((id, value as f32));
+                    }
+                }
+            }
+            EngineCommand::LoadClapPlugin { path, plugin_id } => {
+                #[cfg(feature = "clap-host")]
+                {
+                    let p = std::path::Path::new(&path);
+                    if p.is_file() {
+                        let rate = self.output_sample_rate as f32;
+                        let mut clap_node = crate::dsp::graph2::prod::ClapPluginHostNode::new(rate);
+                        if let Ok(()) = clap_node.load_plugin(p, plugin_id.as_deref()) {
+                            self.graph.with_graph(|g| {
+                                g.plugin_mut().attach_clap(clap_node);
+                            });
+                            let src = if let Some(ref id) = plugin_id {
+                                format!("clap:{}#{}", path, id)
+                            } else {
+                                format!("clap:{}", path)
+                            };
+                            if let Some(slot) = self
+                                .config
+                                .plugins
+                                .slots
+                                .iter_mut()
+                                .find(|s| s.source.starts_with("clap:"))
+                            {
+                                slot.source = src;
+                                slot.enabled = true;
+                            } else {
+                                self.config.plugins.slots.push(config::PluginSlotConfig {
+                                    source: src,
+                                    enabled: true,
+                                    params: Vec::new(),
+                                    state: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "clap-host"))]
+                {
+                    let _ = (&path, &plugin_id);
+                }
+            }
+            EngineCommand::UnloadClapPlugin => {
+                #[cfg(feature = "clap-host")]
+                {
+                    self.graph.with_graph(|g| {
+                        g.plugin_mut().detach_clap();
+                    });
+                    self.config
+                        .plugins
+                        .slots
+                        .retain(|s| !s.source.starts_with("clap:"));
+                }
             }
 
             // ── Spatial master ──

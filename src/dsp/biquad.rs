@@ -814,7 +814,9 @@ impl BiquadState<f32> {
                 left[i] = 0.0;
             } else {
                 let out_l = b0 * sl + left_state.z1 as f32;
-                left_state.z1 = crate::buffer::flush_denormal(b1 * sl - a1 * out_l + left_state.z2 as f32) as f64;
+                left_state.z1 =
+                    crate::buffer::flush_denormal(b1 * sl - a1 * out_l + left_state.z2 as f32)
+                        as f64;
                 left_state.z2 = crate::buffer::flush_denormal(b2 * sl - a2 * out_l) as f64;
                 if !out_l.is_finite() {
                     left_state.z1 = 0.0;
@@ -831,7 +833,9 @@ impl BiquadState<f32> {
                 right[i] = 0.0;
             } else {
                 let out_r = b0 * sr + right_state.z1 as f32;
-                right_state.z1 = crate::buffer::flush_denormal(b1 * sr - a1 * out_r + right_state.z2 as f32) as f64;
+                right_state.z1 =
+                    crate::buffer::flush_denormal(b1 * sr - a1 * out_r + right_state.z2 as f32)
+                        as f64;
                 right_state.z2 = crate::buffer::flush_denormal(b2 * sr - a2 * out_r) as f64;
                 if !out_r.is_finite() {
                     right_state.z1 = 0.0;
@@ -1006,7 +1010,6 @@ pub fn process_stereo_cascade_block_f32(
         );
     }
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SmoothedBiquad<T> — parameter-domain smoothing
@@ -1693,7 +1696,8 @@ mod tests {
         }
 
         // Sequential reference
-        let mut ref_states: Vec<BiquadState<f32>> = (0..bands.len()).map(|_| BiquadState::default()).collect();
+        let mut ref_states: Vec<BiquadState<f32>> =
+            (0..bands.len()).map(|_| BiquadState::default()).collect();
         let mut expected = samples.clone();
         for s in expected.iter_mut() {
             let mut current = *s;
@@ -1704,17 +1708,14 @@ mod tests {
         }
 
         // Cascade block run
-        let mut test_states: Vec<BiquadState<f32>> = (0..bands.len()).map(|_| BiquadState::default()).collect();
+        let mut test_states: Vec<BiquadState<f32>> =
+            (0..bands.len()).map(|_| BiquadState::default()).collect();
         let mut actual = samples.clone();
         process_cascade_block_f32(&mut test_states, &coeffs, &mut actual);
 
         for i in 0..512 {
             let diff = (actual[i] - expected[i]).abs();
-            assert!(
-                diff < 5e-5,
-                "Mismatch in cascade block at {i}: {diff}"
-            );
+            assert!(diff < 5e-5, "Mismatch in cascade block at {i}: {diff}");
         }
     }
 }
-

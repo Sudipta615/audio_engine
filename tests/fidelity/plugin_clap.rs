@@ -9,8 +9,8 @@
 
 #![cfg(feature = "clap-host")]
 
-use std::path::PathBuf;
 use engine::dsp::graph2::prod::{ClapPluginHostNode, DspNode, PluginHostNode};
+use std::path::PathBuf;
 
 fn get_clap_test_plugin_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -44,7 +44,11 @@ fn test_clap_plugin_host_full_fidelity_suite() {
 
     // Verify parameter reflection
     assert_eq!(node.param_count(), 1, "Expected 1 exposed parameter");
-    assert_eq!(node.get_param_value(0), Some(1.0), "Default gain must be 1.0");
+    assert_eq!(
+        node.get_param_value(0),
+        Some(1.0),
+        "Default gain must be 1.0"
+    );
 
     // 2. Audio processing: Unity gain pass-through
     let frame_count = 256;
@@ -99,7 +103,11 @@ fn test_clap_plugin_host_full_fidelity_suite() {
 
     // 4. State persistence: save state, change parameter, restore state
     let state_bytes = node.save_state().expect("State save failed");
-    assert_eq!(state_bytes.len(), 8, "Expected 8-byte f64 state representation");
+    assert_eq!(
+        state_bytes.len(),
+        8,
+        "Expected 8-byte f64 state representation"
+    );
 
     // Change gain to 2.0
     node.set_param(0, 2.0);
@@ -130,7 +138,9 @@ fn test_clap_plugin_host_full_fidelity_suite() {
 fn test_clap_plugin_host_node_integration() {
     let plugin_path = get_clap_test_plugin_path();
     let mut clap_node = ClapPluginHostNode::new(48000.0);
-    clap_node.load_plugin(&plugin_path, None).expect("Plugin load failed");
+    clap_node
+        .load_plugin(&plugin_path, None)
+        .expect("Plugin load failed");
 
     let mut host_node = PluginHostNode::new(48000.0);
     host_node.attach_clap(clap_node);
@@ -156,9 +166,103 @@ fn test_clap_plugin_host_node_integration() {
     let mut test_r2 = dry_r.clone();
     let mut planes2 = [&mut test_l2[..], &mut test_r2[..]];
     host_node.process_block_f32(&mut planes2);
-    assert_eq!(test_l2, dry_l, "Bypassed CLAP in host node must be bit-exact on L");
-    assert_eq!(test_r2, dry_r, "Bypassed CLAP in host node must be bit-exact on R");
+    assert_eq!(
+        test_l2, dry_l,
+        "Bypassed CLAP in host node must be bit-exact on L"
+    );
+    assert_eq!(
+        test_r2, dry_r,
+        "Bypassed CLAP in host node must be bit-exact on R"
+    );
 
     // Re-enable
     host_node.set_clap_enabled(true);
+}
+
+#[test]
+fn test_clap_engine_lifecycle_and_generation_swap() {
+    let plugin_path = get_clap_test_plugin_path();
+    assert!(
+        plugin_path.exists(),
+        "CLAP test plugin not found at {}. Build with `cargo build -p plugin-test-clap-echo`.",
+        plugin_path.display()
+    );
+
+    let mut engine = engine::engine::AudioEngine::new_default().expect("create engine");
+    let handle = engine.handle();
+
+    // 1. Load CLAP plugin via handle command
+    handle.load_clap_plugin(&plugin_path, Some("org.audio_engine.clap_test_echo"));
+    engine.tick(); // Process the load command
+
+    // Verify plugin is loaded and active in the live graph
+    engine.pipeline_mut().with_graph(|g| {
+        let plugin = g.plugin();
+        assert!(
+            plugin.clap_node().is_some(),
+            "CLAP node must be attached to PluginHostNode"
+        );
+        assert!(
+            plugin.clap_node().unwrap().is_active(),
+            "CLAP node must be active"
+        );
+        assert_eq!(plugin.clap_node().unwrap().get_param_value(0), Some(1.0));
+    });
+
+    // 2. Adjust parameter via handle
+    handle.set_clap_plugin_param(0, 0.42);
+    engine.tick();
+
+    engine.pipeline_mut().with_graph(|g| {
+        let mut dry_l = [0.0f32; 64];
+        let mut dry_r = [0.0f32; 64];
+        let mut planes = [&mut dry_l[..], &mut dry_r[..]];
+        g.plugin_mut().process_block_f32(&mut planes);
+
+        let plugin = g.plugin();
+        assert_eq!(
+            plugin.clap_node().unwrap().get_param_value(0),
+            Some(0.42),
+            "Parameter value must be applied"
+        );
+    });
+
+    // 3. Verify config persistence: self.config.plugins.slots must record the CLAP slot and params
+    assert!(
+        engine
+            .config()
+            .plugins
+            .slots
+            .iter()
+            .any(|s| s.source.starts_with("clap:")),
+        "EngineConfig slots must record the loaded CLAP plugin"
+    );
+    let slot = engine
+        .config()
+        .plugins
+        .slots
+        .iter()
+        .find(|s| s.source.starts_with("clap:"))
+        .expect("clap slot in config");
+    assert_eq!(slot.params, vec![(0, 0.42)]);
+
+    // 4. Unload CLAP plugin via handle
+    handle.unload_clap_plugin();
+    engine.tick();
+
+    engine.pipeline_mut().with_graph(|g| {
+        let plugin = g.plugin();
+        assert!(
+            plugin.clap_node().is_none(),
+            "CLAP node must be detached after unload"
+        );
+    });
+
+    // Verify config no longer has clap slots
+    assert!(!engine
+        .config()
+        .plugins
+        .slots
+        .iter()
+        .any(|s| s.source.starts_with("clap:")));
 }

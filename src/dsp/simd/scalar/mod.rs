@@ -184,4 +184,3 @@ pub fn complex_mac(acc: &mut [f32], x: &[f32], h: &[f32], n_complex: usize) {
         i += 2;
     }
 }
-

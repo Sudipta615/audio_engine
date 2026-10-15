@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-10-15
+
+Release 1.2.0 finalizes end-to-end CLAP plugin hosting integration with Graph 2.0, establishes
+runtime load/unload and parameter automation persistence across generation swaps, fixes realtime
+idle tick allocation guarantees, and stabilizes dither test qualification.
+
+### Added
+
+- **Complete CLAP Audio Plugin Host Integration with Graph 2.0**:
+  - Implemented end-to-end CLAP plugin loading from configuration slots (`clap:<path>` and `.clap` sources)
+    during generation construction in `src/dsp/graph2/prod/arena/construction.rs`.
+  - Added runtime dynamic load and unload commands (`EngineCommand::LoadClapPlugin`, `EngineCommand::UnloadClapPlugin`)
+    and corresponding handle methods (`EngineHandle::load_clap_plugin`, `EngineHandle::unload_clap_plugin`).
+  - Added runtime detachment support (`detach_clap`) on `PluginHostNode`.
+  - Added parameter and state persistence across Graph 2.0 generation swaps and reconfigurations, ensuring
+    dynamically loaded CLAP plugins survive sample rate changes and bus reconfigurations.
+  - Added `clap-host` feature to CI test matrix in `.github/workflows/ci.yml`.
+  - Added full engine lifecycle and generation swap test `test_clap_engine_lifecycle_and_generation_swap`
+    in `tests/fidelity/plugin_clap.rs`.
+
+### Fixed
+
+- **Realtime Idle Allocation Invariant**:
+  - Gated hand-tuned DSP state persistence (`persist_dsp_state`) behind `processed_commands > 0` in `src/engine/tick.rs`,
+    eliminating per-tick EQ preset cloning and restoring the invariant of exactly one heap allocation per idle tick (`Arc<PlaybackInfo>`).
+- **Dither Test Determinism**:
+  - Seeded PRNG state in `output::format_converter::tests::dither_raises_the_noise_floor_on_silence` with safe tolerance
+    bounds on quantized integer noise floor measurement, eliminating statistical test flakiness.
+- **Clippy Diagnostics**:
+  - Resolved `collapsible_if`, `manual_c_str_literals`, `unnecessary_map_or`, and `needless_return` across
+    `plugin-test-clap-echo` and `audio-engine`.
+
 ## [1.1.0] — 2026-10-14
 
 Release 1.1.0 addresses the four identified engine gaps across realtime OS scheduling,

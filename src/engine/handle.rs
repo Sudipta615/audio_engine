@@ -826,6 +826,19 @@ impl EngineHandle {
         let _ = self.send_command(EngineCommand::SetClapPluginParam { id, value });
     }
 
+    /// Runtime load of a CLAP plugin from a dynamic library path with optional plugin id.
+    pub fn load_clap_plugin(&self, path: impl AsRef<std::path::Path>, plugin_id: Option<&str>) {
+        let _ = self.send_command(EngineCommand::LoadClapPlugin {
+            path: path.as_ref().to_string_lossy().to_string(),
+            plugin_id: plugin_id.map(|s| s.to_string()),
+        });
+    }
+
+    /// Runtime unload of the active CLAP plugin.
+    pub fn unload_clap_plugin(&self) {
+        let _ = self.send_command(EngineCommand::UnloadClapPlugin);
+    }
+
     // ── Room & headphone correction ─────────────────────────
 
     /// Live toggle of the correction stage (enabled only; the loaded IR

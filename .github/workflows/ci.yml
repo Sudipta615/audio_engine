@@ -106,6 +106,8 @@ jobs:
             flags: '--features pipewire'
           - name: jack
             flags: '--features jack'
+          - name: clap-host
+            flags: '--features clap-host'
           # Backend- and platform-specific features are checked on the platform
           # that can actually compile them; `check` on the wrong target proves
           # nothing because the modules are `cfg`-gated out entirely.

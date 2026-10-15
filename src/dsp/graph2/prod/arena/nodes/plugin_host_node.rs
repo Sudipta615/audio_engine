@@ -257,11 +257,19 @@ impl PluginHostNode {
     #[cfg(not(feature = "clap-host"))]
     pub fn set_clap_param(&mut self, _id: u32, _value: f64) {}
 
+    #[cfg(feature = "clap-host")]
+    pub fn detach_clap(&mut self) {
+        self.clap_node = None;
+        self.recompute_active();
+    }
+
+    #[cfg(not(feature = "clap-host"))]
+    pub fn detach_clap(&mut self) {}
 
     fn recompute_active(&mut self) {
         let any_slot = self.slots.iter().any(|s| s.enabled);
         #[cfg(feature = "clap-host")]
-        let clap_active = self.clap_node.as_ref().map_or(false, |c| c.is_active());
+        let clap_active = self.clap_node.as_ref().is_some_and(|c| c.is_active());
         #[cfg(not(feature = "clap-host"))]
         let clap_active = false;
         self.active = self.runtime_enabled && (any_slot || clap_active);

@@ -163,8 +163,10 @@ impl MediaPlayer2Player {
     fn metadata(&self) -> HashMap<String, Value<'_>> {
         let mut map = HashMap::new();
         let info = self.handle.playback_info();
-        let track_id = ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0")
-            .unwrap_or_else(|_| ObjectPath::from_static_str_unchecked("/org/mpris/MediaPlayer2/Track/0"));
+        let track_id =
+            ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0").unwrap_or_else(|_| {
+                ObjectPath::from_static_str_unchecked("/org/mpris/MediaPlayer2/Track/0")
+            });
         map.insert("mpris:trackid".to_string(), Value::from(track_id));
 
         let duration_us = (info.duration_secs * 1_000_000.0) as i64;
@@ -173,7 +175,10 @@ impl MediaPlayer2Player {
         if let Some(ref source) = info.current_source {
             let s = source.display_name();
             if let Some(path) = source.as_path() {
-                map.insert("xesam:url".to_string(), Value::from(format!("file://{}", path.display())));
+                map.insert(
+                    "xesam:url".to_string(),
+                    Value::from(format!("file://{}", path.display())),
+                );
             } else {
                 map.insert("xesam:url".to_string(), Value::from(s.clone()));
             }

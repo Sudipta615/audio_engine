@@ -672,14 +672,10 @@ impl ConvolutionEngine {
                     self.acc_spectrum_left.as_mut_ptr() as *mut f32,
                     spec_len * 2,
                 );
-                let x_l_floats = core::slice::from_raw_parts(
-                    x_l.as_ptr() as *const f32,
-                    spec_len * 2,
-                );
-                let h_l_floats = core::slice::from_raw_parts(
-                    h_l.as_ptr() as *const f32,
-                    spec_len * 2,
-                );
+                let x_l_floats =
+                    core::slice::from_raw_parts(x_l.as_ptr() as *const f32, spec_len * 2);
+                let h_l_floats =
+                    core::slice::from_raw_parts(h_l.as_ptr() as *const f32, spec_len * 2);
                 crate::dsp::simd::dispatch::dispatch_complex_mac(
                     acc_l_floats,
                     x_l_floats,
@@ -696,14 +692,10 @@ impl ConvolutionEngine {
                             self.acc_spectrum_right.as_mut_ptr() as *mut f32,
                             spec_len * 2,
                         );
-                        let x_r_floats = core::slice::from_raw_parts(
-                            x_r.as_ptr() as *const f32,
-                            spec_len * 2,
-                        );
-                        let h_r_floats = core::slice::from_raw_parts(
-                            h_r.as_ptr() as *const f32,
-                            spec_len * 2,
-                        );
+                        let x_r_floats =
+                            core::slice::from_raw_parts(x_r.as_ptr() as *const f32, spec_len * 2);
+                        let h_r_floats =
+                            core::slice::from_raw_parts(h_r.as_ptr() as *const f32, spec_len * 2);
                         crate::dsp::simd::dispatch::dispatch_complex_mac(
                             acc_r_floats,
                             x_r_floats,
@@ -718,14 +710,10 @@ impl ConvolutionEngine {
                         self.acc_spectrum_right.as_mut_ptr() as *mut f32,
                         spec_len * 2,
                     );
-                    let x_r_floats = core::slice::from_raw_parts(
-                        x_r.as_ptr() as *const f32,
-                        spec_len * 2,
-                    );
-                    let h_l_floats = core::slice::from_raw_parts(
-                        h_l.as_ptr() as *const f32,
-                        spec_len * 2,
-                    );
+                    let x_r_floats =
+                        core::slice::from_raw_parts(x_r.as_ptr() as *const f32, spec_len * 2);
+                    let h_l_floats =
+                        core::slice::from_raw_parts(h_l.as_ptr() as *const f32, spec_len * 2);
                     crate::dsp::simd::dispatch::dispatch_complex_mac(
                         acc_r_floats,
                         x_r_floats,

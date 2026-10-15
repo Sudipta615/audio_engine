@@ -79,11 +79,7 @@ impl FirStage {
                 self.flat_buf[..hist_part_len].copy_from_slice(&self.history[start..]);
                 let in_part_len = taps - hist_part_len;
                 self.flat_buf[hist_part_len..taps].copy_from_slice(&input[..in_part_len]);
-                crate::dsp::simd::dispatch::dispatch_dot_product(
-                    &self.flat_buf,
-                    &self.coeffs,
-                    taps,
-                )
+                crate::dsp::simd::dispatch::dispatch_dot_product(&self.flat_buf, &self.coeffs, taps)
             };
             output.push(sum);
         }

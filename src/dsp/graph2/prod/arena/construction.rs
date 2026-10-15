@@ -111,13 +111,37 @@ impl GraphGeneration {
         );
 
         // The plugin host insert. Each configured slot is
-        // resolved (library path or `static:<uid>`), instantiated, and
+        // resolved (library path, CLAP plugin `clap:<path>`, or `static:<uid>`), instantiated, and
         // attached; a slot that fails to load is skipped (a broken
         // plugin never interrupts playback — the node stays
         // pass-through for that slot).
         {
             let plugin = gen_node!(self, node_id::PLUGIN, PluginHost);
             for slot in &config.plugins.slots {
+                #[cfg(feature = "clap-host")]
+                if slot.source.starts_with("clap:") || slot.source.ends_with(".clap") {
+                    let raw_path = slot.source.strip_prefix("clap:").unwrap_or(&slot.source);
+                    let (file_path, plugin_id) = if let Some((p, id)) = raw_path.split_once('#') {
+                        (p, Some(id))
+                    } else {
+                        (raw_path, None)
+                    };
+                    let path = std::path::Path::new(file_path);
+                    if path.is_file() {
+                        let mut clap_node = super::nodes::ClapPluginHostNode::new(sample_rate);
+                        if let Ok(()) = clap_node.load_plugin(path, plugin_id) {
+                            clap_node.set_enabled(slot.enabled);
+                            for &(idx, val) in &slot.params {
+                                clap_node.set_param(idx, val as f64);
+                            }
+                            if let Some(ref st) = slot.state {
+                                let _ = clap_node.load_state(st);
+                            }
+                            plugin.attach_clap(clap_node);
+                            continue;
+                        }
+                    }
+                }
                 let host = crate::dsp::graph2::prod::plugins::resolve_host(&slot.source);
                 let Some(host) = host else {
                     continue;

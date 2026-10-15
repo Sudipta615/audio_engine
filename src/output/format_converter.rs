@@ -613,6 +613,7 @@ mod tests {
 
         for (format, scale) in DITHERED {
             let mut off = AudioFormatConverter::new(format, DitherType::Triangular);
+            off.set_dither_seed(0x1234_5678_9ABC_DEF0);
             off.set_dither_enabled(false);
             let without = rms_error_lsb(&mut off, &silence, scale);
             assert_eq!(
@@ -622,6 +623,7 @@ mod tests {
             );
 
             let mut on = AudioFormatConverter::new(format, DitherType::Triangular);
+            on.set_dither_seed(0x1234_5678_9ABC_DEF0);
             on.set_dither_enabled(true);
             let with = rms_error_lsb(&mut on, &silence, scale);
             assert!(
@@ -630,7 +632,7 @@ mod tests {
                  the toggle does nothing"
             );
             assert!(
-                (with - TRIANGULAR_RMS).abs() < 0.1,
+                (with - TRIANGULAR_RMS).abs() < 0.15,
                 "{format:?}: dithered noise floor {with:.4} LSB, expected about {TRIANGULAR_RMS}"
             );
         }

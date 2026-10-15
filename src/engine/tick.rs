@@ -172,15 +172,11 @@ impl AudioEngine {
         // bounded by the host's own input rate.
         if processed_commands > 0 {
             self.publish_settings();
+            self.persist_dsp_state();
         }
         // Persist the active spatial scene when it changed (writes
         // once per change; the steady path is a plain field compare).
         self.spatial_persistence.maybe_save(&self.graph);
-        // Persist the hand-tuned DSP state (limiter, EQ preset library, output
-        // device/backend) when it changed. `save_if_changed` compares against
-        // the last state it wrote, so the steady path is a struct compare
-        // rather than disk I/O on every tick.
-        self.persist_dsp_state();
         #[cfg(feature = "audio-output")]
         self.poll_device_monitor();
         self.drain_capture();

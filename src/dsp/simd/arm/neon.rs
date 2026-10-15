@@ -199,4 +199,3 @@ pub unsafe fn complex_mac_neon(acc: &mut [f32], x: &[f32], h: &[f32], n_complex:
         crate::dsp::simd::scalar::complex_mac(acc, x, h, n_complex);
     }
 }
-

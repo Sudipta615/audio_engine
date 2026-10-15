@@ -80,24 +80,37 @@ impl MprisServer {
                     if prev_source != current_source {
                         let mut meta: std::collections::HashMap<String, zbus::zvariant::Value> =
                             std::collections::HashMap::new();
-                        let track_id = zbus::zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0")
-                            .unwrap_or_else(|_| {
-                                zbus::zvariant::ObjectPath::from_static_str_unchecked(
-                                    "/org/mpris/MediaPlayer2/Track/0",
-                                )
-                            });
-                        meta.insert("mpris:trackid".to_string(), zbus::zvariant::Value::from(track_id));
+                        let track_id =
+                            zbus::zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/0")
+                                .unwrap_or_else(|_| {
+                                    zbus::zvariant::ObjectPath::from_static_str_unchecked(
+                                        "/org/mpris/MediaPlayer2/Track/0",
+                                    )
+                                });
+                        meta.insert(
+                            "mpris:trackid".to_string(),
+                            zbus::zvariant::Value::from(track_id),
+                        );
                         let duration_us = (info.duration_secs * 1_000_000.0) as i64;
-                        meta.insert("mpris:length".to_string(), zbus::zvariant::Value::from(duration_us));
+                        meta.insert(
+                            "mpris:length".to_string(),
+                            zbus::zvariant::Value::from(duration_us),
+                        );
                         if let Some(ref source) = info.current_source {
                             let s = source.display_name();
                             if let Some(path) = source.as_path() {
                                 meta.insert(
                                     "xesam:url".to_string(),
-                                    zbus::zvariant::Value::from(format!("file://{}", path.display())),
+                                    zbus::zvariant::Value::from(format!(
+                                        "file://{}",
+                                        path.display()
+                                    )),
                                 );
                             } else {
-                                meta.insert("xesam:url".to_string(), zbus::zvariant::Value::from(s.clone()));
+                                meta.insert(
+                                    "xesam:url".to_string(),
+                                    zbus::zvariant::Value::from(s.clone()),
+                                );
                             }
                             meta.insert("xesam:title".to_string(), zbus::zvariant::Value::from(s));
                         }
@@ -164,4 +177,3 @@ mod tests {
         }
     }
 }
-

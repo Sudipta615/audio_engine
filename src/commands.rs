@@ -188,7 +188,17 @@ pub enum EngineCommand {
     /// CLAP audio plugin host: live enable toggle.
     SetClapPluginEnabled(bool),
     /// CLAP audio plugin host: live parameter change (id, value).
-    SetClapPluginParam { id: u32, value: f64 },
+    SetClapPluginParam {
+        id: u32,
+        value: f64,
+    },
+    /// CLAP audio plugin host: load plugin from library path with optional plugin id.
+    LoadClapPlugin {
+        path: String,
+        plugin_id: Option<String>,
+    },
+    /// CLAP audio plugin host: unload active CLAP plugin.
+    UnloadClapPlugin,
     /// Spatial master: renderer quality tier (spec §86).
     SetSpatialQuality(config::SpatialQuality),
     /// Spatial master: voice budget (spec §76). `enabled == false`
