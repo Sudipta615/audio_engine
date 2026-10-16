@@ -404,9 +404,13 @@ fn make_relative(path: &Path, base: Option<&Path>) -> String {
 fn normalize(path: &Path) -> PathBuf {
     let mut out: Vec<std::ffi::OsString> = Vec::new();
     let mut rooted = false;
+    let mut prefix: Option<std::ffi::OsString> = None;
     for component in path.components() {
         use std::path::Component;
         match component {
+            Component::Prefix(p) => {
+                prefix = Some(p.as_os_str().to_os_string());
+            }
             Component::RootDir => {
                 rooted = true;
                 out.clear();
@@ -425,12 +429,22 @@ fn normalize(path: &Path) -> PathBuf {
                 }
             }
             Component::Normal(part) => out.push(part.to_os_string()),
-            Component::Prefix(_) => {}
         }
     }
     let mut result = PathBuf::new();
-    if rooted {
-        result.push(std::path::MAIN_SEPARATOR.to_string());
+    match (prefix, rooted) {
+        (Some(p), true) => {
+            let mut s = p;
+            s.push(std::path::MAIN_SEPARATOR.to_string());
+            result.push(s);
+        }
+        (Some(p), false) => {
+            result.push(p);
+        }
+        (None, true) => {
+            result.push(std::path::MAIN_SEPARATOR.to_string());
+        }
+        (None, false) => {}
     }
     for part in out {
         result.push(part);

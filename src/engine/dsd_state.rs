@@ -26,7 +26,9 @@ pub fn dop_exclusive_reason(
              backend not available through cpal)"
                 .to_string()
         } else {
-            "a native CoreAudio hog-mode backend (not available through cpal)".to_string()
+            "ExclusiveCoreAudioHog (a native CoreAudio hog-mode backend, \
+             not available through cpal)"
+                .to_string()
         };
         format!(
             "the backend is Auto (shared device); switch to an exclusive backend \

@@ -4,7 +4,7 @@
 
 ### Independent, Headless, Bit-Perfect Audiophile Audio & DSP Engine built with pure Rust
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg?style=flat-square&logo=rust)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg?style=flat-square)](LICENSE-APACHE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg?style=flat-square&logo=rust)](Cargo.toml)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg?style=flat-square)](#-hardware-output-backends--os-integration)

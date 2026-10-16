@@ -37,8 +37,12 @@
 # is entirely in `deny.toml`.
 
 [advisories]
-# Empty. No RustSec advisory is currently ignored for this workspace.
-ignore = []
+# RUSTSEC-2024-0436: paste is an unmaintained macro crate archived by dtolnay,
+# reached transitively via lofty 0.22. It is a proc macro with no security vulnerabilities.
+# date: 2026-10-16, expiry: 2027-01-16
+ignore = [
+    "RUSTSEC-2024-0436",
+]
 
 # Anything else cargo-audit accepts in this file is deliberately left at its
 # default rather than restated: `[advisories] vulnerability`, `unmaintained`,

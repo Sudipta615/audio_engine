@@ -217,46 +217,61 @@ fn multichannel_master_passes_through_bit_exact_when_the_layout_is_unknown() {
     assert_eq!(on, off, "MC output bit-exact with the node enabled");
 }
 
-/// The other half of the same contract: with the layout configured, a
-/// multichannel master is routed rather than passed through, and the routing
-/// is stable across repeated blocks (the interleaved scratch is cleared, so
-/// `render_beds`' accumulate-into-output behaviour cannot double the signal).
+/// The other half of the same contract: with the layout configured, the node
+/// selects the layout-driven renderer for a multichannel master instead of
+/// declining it, and the routing is a role-to-speaker round trip.
+///
+/// The master is handed to the renderer as a **bed**, so each channel lands on
+/// the speaker carrying its semantic role (`render_beds`). For a master whose
+/// layout matches the output that round trip is *transparent* — a second
+/// panning round would scramble an already-spatial master — so the observable
+/// proof that the renderer is in the production path is
+/// `SpatialNode::multichannel_rendering_active`, not a level change. The
+/// routed master must still be finite and stable block-to-block (the
+/// interleaved scratch is cleared, so `render_beds`' accumulate-into-output
+/// behaviour cannot double the signal).
 #[test]
 fn multichannel_master_is_routed_once_the_layout_is_configured() {
     let layout = ChannelLayout::FivePointOne;
     let channels = layout.channel_count();
     let frames = 128;
-    let run = |enabled: bool, set_layout: bool| -> Vec<f32> {
+    let run = |enabled: bool| -> (Vec<f32>, bool) {
         let mut g = DspGraph::from_config(&EngineConfig::default(), SR as f32);
-        if set_layout {
-            g.set_multichannel_layout(&layout);
-        }
+        g.set_multichannel_layout(&layout);
         g.set_spatial_enabled(enabled);
         g.drain_queued_control();
         let mut interleaved: Vec<f32> = (0..channels * frames)
             .map(|i| (i as f32 * 0.001).sin() * 0.25)
             .collect();
         g.process_block_multichannel(&mut interleaved, channels);
-        interleaved
+        (interleaved, g.spatial().multichannel_rendering_active())
     };
 
-    let routed_on = run(true, true);
-    let routed_off = run(false, true);
+    let (routed_on, renderer_active) = run(true);
     assert!(
-        routed_on != routed_off,
-        "with a 5.1 layout configured, enabling the node must change the \
-         multichannel output — otherwise the layout-driven renderer is not \
-         actually in the path"
+        renderer_active,
+        "with a 5.1 layout configured, the layout-driven renderer must be in \
+         the path — otherwise the node is declining a master it can route"
     );
     assert!(
         routed_on.iter().all(|v| v.is_finite()),
         "the routed multichannel output must be finite"
     );
 
+    // Role-to-speaker routing of a 5.1 master onto a 5.1 output is a
+    // transparent round trip: enabling the node reproduces the master rather
+    // than adding a second panning round.
+    let (routed_off, _) = run(false);
+    assert_eq!(
+        routed_on, routed_off,
+        "routing a 5.1 master onto the matching layout is a transparent \
+         round trip; enabling the node must not rescale or re-pan it"
+    );
+
     // Block-to-block stability: the same block twice must render identically.
     assert_eq!(
         routed_on,
-        run(true, true),
+        run(true).0,
         "an identical second block must render identically (no accumulation)"
     );
 }

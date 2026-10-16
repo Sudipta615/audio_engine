@@ -322,7 +322,7 @@ checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
 name = "audio-engine"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "alsa",
  "ape-decoder",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1112,7 +1112,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "engine-tui"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "audio-engine",
  "config",
@@ -2472,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "plugin-abi"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "libloading",
  "serde",
@@ -2480,14 +2480,14 @@ dependencies = [
 
 [[package]]
 name = "plugin-test-clap-echo"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "clap-sys",
 ]
 
 [[package]]
 name = "plugin-test-echo"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "plugin-abi",
  "serde",
@@ -2882,9 +2882,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",

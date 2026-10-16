@@ -41,7 +41,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Test (${{ matrix.profile }})
+    name: Test (${{ matrix.os }}, ${{ matrix.profile }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -172,6 +172,9 @@ jobs:
   audit:
     name: Advisories (cargo-audit)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
 

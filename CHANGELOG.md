@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-10-16
+
+Patch release closing the CI-failing defects reported against 1.2.0: two
+platform-specific behaviour/test bugs, the RustSec advisories that turned the
+dependency-policy job red, and one over-strict spatial acceptance test.
+
+### Fixed
+
+- **Windows playlist relativisation dropped the drive prefix.** `normalize()` in
+  `src/playlist/io.rs` matched `Component::Prefix(_)` with an empty arm, so a
+  drive-qualified path was folded without its `C:`. A playlist written beside its
+  tracks then read back resolved `…\playlist_rel_test\a.flac` to the rootless
+  `\playlist_rel_test\a.flac`. The prefix is now captured and reattached, so a
+  round trip on Windows returns the original absolute path.
+- **macOS DoP fallback did not name an exclusive backend.** `dop_exclusive_reason`
+  suggested "a native CoreAudio hog-mode backend" without naming the
+  `AudioBackend` variant to select, so the Auto/shared-backend hint was not
+  actionable on macOS. The macOS arm now names `ExclusiveCoreAudioHog`.
+- **RustSec advisories.** `rustls` is upgraded to 0.23.46, clearing
+  RUSTSEC-2026-0346 / 0347 / 0348 / 0349. `RUSTSEC-2024-0436` (`paste`, an
+  unmaintained macro-only crate reached transitively through `lofty 0.22`) is
+  ignored in both `.cargo/audit.toml` and `deny.toml`, each with a documented
+  reason and expiry.
+
+### Changed
+
+- **Spatial multichannel acceptance test corrected.** `tests/fidelity/spatial_node.rs`
+  asserted that enabling the node on a layout-matching 5.1 master must change the
+  output. The documented contract — and `SpatialNode`'s own unit test — is a
+  *transparent* role-to-speaker bed round trip, so the assertion could never hold.
+  The test now pins that the layout-driven renderer is actually engaged
+  (`multichannel_rendering_active`), plus finiteness, transparency, and
+  block-to-block stability.
+- **Release packaging and CI.** The release workflow stages binaries into a
+  per-platform archive (tar.gz everywhere, zip on Windows) and leaves publishing
+  to the dedicated `publish` job; the advisory CI job declares the
+  `checks: write` permission it needs.
+
 ## [1.2.0] — 2026-10-15
 
 Release 1.2.0 finalizes end-to-end CLAP plugin hosting integration with Graph 2.0, establishes
